@@ -1,4 +1,4 @@
-import { $, el, fail, show, readToken } from './app';
+import { $, el, fail, notice, show, showLogin, readToken } from './app';
 import { api, readApi } from './api';
 import { CloudflareChangeList, CloudflareLink, CloudflareStatus, DeviceList, DeviceSetup, DeviceView } from '../src/devices/contracts';
 import { cs } from './console';
@@ -73,6 +73,7 @@ async function prepare() {
   } catch (error) { fail(error); $('device-state').textContent = '准备失败。再次点击可重试同一设备；已创建的连接会复用。'; }
   finally { $('device-create').disabled = false; }
 }
+const callbackPrefix = '#cloudflare?';
 const loginKey = 'cs-agent-cloudflare-state';
 export function initDevices() {
   $('device-cloudflare').addEventListener('click', async () => {
@@ -81,21 +82,11 @@ export function initDevices() {
       const link = await readApi(CloudflareLink, 'POST', '/admin/devices/cloudflare/start');
       const url = new URL(link.url), state = url.searchParams.get('state');
       if (url.origin !== 'https://dash.cloudflare.com' || url.pathname !== '/oauth2/auth' || !state) throw new Error('device_oauth_state');
-      sessionStorage.setItem(loginKey, state);
+      try { sessionStorage.setItem(loginKey, state); }
+      catch { show('浏览器无法保存授权状态，请允许此站点使用标签页存储后重试。', 'error'); return; }
       location.assign(url.href);
     } catch (error) { fail(error); } finally { button.disabled = false; }
   });
-  if (typeof location !== 'undefined' && location.hash.startsWith('#cloudflare?')) {
-    const query = new URLSearchParams(location.hash.slice('#cloudflare?'.length));
-    history.replaceState(null, '', location.pathname);
-    cs.view = 'models'; $('device-editor').open = true;
-    const expected = sessionStorage.getItem(loginKey); sessionStorage.removeItem(loginKey);
-    const state = query.get('state'), code = query.get('code');
-    if (code && expected && state === expected && readToken()) {
-      void readApi(CloudflareStatus, 'POST', '/admin/devices/cloudflare/complete', { state, code })
-        .then(async grant => { await loadDevices(); show('Cloudflare 已授权，设备域名为 ' + grant.domain, 'success'); }).catch(fail);
-    } else show('授权未完成，请从本页重新发起。', 'error');
-  }
   $('device-editor').addEventListener('toggle', () => { if ($('device-editor').open) void loadDevices().catch(fail); else { $('device-link').value = ''; $('device-pairing').hidden = true; } });
   $('device-reload').addEventListener('click', () => { void loadDevices().catch(fail); });
   $('device-create').addEventListener('click', () => {
@@ -104,5 +95,27 @@ export function initDevices() {
     if (!draft || draft.name !== name || draft.desktop !== desktop) draft = { id: crypto.randomUUID(), name, desktop };
     void prepare();
   });
-  $('device-copy').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('device-link').value); show('已复制，粘贴到设备客户端的提示中。', 'success'); } catch (error) { fail(error); } });
+  $('device-copy').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('device-link').value); notice('已复制，粘贴到设备客户端的提示中。'); } catch (error) { fail(error); } });
+  if (location.hash.startsWith(callbackPrefix)) cs.view = 'models';
+}
+
+// 在管理台初始化并显示主人会话后处理回调，保留当前标签页的错误提示。
+export async function completeCloudflareLogin() {
+  if (!location.hash.startsWith(callbackPrefix)) return;
+  const query = new URLSearchParams(location.hash.slice(callbackPrefix.length));
+  history.replaceState(null, '', location.pathname);
+  $('device-editor').open = true;
+  let expected: string | null = null;
+  try {
+    expected = sessionStorage.getItem(loginKey);
+    sessionStorage.removeItem(loginKey);
+  } catch { expected = null; }
+  if (!readToken()) { showLogin('授权未完成，请登录后从设备面板重新授权。'); return; }
+  const state = query.get('state'), code = query.get('code');
+  if (!code || !expected || state !== expected) { show('授权未完成，请从本页重新发起。', 'error'); return; }
+  try {
+    const grant = await readApi(CloudflareStatus, 'POST', '/admin/devices/cloudflare/complete', { state, code });
+    await loadDevices();
+    notice('Cloudflare 已授权，设备域名为 ' + grant.domain);
+  } catch (error) { fail(error); }
 }

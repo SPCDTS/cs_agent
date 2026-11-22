@@ -9,7 +9,7 @@ import { initMemory } from "./memory";
 import { initAccess } from "./access";
 import { initWorkspace } from "./workspace";
 import { initMcp } from "./mcp";
-import { initDevices } from './devices';
+import { completeCloudflareLogin, initDevices } from './devices';
 import { initMcpServers } from "./mcp-servers";
 
 initConsole();
@@ -25,3 +25,4 @@ initMcp();
 initMcpServers();
 initDevices();
 initApp();
+void completeCloudflareLogin();

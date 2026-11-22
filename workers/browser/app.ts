@@ -109,7 +109,7 @@ export function describe(error: unknown) {
   }
   return "网络错误，请稍后再试";
 }
-export function show(message: string, tone: string) {
+export function show(message: string, tone: "info" | "error") {
   const line = $("status");
   line.textContent = message;
   line.className = "status-line " + tone;
