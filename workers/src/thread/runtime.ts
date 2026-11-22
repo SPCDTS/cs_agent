@@ -29,7 +29,7 @@ import { cleanOutgoing } from '../send-clean';
 import { hostedSearchSteps } from '../tools/web-search';
 import { createWebPageTool } from '../tools/web-page';
 import { createImageTool } from '../tools/imagegen';
-import { createAccessExtension, type AccessDeps } from '../tools/access';
+import { createAccessExtension } from '../tools/access';
 import { createCloudflareExtension } from '../tools/cloudflare';
 import { createWorkspaceAdminExtension } from '../tools/workspace-admin';
 import { createMediaExtension } from '../tools/media';
@@ -237,15 +237,21 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     },
     record: (kind, detail) => host.audit(kind, detail),
   }));
-  const allowManage: AccessDeps['allowManage'] = async (api,c) => {
+  const ownerManagementInput = async (api: ToolExecutionApi, c: Context) => {
     const input = await host.currentInput(harness, api, api.conversationId, c);
-    if (!input || host.ownerTurnKind(input) !== "message" || input.session_generation !== await host.sessionGeneration()) return;
-    const id = isWebAdmin(input) ? ownerIds(host.env)[0] : input.user_id;
-    return id ? "qq:" + id : undefined;
+    if (input && host.ownerTurnKind(input) === 'message' && input.session_generation === await host.sessionGeneration()) return input;
   };
-  if (memory.ns === 'owner') registry.install(createCloudflareExtension(allowManage, () => host.env.REGISTRY.getByName('main')));
+  const ownerMayManage = async (api: ToolExecutionApi, c: Context) => !!await ownerManagementInput(api, c);
+  if (memory.ns === 'owner') registry.install(createCloudflareExtension(ownerMayManage, () => host.env.REGISTRY.getByName('main'),
+    detail => host.audit('cloudflare_management', detail)));
   registry.install(createAccessExtension({
-    allowManage, registry:()=>host.env.REGISTRY.getByName("main"),bridge:()=>host.env.BRIDGE.getByName("napcat"),
+    allowManage: async (api, c) => {
+      const input = await ownerManagementInput(api, c);
+      if (!input) return;
+      const id = isWebAdmin(input) ? ownerIds(host.env)[0] : input.user_id;
+      return id ? 'qq:' + id : undefined;
+    },
+    registry:()=>host.env.REGISTRY.getByName("main"),bridge:()=>host.env.BRIDGE.getByName("napcat"),
   }));
   registry.install(createWorkspaceAdminExtension({
     allowed: ownerTaskAllowed,
@@ -279,9 +285,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
   }, await host.env.REGISTRY.getByName("main").mcpConfig(), { scope: memory.ns, callerNamespace: host.ctx.id.toString(),
     current: (id, digest) => host.env.REGISTRY.getByName("main").mcpServerCurrent(id, digest) });
   await mcp?.restore();
-  if (memory.ns === "owner") registry.install(createMcpManagementExtension(host.env,
-    async (api, c) => { const input = await host.currentInput(harness, api, api.conversationId, c);
-      return !!input && host.ownerTurnKind(input) === "message" && input.session_generation === await host.sessionGeneration(); },
+  if (memory.ns === "owner") registry.install(createMcpManagementExtension(host.env, ownerMayManage,
     async refresh => { await mcp.syncConfig(await host.env.REGISTRY.getByName("main").mcpConfig()); if (refresh) await mcp.refreshAll(); },
     change => host.audit("mcp_management", { ...change, source: "agent" })));
   const codemode = installCodemode(registry, {

@@ -14,7 +14,7 @@ export { loadMemory } from "./memory";
 import { ADMIN_PAGE_SIZE } from "../src/admin/pagination";
 
 export const EVENT_KINDS = ["", "mcp_call", "mcp_catalog", "mcp_management", "memory_extract", "memory_write"];
-export const MORE_KINDS = ["web_search", "generate_image", "coding_exec", "coding_read", "coding_write", "coding_edit"];
+export const MORE_KINDS = ["cloudflare_management", "web_search", "generate_image", "coding_exec", "coding_read", "coding_write", "coding_edit"];
 export const LOGIN: Record<string, [string, string]> = { ok: ["已登录", "ok"], needed: ["需要登录", "warn"], error: ["凭据错误", "bad"], unconfigured: ["未配置", "neutral"] };
 export const CREDENTIAL: Record<string, string> = { oauth: "OAuth（CIMD）", static: "静态凭据", none: "无凭据" };
 export const ERRORS: Record<string, string> = {
@@ -269,6 +269,7 @@ export async function cancelSubagent(key: string, id: string) {
   refresh();
 }
 export const EVENT_FORMAT: Record<string, (detail: C.EventDetail) => { parts: unknown[]; result: unknown }> = {
+  cloudflare_management: d => ({ parts: [d.tool, d.action], result: d.result }),
   mcp_management: d => ({ parts: [d.server, d.action, d.source], result: "ok" }),
   mcp_call: d => ({ parts: [d.server, d.tool, duration(d.ms), "入 " + bytes(d.inputBytes) + " / 出 " + bytes(d.outputBytes)], result: d.result }),
   mcp_catalog: d => ({ parts: [d.server, typeof d.tools === "number" ? d.tools + " 个工具" : null, typeof d.rejected === "number" ? "拒绝 " + d.rejected : null,
