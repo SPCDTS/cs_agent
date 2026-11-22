@@ -8,13 +8,13 @@
 - `authorize/repository/recall/lookup/metadata`：回合授权、资产仓库、调用、媒体元数据查找。
 - `get_msg`：仅在本会话已持有消息且本地媒体记录为空时回退查 OneBot。
 - `resolve_url` 在选定附件后解析引用。私聊和群聊的普通文件都用 `get_file`，图片用 `get_image`，语音用 `get_record`。
-- NapCat 回传 base64 时，`get_file` 或 `get_image` 阶段覆盖 Bridge 接收内容和写入私有资产的全过程。宿主读取资产记为 `asset_get`。通过公网链接导入时分别记录 `download` 和 `store`。
+- `get_file` 和 `get_image` 记录 NapCat 取件；`download` 记录公网下载，`asset_get` 记录读取既有私有资产。可写工作区的 `qq_attachment` 用 `workspace_write` 记录文件提交，返回的 `path` 可直接交给 Code Mode。写入私有资产记为 `store`。
 - `audit`：最终审计写入。成功结果不会因审计失败变成附件失败；失败审计也不会覆盖原业务错误，且不自动重试。
 - 发送复用安全边界并记录 `export/deliver`，不改变发送幂等或授权政策。
 
 每个执行阶段输出 start / success 或 failure、毫秒耗时。集合阶段可能没有 ordinal；附件阶段带 1–100 的 ordinal。
 scope 来自宿主核验的物理会话（不是模型提供的目标）；授权完成前为 unknown。
-并行解析各附件共享 traceId，但 ordinal 独立。错误审计包含最先失败的阶段。
+工具逐件读取和保存附件，各附件共享 traceId，按 ordinal 区分。错误审计包含最先失败的阶段。
 日志有界：工具最多选择5个附件；不逐块、逐字节或逐重定向输出。
 
 ## 错误与隐私

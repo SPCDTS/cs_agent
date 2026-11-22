@@ -5,8 +5,8 @@ import { cleanName, id, inboundKey, isAllowed, isRecord, isTriggered, policyFrom
 import { SendRules } from "./send-rules";
 import { effectiveSettings, type SettingsSnapshot } from "./settings";
 import { DeliveryStore, type AuthorizedQqIntent, type SystemQqIntent, type DeliveryState, type Delivery, type DeliverySource } from "./delivery";
-import { MediaRepository, type AssetRef } from "./media/repository";
-import { FILE_MAX_BYTES, validScope } from "./media/model";
+import { MediaRepository } from "./media/repository";
+import { FILE_MAX_BYTES, imageMime } from "./media/model";
 import { logDiag } from "./shared/diagnostics";
 
 type Attachment = { id: string; active: boolean };
@@ -311,9 +311,8 @@ export class BridgeDO extends DurableObject<Env> {
   getMessage(messageId:string):Promise<unknown>{if(!/^-?\d{1,20}$/.test(messageId))throw new Error("invalid_message_id");return this.call("get_msg",{message_id:messageId});}
   getHistory(target:Target,count=20):Promise<unknown>{if(!Number.isInteger(count)||count<1||count>100)throw new Error("invalid_history_limit");return this.call(target.kind==="group"?"get_group_msg_history":"get_friend_msg_history",target.kind==="group"?{group_id:target.groupId,count}:{user_id:target.userId,count});}
   /** 普通文件由 NapCat 按消息中的文件引用读取。只有返回公网链接时才交给宿主下载。 */
-  async getFileAttachment(file: string, scope: string, name?: string): Promise<AssetRef | string> {
+  async getFileAttachment(file: string): Promise<{ bytes: Uint8Array; name: string } | string> {
     this.validMediaFile(file);
-    validScope(scope);
     const result = await this.call("get_file", { file });
     if (!isRecord(result) || typeof result.base64 !== "string") return this.mediaUrl(result, "napcat_file_content_missing");
     const bytes = decodeMediaContent(result.base64, "invalid_file_content");
@@ -321,20 +320,16 @@ export class BridgeDO extends DurableObject<Env> {
     if ((typeof size === "number" || typeof size === "string" && /^\d+$/.test(size)) && Number(size) !== bytes.byteLength) {
       throw new Error("invalid_file_content");
     }
-    return new MediaRepository({ bucket: this.env.ASSETS, scope }).put({
-      bytes, kind: "file", name: name || (typeof result.file_name === "string" && result.file_name) || "file",
-    });
+    return { bytes, name: typeof result.file_name === "string" && result.file_name || "file" };
   }
   /** QQ 图片由本机下载，经 OneBot 回传内容；不使用返回的 QQ URL。 */
-  async getImage(file: string, scope: string): Promise<AssetRef> {
+  async getImage(file: string): Promise<{ bytes: Uint8Array; name: string }> {
     this.validMediaFile(file);
-    validScope(scope);
     const result = await this.call("get_image", { file });
     if (!isRecord(result) || typeof result.base64 !== "string" || !result.base64) throw new Error("napcat_image_content_missing");
     const bytes = decodeMediaContent(result.base64, "invalid_image_content");
-    return new MediaRepository({ bucket: this.env.ASSETS, scope }).put({
-      bytes, kind: "image", name: typeof result.file_name === "string" ? result.file_name : "image",
-    });
+    if (!imageMime(bytes)) throw new Error("unsupported_image");
+    return { bytes, name: typeof result.file_name === "string" && result.file_name || "image" };
   }
   async getRecord(file:string):Promise<string>{this.validMediaFile(file);return this.mediaUrl(await this.call("get_record",{file,out_format:"mp3"}));}
   async getFile(file:string):Promise<string>{this.validMediaFile(file);return this.mediaUrl(await this.call("get_file",{file}));}

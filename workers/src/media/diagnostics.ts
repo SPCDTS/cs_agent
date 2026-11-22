@@ -3,7 +3,7 @@ import { SANDBOX_FAILURES } from "../sandbox/client";
 /** 附件诊断只接受固定字段；不记录 URL、文件名、正文、请求/响应或原始异常。 */
 export type MediaStage = "authorize" | "repository" | "recall" | "send" | "lookup" | "metadata" | "get_msg"
   | "resolve_url" | "get_file" | "get_image" | "get_record"
-  | "download" | "store" | "asset_get" | "export" | "deliver" | "audit";
+  | "download" | "store" | "asset_get" | "workspace_write" | "export" | "deliver" | "audit";
 const codes = new Set([
   ...SANDBOX_FAILURES, "sandbox_not_found",
   "media_access_denied", "media_not_found", "media_scope_denied", "media_message_mismatch", "media_reference_missing",
@@ -11,7 +11,7 @@ const codes = new Set([
   "media_download_failed", "message_recalled", "invalid_media", "invalid_scope", "invalid_asset", "invalid_message_id",
   "invalid_media_reference", "napcat_image_content_missing", "invalid_image_content", "napcat_file_content_missing", "invalid_file_content",
   "asset_not_found", "asset_scope_denied", "asset_corrupt", "unsupported_image", "too_large",
-  "permission_denied", "path_denied", "channel_down", "onebot_failed", "onebot_timeout", "onebot_disconnected",
+  "attachment_path_ambiguous", "permission_denied", "path_denied", "channel_down", "onebot_failed", "onebot_timeout", "onebot_disconnected",
 ]);
 export type MediaErrorDetail = { code: string; errorType: string; status?: number; retcode?: number };
 export function mediaErrorDetail(error: unknown): MediaErrorDetail {

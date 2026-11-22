@@ -15,7 +15,7 @@ export type WorkspaceManifest = Static<typeof ManifestSchema>;
 export type WorkspaceOperation = { kind: "exec"; command: string; cwd?: string; timeoutMs?: number }
   | { kind: "read"; path: string; offset?: number; limit?: number }
   | { kind: "write"; path: string; text: string }
-  | { kind: "writeBytes"; path: string; data: Uint8Array }
+  | { kind: "writeBytes"; path: string; data: Uint8Array; createOnly?: boolean }
   | { kind: "mkdir" | "remove"; path: string }
   | { kind: "edit"; path: string; edits: FileEdit[] };
 export type WorkspaceOperationResult = ExecResult | ReadResult | { bytes: number } | { replaced: number } | { done: true };
@@ -153,8 +153,9 @@ export class WorkspaceManager {
         return { status: "committed", persistence: "committed", revision: manifest.revision, result: await this.execute(input.operation) };
       }
       if (input.operation.kind === "writeBytes" && (!(input.operation.data instanceof Uint8Array) || input.operation.data.byteLength > FILE_MAX_BYTES)) throw new Error("too_large");
+      const digest = input.operation.kind === "writeBytes" ? await sha256(input.operation.data) : undefined;
       const fingerprint = await sha256(JSON.stringify(input.operation.kind === "writeBytes"
-        ? { ...input.operation, data: await sha256(input.operation.data) } : input.operation)), key = `workspace:op:${await sha256(input.operationId)}`;
+        ? { ...input.operation, data: digest } : input.operation)), key = `workspace:op:${await sha256(input.operationId)}`;
       const previous = await this.deps.storage.get<OperationRecord>(key);
       if (previous) {
         if (previous.fingerprint !== fingerprint) throw new Error("operation_conflict");
@@ -177,6 +178,17 @@ export class WorkspaceManager {
         }
       }
       const manifest = await this.manifest();
+      const destination = input.operation.kind === "writeBytes" && input.operation.createOnly ? relativeWorkPath(input.operation.path) : undefined;
+      if (destination) {
+        const existing = manifest.files.find(file => file.path === destination);
+        if (existing && existing.sha256 === digest) {
+          return { status: "committed", persistence: "committed", revision: manifest.revision, result: { bytes: existing.bytes } };
+        }
+        if (existing || manifest.directories.includes(destination) || manifest.files.some(file => destination.startsWith(file.path + "/"))) {
+          throw new Error("workspace_conflict");
+        }
+        if (destination.split("/").some(part => [".git", ".wrangler", "node_modules"].includes(part))) throw new Error("path_denied");
+      }
       await this.ensureRuntime(manifest);
       const epoch = (await this.deps.storage.get<number>(EPOCH) ?? 0) + 1;
       await this.deps.storage.put(EPOCH, epoch);
@@ -186,7 +198,9 @@ export class WorkspaceManager {
         const result = await this.execute(input.operation);
         executed = true;
         const retainedPaths = [...manifest.files.map(file => file.path), ...manifest.directories];
-        const committed = await this.commit(await this.deps.runtime.snapshot(retainedPaths), manifest, epoch);
+        const snapshot = await this.deps.runtime.snapshot(retainedPaths);
+        if (destination && !snapshot.files.some(file => file.path === destination && file.sha256 === digest)) throw new Error("persistence_failed");
+        const committed = await this.commit(snapshot, manifest, epoch);
         const resultKey = `${await this.prefix()}/results/${await sha256(input.operationId)}`;
         const encodedResult = JSON.stringify(result);
         const storedResult: Extract<OperationRecord, { state: "committed" }>["result"] = new TextEncoder().encode(encodedResult).length <= 32768 ? { kind: "inline", value: result } : { kind: "r2", key: resultKey };

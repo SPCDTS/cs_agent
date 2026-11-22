@@ -31,11 +31,12 @@ function fixture(source: VerifiedMediaSource = privateSource, bridge?: MediaLook
   const record = vi.fn(async (_kind: string, _detail: object) => {});
   const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(new Uint8Array([1, 2, 3])));
   const deps: MediaDeps = {
+    bridge: bridge ?? rpc, canWriteWorkspace: async () => false, saveAttachment: async () => { throw new Error("unexpected_write"); },
     allowed: async () => true, scope: async () => source.scope, repository: async () => repo,
     lookup: (messageId, _api, _context, selection, trace) => lookupHostMedia({ database, bridge: bridge ?? rpc, source, messageId, selection, trace }),
     sandbox: async () => { throw new Error("unused"); }, deliver: async () => {}, record, log: event => logs.push(event),
   };
-  const run = async (args: { message_id: string; ordinal?: number } = { message_id: "1", ordinal: 1 }) => {
+  const run = async (args: { message_id: string; ordinal?: number; path?: string } = { message_id: "1", ordinal: 1 }) => {
     const tool: ToolRegistration = createMediaExtension(deps).tools!.find(tool => tool.name === "qq_attachment")!;
     return tool.execute(args, {} as ToolExecutionApi, {} as Context);
   };
@@ -162,10 +163,14 @@ describe("错误结构与原始异常", () => {
 it.each<VerifiedMediaSource>([
   { ...privateSource, namespace: "owner" },
   { scope: "group:200000001", namespace: "group:200000001", target: { kind: "group", groupId: "200000001" } },
-])("qq_attachment 在 $scope 按 file_id 取回原始字节并存入对应命名空间", async source => {
+])("qq_attachment 在 $scope 按 file_id 取回原始字节并直接交给工作区", async source => {
   const f = fixture(source, env.BRIDGE.getByName("napcat")), { socket, frames } = await connect(sockets);
   f.setItems([{ kind: "file", ordinal: 1, fileId: "platform-id", file: "报告.bin", url, name: "报告.bin" }]);
-  const pending = f.run();
+  f.deps.canWriteWorkspace = async () => true;
+  const write = vi.fn<MediaDeps["saveAttachment"]>(async () => {});
+  f.deps.saveAttachment = write;
+  const custom = source.namespace === "owner";
+  const pending = f.run({ message_id: "1", ordinal: 1, ...(custom ? { path: "inbox/报告.bin" } : {}) });
   const frame = await action(frames, 0, "get_file");
   expect(frame.params).toEqual({ file: "platform-id" });
   const data = { file: "/qq/cache/blob", url: "/qq/cache/blob", base64: "AP+A", file_size: "3", file_name: "blob" };
@@ -173,9 +178,11 @@ it.each<VerifiedMediaSource>([
   const result = await pending, output = result.output?.[0];
   expect(result.isError).not.toBe(true);
   if (output?.type !== "text") throw new Error("missing_ref");
-  const stored = await f.repo.get(JSON.parse(output.text).id);
-  expect(stored.ref).toMatchObject({ kind: "file", name: "报告.bin", scope: source.namespace });
-  expect(stored.bytes).toEqual(new Uint8Array([0, 255, 128]));
+  const saved = JSON.parse(output.text);
+  expect(saved).toMatchObject({ name: "报告.bin", kind: "file", bytes: 3 });
+  expect(saved.path).toMatch(custom ? /^\/work\/inbox\/报告\.bin$/ : /^\/work\/attachments\/[a-f0-9]{64}\/报告\.bin$/);
+  expect(write.mock.calls[0]?.slice(0, 2)).toEqual([saved.path, new Uint8Array([0, 255, 128])]);
+  expect((await env.ASSETS.list()).objects).toHaveLength(0);
   expect(frames).toHaveLength(1);
   expect(f.fetcher).not.toHaveBeenCalled();
   expect(JSON.stringify([f.logs, f.record.mock.calls, result.output])).not.toContain(data.base64);
@@ -192,6 +199,27 @@ it.each([
   expect((await pending).isError).toBe(true);
   expect(f.logs.find(row => row.stage === "get_file" && row.state === "failure")).toMatchObject({ code });
   expect(f.fetcher).not.toHaveBeenCalled();
+});
+
+it("指定路径要求写权限、仅选一个附件且位于工作区内", async () => {
+  const f = fixture();
+  expect(JSON.stringify((await f.run({ message_id: "1", path: "package.zip" })).output)).toContain("permission_denied");
+  f.deps.canWriteWorkspace = async () => true;
+  expect(JSON.stringify((await f.run({ message_id: "1", path: "../escape.zip" })).output)).toContain("path_denied");
+  f.setItems([{ kind: "file", ordinal: 1, fileId: "one" }, { kind: "file", ordinal: 2, fileId: "two" }]);
+  expect(JSON.stringify((await f.run({ message_id: "1", path: "package.zip" })).output)).toContain("attachment_path_ambiguous");
+  expect(f.rpc.getFileAttachment).not.toHaveBeenCalled();
+});
+
+it("工作区写失败保留原错误，不写私有资产或返回成功路径", async () => {
+  const f = fixture(), put = vi.spyOn(f.repo, "put");
+  f.deps.canWriteWorkspace = async () => true;
+  f.deps.saveAttachment = async () => { throw new Error("workspace_quota"); };
+  const result = await f.run({ message_id: "1", ordinal: 1, path: "inbox/sensitive.zip" });
+  expect(result.isError).toBe(true);
+  expect(f.record.mock.calls[0]?.[1]).toMatchObject({ result: "workspace_quota", failedStage: "workspace_write" });
+  expect(JSON.stringify([result.output, f.logs, f.record.mock.calls])).not.toContain("sensitive.zip");
+  expect(put).not.toHaveBeenCalled();
 });
 
 it("真实OneBot拒绝仅传递有界retcode，宿主trace不依赖RPC自定义异常字段", async () => {
@@ -218,7 +246,7 @@ it("已有资产读取可追踪且不重新下载，损坏资产保留稳定错�
   expect(f.record.mock.calls.at(-1)?.[1]).toMatchObject({ result: "asset_corrupt", failedStage: "asset_get" });
 });
 
-it("未指定ordinal时并行解析的失败仍关联正确附件", async () => {
+it("未指定ordinal时逐件读取的失败仍关联正确附件", async () => {
   const f = fixture();
   f.setItems([{ kind: "file", ordinal: 1, fileId: "first" }, { kind: "file", ordinal: 2, fileId: "second" }]);
   f.rpc.getFileAttachment.mockImplementation(async file => { if (file === "second") throw new Error("onebot_failed"); return url; });
