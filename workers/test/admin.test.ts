@@ -285,7 +285,7 @@ describe("admin data views", () => {
       mcp: expect.arrayContaining([
         expect.objectContaining({ server: "notion", tools: 0 }),
         expect.objectContaining({ server: "cs2-workshop", enabled: true, credential: "static", login: "unconfigured", tools: 0 }),
-      ]), configured: { ADMIN_TOKEN: true, OAUTH_STORE_KEY: true, DEEPSEEK_API_KEY: false },
+      ]), configured: { ADMIN_TOKEN: true, OAUTH_STORE_KEY: true, DEEPSEEK_API_KEY: false, GEMINI_API_KEY: false },
       threads: [
         { key: "owner", kind: "owner", stats: { inbound: { queued: 0, done: 0, failed: 0 } } },
         { key: "group:200000001", name: "测试群", kind: "group", stats: { inbound: { queued: 0, done: 0, failed: 0 }, outbox: 0, memory: { active: 0 } } },

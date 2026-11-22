@@ -68,7 +68,7 @@ export function refreshDiagnostic(failure: RefreshDiagnostic | null | undefined)
     failure.challenge ? "Cloudflare challenge" : "", failure.format, failure.requestId ? "request " + failure.requestId : "",
     failure.cfRay ? "ray " + failure.cfRay : ""].filter(Boolean).join(" · ");
 }
-export const MODEL_REASONS: Record<string, string> = { missing_key: "缺 DEEPSEEK_API_KEY", login_required: "未登录 ChatGPT", unconfigured: "未配置 OAUTH_STORE_KEY",
+export const MODEL_REASONS: Record<string, string> = { missing_key: "缺 DEEPSEEK_API_KEY", missing_gemini_key: "缺 GEMINI_API_KEY", login_required: "未登录 ChatGPT", unconfigured: "未配置 OAUTH_STORE_KEY",
   unknown_provider: "provider 未注册", unknown_model: "目录里没有这个模型", unavailable: "不可用" };
 export type SourceFields = Record<"intervalS" | "mergeWindowS" | "budgetPerHour" | "requireLabels" | "excludeLabels" | "excludeSenders" | "quietStart" | "quietEnd", HTMLInputElement>;
 export interface AppState {

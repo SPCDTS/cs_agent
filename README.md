@@ -140,7 +140,7 @@ npm run check
 2. **配置运行密钥**：准备 `.env`（参考 `.env.example`），必须包含 `NAPCAT_TOKEN`、`QQ_OWNER`（主人的 QQ 号）、`ADMIN_TOKEN` 与 `OAUTH_STORE_KEY`（32 字节加密主密钥，切勿随意覆盖）。可使用 `bash workers/scripts/put-secrets.sh deployments/my.local.json` 上传。
 3. **接入模型与个人设备**：
    - **NapCat**：配置反向 WebSocket 指向 `wss://<PUBLIC_ORIGIN>/onebot`，携带相同 `NAPCAT_TOKEN`。
-   - **模型账号**：DeepSeek 通过 `DEEPSEEK_API_KEY` 配置；个人 ChatGPT 订阅在 `/admin/` 管理页下载一次性本机配对助手完成 Codex OAuth 登录。
+   - **模型账号**：DeepSeek 通过 `DEEPSEEK_API_KEY` 配置，Gemini 通过 `GEMINI_API_KEY` 配置；个人 ChatGPT 订阅在 `/admin/` 管理页下载一次性本机配对助手完成 Codex OAuth 登录。
    - **个人电脑与远程沙箱**：在管理台「模型与接入」中按需配对你的随身设备（[docs/DEVICE-MCP.md](docs/DEVICE-MCP.md)）或登记 Windows Hyper-V / WSB MCP 服务（[docs/WINDOWS-MCP.md](docs/WINDOWS-MCP.md)）。
 4. **上线核对**：公开 `/healthz` 仅检查 Worker 进程存活；部署后请携带 `Authorization: Bearer <ADMIN_TOKEN>` 请求 `/admin/health` 或登录 `/admin/` 核对 Worker、Bridge 与模型组件的实际状态。
 

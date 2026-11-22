@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 把 Worker 需要的 secrets 从本地私有文件上传到 Cloudflare（wrangler secret bulk，值走 stdin，不进命令行与仓库）。
-# 读取：仓库根 .env 的 NAPCAT_TOKEN、QQ_OWNER、QQ_ALLOW_USERS、QQ_ALLOW_GROUPS、DEEPSEEK_APIKEY（上传为 DEEPSEEK_API_KEY，可选）；
+# 读取：仓库根 .env 的 NAPCAT_TOKEN、QQ_OWNER、QQ_ALLOW_USERS、QQ_ALLOW_GROUPS、DEEPSEEK_APIKEY（上传为 DEEPSEEK_API_KEY，可选）、GEMINI_API_KEY（可选）；
 # secrets/gmail/client.json 与 token.json（可选）的 GMAIL_CLIENT_ID、GMAIL_CLIENT_SECRET、GMAIL_REFRESH_TOKEN；
 # secrets/admin-token.env、oauth-store-key.env 不存在时就地生成。ChatGPT 订阅不走 secrets，在管理面板登录。
 # 用法：在仓库根执行  bash workers/scripts/put-secrets.sh deployments/<档案>.json
@@ -26,9 +26,13 @@ QQ_OWNER=$(read_var "$env_file" QQ_OWNER)
 # 白名单是可选配置；缺项或空值都不影响必需 secrets 的上传。
 QQ_ALLOW_USERS=$(read_var "$env_file" QQ_ALLOW_USERS || true)
 QQ_ALLOW_GROUPS=$(read_var "$env_file" QQ_ALLOW_GROUPS || true)
-# DeepSeek 直连的 key；为空时不上传，面板里 DeepSeek 显示缺 key，仍可选 ChatGPT 订阅
+# DeepSeek 直连的 key；为空时不上传，面板里 DeepSeek 显示缺 key，仍可选其他模型供应商
 DEEPSEEK_API_KEY=$(read_var "$env_file" DEEPSEEK_APIKEY || true)
 [ -n "$DEEPSEEK_API_KEY" ] || echo ".env 里没有 DEEPSEEK_APIKEY，跳过 DEEPSEEK_API_KEY" >&2
+# Gemini 直连的 key；支持 GEMINI_API_KEY（兼容 GEMINI_APIKEY），为空时不上传
+GEMINI_API_KEY=$(read_var "$env_file" GEMINI_API_KEY || true)
+[ -n "$GEMINI_API_KEY" ] || GEMINI_API_KEY=$(read_var "$env_file" GEMINI_APIKEY || true)
+[ -n "$GEMINI_API_KEY" ] || echo ".env 里没有 GEMINI_API_KEY，跳过 GEMINI_API_KEY" >&2
 # 管理端点（记忆导入与 MCP 登录链接）的口令：没有就生成一次并存到 secrets/admin-token.env，之后沿用
 admin_file="$root/secrets/admin-token.env"
 if [ ! -f "$admin_file" ]; then
@@ -80,7 +84,7 @@ cd "$workers_dir"
 {
   printf '{'
   first=1
-  for name in NAPCAT_TOKEN QQ_OWNER QQ_ALLOW_USERS QQ_ALLOW_GROUPS DEEPSEEK_API_KEY ADMIN_TOKEN OAUTH_STORE_KEY GMAIL_CLIENT_ID GMAIL_CLIENT_SECRET GMAIL_REFRESH_TOKEN CS2_WORKSHOP_AUTHORIZATION; do
+  for name in NAPCAT_TOKEN QQ_OWNER QQ_ALLOW_USERS QQ_ALLOW_GROUPS DEEPSEEK_API_KEY GEMINI_API_KEY ADMIN_TOKEN OAUTH_STORE_KEY GMAIL_CLIENT_ID GMAIL_CLIENT_SECRET GMAIL_REFRESH_TOKEN CS2_WORKSHOP_AUTHORIZATION; do
     [ -n "${!name}" ] || continue
     [ $first -eq 1 ] || printf ','
     first=0
@@ -88,4 +92,4 @@ cd "$workers_dir"
   done
   printf '}\n'
 } | npx wrangler secret bulk --config wrangler.deploy.json
-echo "已上传必需 secrets、非空 QQ 白名单、DeepSeek key（如有）、可用的 Gmail 与 Workshop 凭据到显式选定的 Worker"
+echo "已上传必需 secrets、非空 QQ 白名单、DeepSeek / Gemini key（如有）、可用的 Gmail 与 Workshop 凭据到显式选定的 Worker"
