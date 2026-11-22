@@ -79,7 +79,7 @@ export class RegistryDO extends DurableObject<Env> {
   cloudflareComplete(state: string, code: string) { return this.lock('cf:grant', async () => {
     const status = await this.cloudflare.complete(state, code); this.cloudManager.invalidate(); return status;
   }); }
-  cloudflareInventory(kind: Static<typeof CloudflareInventory>['resource']) { return this.cloudManager.inventory(kind); }
+  cloudflareInventory(kind: Static<typeof CloudflareInventory>['resource'], page?: number) { return this.cloudManager.inventory(kind, page); }
   cloudflarePropose(input: Change) { return this.cloudManager.propose(input); }
   cloudflareChanges() { return this.cloudManager.list(); }
   cloudflareReview(id: string, approve: boolean) { return this.cloudManager.review(id, approve); }

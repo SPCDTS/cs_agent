@@ -12,7 +12,6 @@ const s = Type.String(), name = Type.Object({ name: s });
 const listSchemas = {
   dns: Type.Array(Type.Object({ id: s, name: s, type: s, proxied: Type.Boolean() })),
   tunnels: Type.Array(Type.Object({ id: s, name: s, status: s })),
-  workers: Type.Array(Type.Object({ id: s })),
   buckets: Type.Object({ buckets: Type.Array(name) }),
 };
 
@@ -33,13 +32,14 @@ export class CloudflareManagement {
       domain TEXT NOT NULL, payload TEXT NOT NULL, expires INTEGER NOT NULL, status TEXT NOT NULL)`);
     this.sql.exec("UPDATE cf_changes SET status='unknown' WHERE status='executing'");
   }
-  async inventory(kind: Static<typeof CloudflareInventory>['resource']) {
+  async inventory(kind: Static<typeof CloudflareInventory>['resource'], page = 1) {
+    if (!Check(CloudflareInventory, { resource: kind, page }) || kind !== 'workers' && page !== 1) throw new Error('device_invalid');
     const scope = { dns: 'dns.write', tunnels: 'argotunnel.write', workers: 'workers-scripts.metadata_read', buckets: 'workers-r2.write' }[kind];
     const t = await this.authorized(scope), account = 'accounts/' + t.account, zone = 'zones/' + t.zone;
     switch (kind) {
       case 'dns': return (await cloudApi(t, zone + '/dns_records?per_page=50', listSchemas.dns)).slice(0,50).map(({id,name,type,proxied}) => ({id,name,type,proxied}));
       case 'tunnels': return (await cloudApi(t, account + '/cfd_tunnel?is_deleted=false&per_page=50', listSchemas.tunnels)).slice(0,50).map(({id,name,status}) => ({id,name,status}));
-      case 'workers': return (await cloudApi(t, account + '/workers/scripts', listSchemas.workers)).slice(0,50).map(({id}) => ({ id }));
+      case 'workers': return (await cloudApi(t, account + '/workers/workers?per_page=50&order_by=name&order=asc&page=' + page, Type.Array(name))).slice(0,50).map(({name}) => ({ id: name }));
       case 'buckets': return (await cloudApi(t, account + '/r2/buckets?per_page=50', listSchemas.buckets)).buckets.slice(0,50).map(({name}) => ({name}));
       default: throw new Error('device_invalid');
     }

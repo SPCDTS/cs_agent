@@ -75,9 +75,15 @@ it('模型申请绑定资源，管理台批准只执行一次，拒绝或过期�
     const writes: unknown[] = [];
     vi.spyOn(globalThis,'fetch').mockImplementation(async (input,init) => {
       const req = new Request(input,init);
+      if (new URL(req.url).pathname.endsWith('/workers/workers')) {
+        const query = new URL(req.url).searchParams;
+        expect(query.get('page')).toBe('2'); expect(query.get('per_page')).toBe('50');
+        return Response.json({success:true,result:[{id:'worker-uuid',name:'my-worker'}]});
+      }
       if (req.method === 'POST') { writes.push(await req.json()); return Response.json({success:true,result:{id:'ok'}}); }
       return Response.json({success:true,result:[{id:'dns-id',name:'a.example.test',type:'A',proxied:true,content:'private-value'}]});
     });
+    expect(await management.inventory('workers',2)).toEqual([{id:'my-worker'}]);
     expect(JSON.stringify(await management.inventory('dns'))).not.toContain('private-value');
     await expect(management.propose({ action:'cache_purge', urls:['https://other.example/'] })).rejects.toThrow('device_invalid');
     await expect(management.propose({action:'dns_create', name:'demo.example.test',type:'AAAA',content:'invalid',proxied:false})).rejects.toThrow('device_invalid');

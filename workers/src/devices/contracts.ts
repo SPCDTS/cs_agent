@@ -10,7 +10,8 @@ export const CloudflareStatus = Type.Object({ scopes: Type.Array(Type.String()),
 export const CloudflareLink = Type.Object({ url: Type.String() }, strict);
 export const CloudflareCallback = Type.Object({ state: Type.String({ pattern: '^[A-Za-z0-9_-]{43}$' }), code: Type.String({ minLength: 1, maxLength: 8192 }) }, strict);
 export const DnsName = Type.String({ maxLength: 253, pattern: '^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z][a-z0-9-]*$' });
-export const CloudflareInventory = Type.Object({ resource: Type.Union([Type.Literal('dns'), Type.Literal('tunnels'), Type.Literal('workers'), Type.Literal('buckets')]) }, strict);
+export const CloudflareInventory = Type.Object({ resource: Type.Union([Type.Literal('dns'), Type.Literal('tunnels'), Type.Literal('workers'), Type.Literal('buckets')]),
+  page: Type.Optional(Type.Integer({minimum: 1, maximum: 1000000, description: 'Worker 清单的页码，默认 1'})) }, strict);
 export const CloudflareChange = Type.Union([
   Type.Object({ action: Type.Literal('dns_create'), name: DnsName, type: Type.Union([Type.Literal('A'),Type.Literal('AAAA'),Type.Literal('CNAME')]),
     content: Type.String({ minLength: 1, maxLength: 253, pattern: '^[A-Za-z0-9.:-]+$' }), proxied: Type.Boolean() }, strict),
