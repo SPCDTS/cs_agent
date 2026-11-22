@@ -31,6 +31,7 @@ import { createImageTool } from '../tools/imagegen';
 import { createAccessExtension } from '../tools/access';
 import { createCloudflareExtension } from '../tools/cloudflare';
 import { createOpsExtension } from '../tools/ops';
+import { logDiag } from '../shared/diagnostics';
 import { createWorkspaceAdminExtension } from '../tools/workspace-admin';
 import { createMediaExtension } from '../tools/media';
 import { lookupHostMedia } from '../tools/media-host';
@@ -276,6 +277,14 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     },
     deliver: async (ref, api, c) => { const input = await host.currentInput(harness, api, api.conversationId, c); if(!input)throw new Error("media_scope_denied"); return host.deliver(input,"",String(api.taskId),{attachments:[ref]}); },
     record: (kind, detail) => host.audit(kind, detail),
+    log: event => {
+      if (event.state === "failure") {
+        logDiag(host.env, host.ctx, {
+          level: "warn", event: "media_stage_failed", thread: memory.ns, code: event.code, status: event.status,
+          detail: { traceId: event.traceId, stage: event.stage, ms: event.ms, ...(event.retcode !== undefined ? { retcode: event.retcode } : {}) },
+        });
+      } else console.info(event);
+    },
   }));
   const mcp = new ThreadMcp(host.database, host.env, registry, async (api, callContext) => {
     const input = await host.currentInput(harness, api, api.conversationId, callContext);
