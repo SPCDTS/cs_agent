@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
-import { agentSearchOption, hostedSearchSteps, withHostedSearch } from "../src/tools/web-search";
+import { agentSearchOption, hostedSearchSteps } from "../src/models";
+import { withDeepSeekSearch } from "../src/models/providers/deepseek";
 
 describe("DeepSeek 服务端搜索", () => {
-  const provider = deepseekProvider(), transport = withHostedSearch(provider, openAIResponsesApi());
+  const provider = deepseekProvider(), transport = withDeepSeekSearch(provider, openAIResponsesApi());
   const context = normalizeContext({ messages: [{ role: "user", content: "查官方文档", timestamp: 1 }],
     tools: [{ name: "send_message", description: "发送消息", parameters: { type: "object", properties: {} } }] });
 

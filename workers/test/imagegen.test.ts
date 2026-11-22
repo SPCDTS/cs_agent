@@ -1,6 +1,6 @@
 import { env, reset } from "cloudflare:test";
 import { afterEach, expect, it, vi } from "vitest";
-import { CODEX_BASE_URL } from "../src/codex-login";
+import { CODEX_BASE_URL } from "../src/models/providers/codex";
 import { MediaRepository } from "../src/media/repository";
 import { generateImage } from "../src/tools/imagegen";
 

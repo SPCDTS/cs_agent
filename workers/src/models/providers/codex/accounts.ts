@@ -1,11 +1,11 @@
 import type { Credential, CredentialStore } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import { TokenVault, randomSecret, sha256 } from "./mcp/crypto";
-import { CatalogFailureSchema, catalogFailure, refreshNeedsReauth, type CatalogFailure, type RefreshFailure } from "./codex-refresh-error";
-import { SqlCredentialStore, type CredentialMeta, type CredentialLease } from "./model-credentials";
+import { TokenVault, randomSecret, sha256 } from "../../../mcp/crypto";
+import { SqlCredentialStore, type CredentialMeta, type CredentialLease } from "../../credentials";
+import { CatalogFailureSchema, catalogFailure, refreshNeedsReauth, type CatalogFailure, type RefreshFailure } from "./errors";
 import { CODEX_PROVIDER, LOGIN_TTL_MS, ModelLoginError, PendingSchema, acceptTokens, callbackClient,
-  codexOAuth, fetchCatalog, isChatGPTCredential, revokeSession, startChatGPTLogin } from "./codex-login";
+  codexOAuth, fetchCatalog, isChatGPTCredential, revokeSession, startChatGPTLogin } from "./login";
 
 export const CHATGPT_SCHEMA = `
   CREATE TABLE IF NOT EXISTS chatgpt_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);

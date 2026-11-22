@@ -6,7 +6,7 @@ import { cloudflareTest } from "@cloudflare/vitest-plugin";
 // 测试显式使用合成服务目录与 faux 测试模型，生产默认目录为空且不打包 faux。
 const ALIAS = [
   { find: "../../mcp.json", replacement: fileURLToPath(new URL("./test/fixtures/mcp.json", import.meta.url).href) },
-  { find: "./models-faux", replacement: fileURLToPath(new URL("./test/fixtures/models-faux.ts", import.meta.url).href) },
+  { find: "./providers/faux", replacement: fileURLToPath(new URL("./test/fixtures/models-faux.ts", import.meta.url).href) },
 ];
 
 // 不依赖 cloudflare:test / workerd 运行时的纯逻辑单测划入轻量 node 项目，加快反馈。

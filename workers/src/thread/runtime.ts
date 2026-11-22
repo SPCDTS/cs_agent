@@ -8,7 +8,7 @@ import { ownerIds, scopeOf, type Target, type TurnKind } from '../policy';
 import type { Settings, ModelSelection } from '../settings';
 import { QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS, recall } from '../context';
 import { DELEGATION_RULE, EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, WEB_RULE, subagentTurnIdentity, turnIdentity } from '../prompt';
-import { modelChange } from '../models';
+import { hostedSearchSteps, modelChange } from '../models';
 import { captureModels } from '../requests/capture';
 import { contextSource } from '../requests/context-source';
 import { requestTrace } from '../requests/trace';
@@ -26,7 +26,6 @@ import { createScheduleExtension, type ScheduleAccess } from '../schedule/tools'
 import type { ScheduleConversation } from '../schedule/types';
 import { createGmailTools } from '../gmail/tools';
 import { cleanOutgoing } from '../send-clean';
-import { hostedSearchSteps } from '../tools/web-search';
 import { createWebPageTool } from '../tools/web-page';
 import { createImageTool } from '../tools/imagegen';
 import { createAccessExtension } from '../tools/access';

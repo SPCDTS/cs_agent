@@ -1,10 +1,10 @@
-import protocol from "../codex-protocol/package.json";
+import protocol from "../../../../codex-protocol/package.json";
 import type { OAuthAuth } from "@earendil-works/pi-ai";
 import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
-import { randomSecret, sha256 } from "./mcp/crypto";
-import { CatalogError, catalogFailure, OAuthRefreshError, refreshFailure, responseDiagnostic, responseOAuthCode } from "./codex-refresh-error";
+import { randomSecret, sha256 } from "../../../mcp/crypto";
+import { CatalogError, catalogFailure, OAuthRefreshError, refreshFailure, responseDiagnostic, responseOAuthCode } from "./errors";
 
 export const CODEX_PROVIDER = "openai-codex";
 export const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";

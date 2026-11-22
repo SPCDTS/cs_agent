@@ -4,10 +4,9 @@ import worker from "../src/index";
 import { RequestsDO } from "../src/requests/do";
 import { ThreadDO } from "../src/thread";
 import { threadView } from "../src/admin/read-views";
-import { ModelAlarm } from "../src/model-alarm";
+import { ModelAlarm, MODEL_PROVIDERS } from "../src/models";
 import { snapshot } from "../src/requests/snapshot";
 import { fauxProvider, fauxToolCall, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { MODEL_PROVIDERS } from "../src/models";
 afterEach(async()=>{vi.restoreAllMocks();await reset();});
 const admin=(path:string)=>worker.fetch(new Request("https://test"+path,{headers:{Authorization:"Bearer test"}}),{...env,ADMIN_TOKEN:"test"});
 it("未同步的查询返回待同步，不唤醒执行 DO",async()=>{

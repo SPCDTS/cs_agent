@@ -1,7 +1,7 @@
 import type { Api, Context, Model, AssistantMessageEventStream, StreamOptions } from "@earendil-works/pi-ai";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import type { Env } from "../env";
-import { agentSearchOption, hostedSearchSteps } from "../tools/web-search";
+import { agentSearchOption, hostedSearchSteps } from "../models";
 import { argumentPreview } from "./tool-snapshot";
 import { snapshot, responseSnapshot, errorSummary, boundedText } from "./snapshot";
 import type { RequestBinding, RequestDetail, RequestScope } from "./types";

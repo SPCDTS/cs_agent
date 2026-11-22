@@ -1,7 +1,7 @@
 import { env, reset } from "cloudflare:test";
 import { afterEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
-import { modelEgressDiagnostics } from "../src/model-egress";
+import { modelEgressDiagnostics } from "../src/models";
 
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
 

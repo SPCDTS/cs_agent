@@ -1,6 +1,6 @@
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
-import { readBoundedJson } from "./shared/http-body";
+import { readBoundedJson } from "../../../shared/http-body";
 
 // 只记录协议错误码和请求标识；错误描述、响应正文、Cookie、令牌不进入日志或 RPC。
 const OAuthCode = Type.Union([
