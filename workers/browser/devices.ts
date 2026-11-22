@@ -2,6 +2,7 @@ import { $, el, fail, notice, show, showLogin, readToken } from './app';
 import { api, readApi } from './api';
 import { CloudflareChangeList, CloudflareLink, CloudflareStatus, DeviceList, DeviceSetup, DeviceView } from '../src/devices/contracts';
 import { cs } from './console';
+import { selectManagementSubtab } from './management';
 import { loadMcpServers } from './mcp-servers';
 
 let draft: { id: string; name: string; desktop: boolean } | undefined;
@@ -96,7 +97,10 @@ export function initDevices() {
     void prepare();
   });
   $('device-copy').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('device-link').value); notice('已复制，粘贴到设备客户端的提示中。'); } catch (error) { fail(error); } });
-  if (location.hash.startsWith(callbackPrefix)) cs.view = 'models';
+  if (location.hash.startsWith(callbackPrefix)) {
+    cs.view = 'models';
+    selectManagementSubtab('models', 'models-mcp');
+  }
 }
 
 // 在管理台初始化并显示主人会话后处理回调，保留当前标签页的错误提示。
@@ -104,6 +108,7 @@ export async function completeCloudflareLogin() {
   if (!location.hash.startsWith(callbackPrefix)) return;
   const query = new URLSearchParams(location.hash.slice(callbackPrefix.length));
   history.replaceState(null, '', location.pathname);
+  selectManagementSubtab('models', 'models-mcp');
   $('device-editor').open = true;
   let expected: string | null = null;
   try {

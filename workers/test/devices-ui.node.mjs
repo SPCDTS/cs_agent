@@ -21,6 +21,7 @@ const { initDevices, loadDevices } = await bundleModule("browser/devices.ts", {
   "./app": 'export { $, el } from "./browser/dom.ts"; export const fail = e => globalThis.__deviceErrors.push(e), show = () => {}, showLogin = () => {}, notice = () => {}, readToken = () => true;',
   "./api": "export const readApi = (...args) => globalThis.__deviceRead(...args); export const api = (...args) => globalThis.__deviceRead(null,...args);",
   "./console": "export const cs = globalThis.__deviceCs;",
+  "./management": "export const selectManagementSubtab = () => {};",
   "./mcp-servers": "export const loadMcpServers = async () => {};",
 });
 const node = id => document.getElementById(id);
@@ -68,15 +69,23 @@ test('管理台启动后仍显示失败原因，展开设备面板时加载设�
   const { completeCloudflareLogin } = await bundleModule({contents: "import './browser/main.ts'; export { completeCloudflareLogin } from './browser/devices.ts';"});
   await settle();
   assert.deepEqual(rewrites,['/admin/']); assert.ok(editor.open);
+  assert.equal(element('mcp-section').hidden, false);
+  assert.equal(element('model-section').hidden, true);
+  assert.equal(page.document.querySelector('#manage-subtabs button[data-subtab="models-mcp"]')?.getAttribute('aria-selected'), 'true');
   assert.equal(element('status').hidden,false); assert.match(element('status').textContent,/授权未完成/);
   assert.equal(calls.filter(p=>p==='/admin/devices').length,1);
   assert.ok(!calls.some(p=>p.endsWith('/complete')));
+
+  await page.click(page.document.querySelector('#manage-subtabs button[data-subtab="models-core"]'));
+  assert.equal(element('mcp-section').hidden, true);
 
   t.mock.timers.enable({apis:['setTimeout']});
   location.hash = '#cloudflare?state=expected&code=sample';
   sessionStorage.setItem('cs-agent-cloudflare-state','expected');
   await completeCloudflareLogin();
   assert.deepEqual(exchanges,[{state:'expected',code:'sample'}]);
+  assert.equal(element('mcp-section').hidden, false);
+  assert.equal(page.document.querySelector('#manage-subtabs button[data-subtab="models-mcp"]')?.getAttribute('aria-selected'), 'true');
   assert.match(element('status').textContent,/example.test/);
   assert.equal(element('status').className,'status-line info');
   t.mock.timers.tick(6000);
