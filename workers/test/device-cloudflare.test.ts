@@ -51,6 +51,23 @@ it('PKCE 回调仅使用一次，匹配活动父域，续期轮换加密令牌�
     expect(grant.status().reauth).toBe(true);
   });
 });
+it('首次省略 scope 仅保存设备必需权限，空 scope 和非 JSON 的 Zone 响应返回明确错误', async () => {
+  await runInDurableObject(env.REGISTRY.getByName('main'), async (_instance,state) => {
+    const grant = new CloudflareGrant(state.storage.sql,new TokenVault(TEST_STORE_KEY),instance);
+    grant.initialize();
+    const tokens = { token_type:'Bearer', access_token:target.token, refresh_token:'synthetic-refresh', expires_in:3600 };
+    const zone = { account:{id:target.account}, id:target.zone, name:target.domain, status:'active' };
+    const complete = async () => grant.complete(new URL((await grant.start()).url).searchParams.get('state')!,'code');
+    const upstream = vi.spyOn(globalThis,'fetch');
+    upstream.mockResolvedValueOnce(Response.json({...tokens,scope:''}));
+    await expect(complete()).rejects.toThrow('device_oauth_scope');
+    upstream.mockResolvedValueOnce(Response.json(tokens)).mockResolvedValueOnce(new Response('<html>Error</html>',{status:502}));
+    await expect(complete()).rejects.toThrow('device_oauth_zone');
+    upstream.mockResolvedValueOnce(Response.json(tokens)).mockResolvedValueOnce(Response.json({success:true,result:[]}))
+      .mockResolvedValueOnce(Response.json({success:true,result:[zone]}));
+    expect((await complete()).scopes.sort()).toEqual(['argotunnel.write','dns.write','zone.read']);
+  });
+});
 it('模型申请绑定资源，管理台批准只执行一次，拒绝或过期均无写操作', async () => {
   await runInDurableObject(env.REGISTRY.getByName('main'), async (_instance, state) => {
     const management = new CloudflareManagement(state.storage.sql, async () => target);

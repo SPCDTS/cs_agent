@@ -52,7 +52,7 @@ export class CloudflareGrant {
     const value: unknown = await response.json().catch(() => null);
     if (!response.ok && Check(Type.Object({ error: Type.Literal('invalid_grant') }), value)) throw new Error('device_oauth_reauthorize');
     if (!response.ok || !Check(Tokens, value) || value.token_type.toLowerCase() !== 'bearer' || !value.expires_in) throw new Error('device_oauth_exchange');
-    if (value.scope && !client.scopes.every(scope => value.scope!.split(/\s+/).includes(scope))) throw new Error('device_oauth_scope');
+    if (value.scope !== undefined && !client.scopes.every(scope => value.scope!.split(/\s+/).includes(scope))) throw new Error('device_oauth_scope');
     return value;
   }
   private async target(token: string) {
@@ -65,7 +65,7 @@ export class CloudflareGrant {
       const query = new URLSearchParams({ name: domain, status: 'active' });
       if (pinnedAccount) query.set('account.id', pinnedAccount);
       const response = await cloudFetch(api + '/client/v4/zones?' + query, { headers: { Authorization: 'Bearer ' + token } });
-      const value: unknown = await response.json();
+      const value: unknown = await response.json().catch(() => null);
       if (!response.ok || !Check(Zones, value)) throw new Error('device_oauth_zone');
       const matches = value.result.filter(z => z.name === domain && z.status === 'active' && (!pinnedZone || z.id === pinnedZone) && (!pinnedAccount || z.account.id === pinnedAccount));
       if (matches.length === 1) return { account: matches[0].account.id, zone: matches[0].id, domain };
@@ -74,7 +74,7 @@ export class CloudflareGrant {
     }
     throw new Error('device_oauth_zone');
   }
-  private async save(tokens: OAuthTokens, refresh: string, target: Pick<Grant,'account'|'zone'|'domain'>, previousScopes = requestedScopes) {
+  private async save(tokens: OAuthTokens, refresh: string, target: Pick<Grant,'account'|'zone'|'domain'>, previousScopes = client.scopes.join(' ')) {
     const id = this.clientId, secret = await this.vault.encrypt(JSON.stringify({ access: tokens.access_token, refresh }), field(id));
     const scopes = (tokens.scope ?? previousScopes).split(/\s+/).filter(s => s && requestedScopes.split(' ').includes(s));
     this.sql.exec('INSERT OR REPLACE INTO cf_grant(id,account,zone,domain,client,secret,expires,reauth,scopes) VALUES(1,?,?,?,?,?,?,0,?)',
