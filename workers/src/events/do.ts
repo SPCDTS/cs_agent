@@ -178,13 +178,20 @@ export class EventsDO extends DurableObject<Env> {
         } finally { clearTimeout(timer); }
       }
       this.sql.exec("UPDATE event_source SET failures = 0, degraded = 0, last_poll_at = ?, last_error_code = NULL WHERE id = ?", Date.now(), id);
+      if (row.degraded) this.ctx.waitUntil(this.env.REGISTRY.getByName("main").resolveAlert("event_source", id, "web").catch(() => {}));
       console.log({ event: "event_poll", source: id, status: "ok", fetched });
     } catch (error) {
       const code = errorKind(error), failures = row.failures + 1;
       this.sql.exec("UPDATE event_source SET failures = ?, degraded = ?, last_poll_at = ?, last_error_code = ? WHERE id = ?",
         failures, failures >= 3 ? 1 : row.degraded, Date.now(), code, id);
       console.log({ event: "event_poll", source: id, status: "failed", code });
-      if (failures === 3) await this.alert(`poll:${id}`, `外部事件来源 ${id} 连续 3 次拉取失败（${code}），已标记降级，仍会继续重试。`);
+      if (failures === 3) {
+        const message = `外部事件来源 ${id} 连续 3 次拉取失败（${code}），已标记降级，仍会继续重试。`;
+        this.ctx.waitUntil(this.env.REGISTRY.getByName("main").recordAlert({
+          kind: "event_source", scope: id, origin: "web", episode: `${id}:${Date.now()}`, message,
+        }).catch(() => {}));
+        await this.alert(`poll:${id}`, message);
+      }
     }
   }
 
@@ -379,8 +386,14 @@ export class EventsDO extends DurableObject<Env> {
     try {
       const result = await this.gmail.watch(topic);
       this.sql.exec("INSERT OR REPLACE INTO gmail_watch (id, history_id, expiration) VALUES ('owner', ?, ?)", result.historyId, Number(result.expiration));
+      this.ctx.waitUntil(this.env.REGISTRY.getByName("main").resolveAlert("event_source", "gmail_watch", "web").catch(() => {}));
     } catch (error) {
-      logDiag(this.env, this.ctx, { event: "gmail_watch_failed", thread: "owner", code: errorKind(error), error });
+      const code = errorKind(error);
+      logDiag(this.env, this.ctx, { event: "gmail_watch_failed", thread: "owner", code, error });
+      this.ctx.waitUntil(this.env.REGISTRY.getByName("main").recordAlert({
+        kind: "event_source", scope: "gmail_watch", origin: "web", episode: `gmail_watch:${row?.expiration ?? 0}`,
+        message: `Gmail Pub/Sub watch 续期失败（${code}），请检查 Gmail 授权与 Pub/Sub 配置。`,
+      }).catch(() => {}));
     }
   }
 

@@ -1,10 +1,12 @@
-import { env, reset } from "cloudflare:test";
+import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { classifyError, logDiag, type DiagRecord } from "../src/shared/diagnostics";
 import { safeError } from "../src/mcp/connection";
 import { createSubagentCapabilityHost } from "../src/mcp/delegated";
 import { modelEgressDiagnostics } from "../src/models";
+import { threadView } from "../src/admin/read-views";
+import { snapshot } from "../src/requests/snapshot";
 
 const TOKEN = "test-admin-only";
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
@@ -85,5 +87,91 @@ describe("诊断分类与环形日志缓冲", () => {
 
     const egress = await modelEgressDiagnostics(async () => { throw new DOMException("probe timed out", "TimeoutError"); });
     expect(egress.probes.every(p => p.error === "timeout")).toBe(true);
+  });
+
+  it("聚合模型 TTFT/推理 Token/费用、回合端到端耗时、MCP 健康度与统一面板告警", async () => {
+    const store = env.REQUESTS.getByName("main");
+    const now = Date.now();
+    await store.record({
+      request: {
+        id: "11111111-1111-4111-8111-111111111111",
+        startedAt: now - 1000,
+        endedAt: now - 200,
+        durationMs: 800,
+        ttftMs: 180,
+        alarmWaitMs: 35,
+        thread: "owner",
+        binding: { turnId: "turn:web:t1", inputId: "web:t1", generation: 0 },
+        actor: "thread",
+        purpose: "conversation",
+        provider: "google",
+        model: "gemini-3.1-flash-lite-preview",
+        status: "done",
+        inputTokens: 500,
+        outputTokens: 120,
+        cacheRead: 200,
+        cacheWrite: null,
+        reasoningTokens: 60,
+        costUsd: 0.0042,
+        contextWindow: 1_048_576,
+      },
+      context: snapshot({ messages: [] }),
+    });
+    await store.recordTurnTiming({
+      thread: "owner",
+      turnId: "turn:web:t1",
+      inputId: "web:t1",
+      kind: "message",
+      origin: "web",
+      status: "done",
+      receivedAt: now - 1200,
+      admittedAt: now - 1100,
+      queueWaitMs: 100,
+      firstDeliveredAt: now - 150,
+      deliveryWaitMs: 0,
+      endedAt: now - 100,
+      totalMs: 1100,
+    });
+
+    const usage = await store.usage({ since: now - 60_000, until: now + 1000, thread: "owner", limit: 20 });
+    expect(usage.summary).toMatchObject({
+      requests: 1,
+      reasoningTokens: 60,
+      avgDuration: 800,
+      avgTtft: 180,
+    });
+    expect(Number(usage.summary.costUsd)).toBeCloseTo(0.0042, 6);
+
+    const trace = await store.turnTrace("owner", ["turn:web:t1"], 0);
+    expect(trace.timings).toHaveLength(1);
+    expect(trace.timings?.[0]).toMatchObject({ queueWaitMs: 100, totalMs: 1100, origin: "web" });
+    expect((await store.recentTurns("owner", 5))[0]?.turnId).toBe("turn:web:t1");
+
+    const owner = env.THREAD.getByName("owner");
+    await owner.syncAdminView("owner");
+    await runInDurableObject(owner, (_instance, state) => {
+      state.storage.sql.exec("INSERT INTO events(at, kind, detail) VALUES (?, 'mcp_catalog', ?)", now - 500, JSON.stringify({ server: "notion", status: "ok", tools: 3 }));
+      state.storage.sql.exec("INSERT INTO events(at, kind, detail) VALUES (?, 'mcp_call', ?)", now - 400, JSON.stringify({ server: "notion", tool: "search", ms: 120, result: "ok" }));
+      state.storage.sql.exec("INSERT INTO events(at, kind, detail) VALUES (?, 'mcp_call', ?)", now - 300, JSON.stringify({ server: "notion", tool: "fetch", ms: 300, result: "not_started", code: "timeout" }));
+    });
+    await owner.syncAdminView("owner");
+    const mcp = await threadView(env, "owner").mcpHealth();
+    expect(mcp.notion).toMatchObject({ calls: 2, failed: 1, avgMs: 210, maxMs: 300, lastError: "not_started:timeout", catalogStatus: "ok" });
+
+    const registry = env.REGISTRY.getByName("main");
+    await registry.recordAlert({ kind: "schedule_paused", scope: "sched-1", origin: "web", episode: "1", message: "定时任务暂停" });
+    await registry.recordAlert({ kind: "event_source", scope: "gmail", origin: "web", episode: "1", message: "Gmail 降级" });
+    await registry.recordAlert({ kind: "sandbox_error", scope: "sandbox", origin: "web", episode: "1", message: "沙箱退出" });
+    expect((await registry.alerts(10)).filter(a => a.closedAt === null)).toHaveLength(3);
+    await registry.resolveAlert("schedule_paused", "sched-1", "web");
+
+    const healthRes = await worker.fetch(new Request("https://test/admin/health", {
+      headers: { Authorization: "Bearer " + TOKEN },
+    }), { ...env, ADMIN_TOKEN: TOKEN });
+    expect(healthRes.status).toBe(200);
+    const health = await healthRes.json<{ sandbox: { status: string; bootCount: number }; alerts: { active: number }; mcp: { server: string; health?: { calls: number } }[] }>();
+    expect(health.sandbox).toMatchObject({ status: "unavailable", bootCount: 0 });
+    expect(health.alerts).toEqual({ active: 2 });
+    expect(health.mcp.find(s => s.server === "notion")?.health).toMatchObject({ calls: 2, failed: 1 });
   });
 });

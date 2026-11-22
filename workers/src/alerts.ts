@@ -3,7 +3,14 @@ import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import type { OpsSettings } from "./settings";
 
-export const AlertKindSchema = Type.Union([Type.Literal("model_auth"),Type.Literal("model_failures"),Type.Literal("qq_disconnect")]);
+export const AlertKindSchema = Type.Union([
+  Type.Literal("model_auth"),
+  Type.Literal("model_failures"),
+  Type.Literal("qq_disconnect"),
+  Type.Literal("schedule_paused"),
+  Type.Literal("event_source"),
+  Type.Literal("sandbox_error"),
+]);
 export const AlertInputSchema = Type.Object({ kind: AlertKindSchema, scope: Type.String({ minLength: 1, maxLength: 100 }),
   episode: Type.String({ minLength: 1, maxLength: 200 }), origin: Type.Union([Type.Literal("qq"),Type.Literal("web")]),
   message: Type.String({ minLength: 1, maxLength: 1000 }) }, { additionalProperties: false });

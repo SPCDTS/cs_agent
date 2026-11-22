@@ -1,3 +1,6 @@
+const ALARM_WAIT_MS = new WeakMap<Response, number>();
+export const responseAlarmWaitMs = (response: Response): number | undefined => ALARM_WAIT_MS.get(response);
+
 /** 在原执行 DO 的新 alarm 事件中发出模型请求，不增加 DO 或转发服务。 */
 export class ModelAlarm {
   private readonly requests = new Set<() => Promise<void>>();
@@ -7,12 +10,16 @@ export class ModelAlarm {
     const request = new Request(input, init), signal = request.signal;
     signal.throwIfAborted();
     const body = request.body ? await request.arrayBuffer() : undefined;
+    const enqueuedAt = Date.now();
     const result = Promise.withResolvers<Response>();
     const run = async () => {
       try {
         signal.throwIfAborted();
+        const waitMs = Math.max(0, Date.now() - enqueuedAt);
         // 所有准备工作已在入队前完成；这里的第一项 I/O 就是上游请求。
-        result.resolve(await fetch(request.url, { method: request.method, headers: request.headers, body, signal, redirect: "manual" }));
+        const response = await fetch(request.url, { method: request.method, headers: request.headers, body, signal, redirect: "manual" });
+        ALARM_WAIT_MS.set(response, waitMs);
+        result.resolve(response);
       } catch (error) { result.reject(error); }
     };
     const abort = () => { this.requests.delete(run); result.reject(signal.reason); };

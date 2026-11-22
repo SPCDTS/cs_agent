@@ -1,7 +1,7 @@
 import type { Api, Context, Model, AssistantMessageEventStream, StreamOptions } from "@earendil-works/pi-ai";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import type { Env } from "../env";
-import { agentSearchOption, hostedSearchSteps } from "../models";
+import { agentSearchOption, hostedSearchSteps, responseAlarmWaitMs } from "../models";
 import { argumentPreview } from "./tool-snapshot";
 import { snapshot, responseSnapshot, errorSummary, boundedText } from "./snapshot";
 import type { RequestBinding, RequestDetail, RequestScope } from "./types";
@@ -15,20 +15,25 @@ function hasCacheMetric(value: unknown, keys: string[]): boolean {
 
 /** 不消费流；终态 Promise 与 Harness 的事件迭代互不争抢。认证选项不进入采集数据。 */
 export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableObjectState, "waitUntil">, scope: RequestScope, binding?: () => RequestBinding | undefined, origin?: (context: Context) => import("./context-source").ContextOrigin | undefined): MutableModels {
-  const observe = (model: Model<Api>, context: Context, start: (notice: (event: unknown) => void, response: (status: number) => void) => AssistantMessageEventStream, purpose = scope.purpose) => {
+  const observe = (model: Model<Api>, context: Context, start: (notice: (event: unknown) => void, response: (res: Parameters<NonNullable<StreamOptions["onResponse"]>>[0]) => void) => AssistantMessageEventStream, purpose = scope.purpose) => {
     const startedAt = Date.now();
     let reported = false;
     let cacheReported = false, cacheWriteReported = false;
+    let firstEventAt: number | undefined, alarmWaitMs: number | undefined;
     const requestBinding = purpose === "conversation" || purpose === "subagent" ? binding?.() : undefined;
     let httpStatus: number | undefined;
     const stream = start(event => {
       if (!event || typeof event !== "object") return;
+      firstEventAt ??= Date.now();
       const value = event as { usage?: unknown; response?: { usage?: unknown } };
       const usage = value.usage ?? value.response?.usage;
       if (usage && typeof usage === "object" && Object.values(usage).some(n => typeof n === "number")) reported = true;
       cacheReported ||= hasCacheMetric(usage, ["cached_tokens", "cache_read_input_tokens", "prompt_cache_hit_tokens", "cacheReadInputTokens", "cacheRead"]);
       cacheWriteReported ||= hasCacheMetric(usage, ["cache_creation_input_tokens", "cacheWriteInputTokens", "cacheWrite"]);
-    }, status => { httpStatus = status; });
+    }, res => {
+      httpStatus = res.status;
+      if (res instanceof Response) alarmWaitMs = responseAlarmWaitMs(res);
+    });
     const terminal = stream.result().then(result => ({ result, endedAt: Date.now() }));
     let detail: RequestDetail;
     try {
@@ -58,19 +63,23 @@ export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableOb
             .catch(error => console.error({ event: "tool_trace_failed", id: detail.request.id, thread: scope.thread, turnId: requestBinding.turnId, ...classifyError(error) }));
         }
       }
+      const costTotal = u.cost?.total;
+      const costUsd = typeof costTotal === "number" && Number.isFinite(costTotal) && costTotal >= 0 ? costTotal : null;
       await save({ ...detail, response: responseSnapshot(result), request: { ...detail.request, endedAt, durationMs: endedAt - startedAt,
+        ttftMs: firstEventAt !== undefined ? Math.max(0, firstEventAt - startedAt) : null,
+        ...(alarmWaitMs !== undefined ? { alarmWaitMs } : {}),
         status: result.stopReason === "error" ? "error" : result.stopReason === "aborted" ? "aborted" : "done", stopReason: result.stopReason,
         toolCalls: [...searches.map(({ callId }) => ({ id: callId, name: "web_search" })),
           ...result.content.flatMap(block => block.type === "toolCall" ? [{ id: block.id, name: block.name }] : [])],
         ...(result.errorMessage ? { error: errorSummary(result.errorMessage, httpStatus) } : {}),
         ...(measured ? { inputTokens: u.input + u.cacheRead + u.cacheWrite, outputTokens: u.output,
           cacheRead: cacheReported || u.cacheRead > 0 ? u.cacheRead : null, cacheWrite: cacheWriteReported || u.cacheWrite > 0 ? u.cacheWrite : null,
-          reasoningTokens: u.reasoning ?? null } : {}) } });
+          reasoningTokens: u.reasoning ?? null, costUsd } : {}) } });
     })().catch(error => { console.error({ event: "request_capture_failed", id: detail.request.id, thread: scope.thread, turnId: requestBinding?.turnId, ...classifyError(error) }); }));
     return stream;
   };
-  const events = (notice: (event: unknown) => void, response: (status: number) => void, options?: StreamOptions) => ({
-    onResponse: async (value: Parameters<NonNullable<StreamOptions["onResponse"]>>[0], model: Model<Api>) => { response(value.status); await options?.onResponse?.(value, model); },
+  const events = (notice: (event: unknown) => void, response: (res: Parameters<NonNullable<StreamOptions["onResponse"]>>[0]) => void, options?: StreamOptions) => ({
+    onResponse: async (value: Parameters<NonNullable<StreamOptions["onResponse"]>>[0], model: Model<Api>) => { response(value); await options?.onResponse?.(value, model); },
     onProviderStreamEvent: async (event: unknown, model: Model<Api>) => { notice(event); await options?.onProviderStreamEvent?.(event, model); } });
   const search = scope.purpose === "conversation" || scope.purpose === "subagent" ? agentSearchOption : {};
   const stream: MutableModels["stream"] = (m, c, o) => observe(m, c, (notice, response) => base.stream<Api>(m, c, { ...o, ...search, ...events(notice, response, o) }));

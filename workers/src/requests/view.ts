@@ -114,6 +114,48 @@ export class AgentReadView {
     return Object.fromEntries(rows.map(row => [row.server_id, row.n]));
   }
 
+  async mcpHealth(windowMs = 86_400_000): Promise<Record<string, {
+    calls: number; failed: number; avgMs: number | null; maxMs: number | null; lastCallAt: number | null;
+    lastError?: string; catalogStatus?: string; catalogCode?: string;
+  }>> {
+    await this.initialize();
+    const rows = await this.database.all<{ at: number; kind: string; detail: string }>(
+      "SELECT at, kind, detail FROM events WHERE kind IN ('mcp_call', 'mcp_catalog') AND at >= ? ORDER BY rowid DESC LIMIT 500",
+      Date.now() - Math.max(60_000, windowMs),
+    );
+    const stats: Record<string, { calls: number; failed: number; totalMs: number; maxMs: number | null; lastCallAt: number | null; lastError?: string; catalogStatus?: string; catalogCode?: string }> = {};
+    for (const row of rows) {
+      let detail: Record<string, unknown>;
+      try { detail = JSON.parse(row.detail) as Record<string, unknown>; } catch { continue; }
+      const server = typeof detail.server === "string" ? detail.server : undefined;
+      if (!server) continue;
+      const item = stats[server] ??= { calls: 0, failed: 0, totalMs: 0, maxMs: null, lastCallAt: null };
+      if (row.kind === "mcp_catalog") {
+        if (item.catalogStatus === undefined && typeof detail.status === "string") {
+          item.catalogStatus = detail.status;
+          if (typeof detail.code === "string") item.catalogCode = detail.code;
+        }
+        continue;
+      }
+      item.calls++;
+      if (item.lastCallAt === null || row.at > item.lastCallAt) item.lastCallAt = row.at;
+      const ms = typeof detail.ms === "number" && Number.isFinite(detail.ms) ? detail.ms : undefined;
+      if (ms !== undefined) {
+        item.totalMs += ms;
+        item.maxMs = item.maxMs === null ? ms : Math.max(item.maxMs, ms);
+      }
+      const result = typeof detail.result === "string" ? detail.result : "unknown";
+      if (result !== "ok" && result !== "receipt" && result !== "approval_pending") {
+        item.failed++;
+        item.lastError ??= typeof detail.code === "string" ? `${result}:${detail.code}` : result;
+      }
+    }
+    return Object.fromEntries(Object.entries(stats).map(([server, s]) => [server, {
+      calls: s.calls, failed: s.failed, avgMs: s.calls > 0 ? Math.round(s.totalMs / s.calls) : null, maxMs: s.maxMs, lastCallAt: s.lastCallAt,
+      ...(s.lastError ? { lastError: s.lastError } : {}), ...(s.catalogStatus ? { catalogStatus: s.catalogStatus } : {}), ...(s.catalogCode ? { catalogCode: s.catalogCode } : {}),
+    }]));
+  }
+
   async mcpAccess(scope: string, server: string): Promise<McpGrant | null> {
     await this.initialize(); await this.bindNamespace(scope);
     const row = await this.database.get<{ value_json: string }>("SELECT value_json FROM mcp_access WHERE scope=? AND server_id=?",scope,server);

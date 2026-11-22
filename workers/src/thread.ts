@@ -64,6 +64,7 @@ export class ThreadDO extends DurableObject<Env> {
   private settingsCache?: { at: number; load: Promise<Settings> };
   private readonly waiters = new Map<string, (admission: Admission | undefined) => void>();
   private readonly settling = new Map<string, Admission>();
+  private readonly turnAdmittedAt = new Map<string, number>();
   private readonly alarmCommands: (() => Promise<void>)[] = [];
   private runtimeStarted = false;
   private extracting?: Promise<void>;
@@ -292,7 +293,9 @@ export class ThreadDO extends DurableObject<Env> {
     }
     const content = row.kind === "message" && !isWeb(row)
       ? await withReplyContext(this.database, scopeOf(targetOf(row)), row.platform_message_id, row.text) : row.text;
-    return root.submit({ type: "input", content, requestId: row.message_id, whenBusy }, context);
+    const submitted = await root.submit({ type: "input", content, requestId: row.message_id, whenBusy }, context);
+    if (!this.turnAdmittedAt.has(row.message_id)) this.turnAdmittedAt.set(row.message_id, Date.now());
+    return submitted;
   }
 
   private applyProfile(runtime: Runtime, profile: ToolProfile): Promise<void> {
@@ -453,9 +456,35 @@ export class ThreadDO extends DurableObject<Env> {
         return row;
       });
       const ns = await this.namespace();
-      if (row) await this.env.REGISTRY.getByName("main").recordTurn({scope:ns,origin:isWeb(row)?"web":"qq",outcome:status==="done"?"ok":"failed"}).catch(err => {
-        logDiag(this.env, this.ctx, { event: "turn_outcome_report_failed", thread: ns, turnId: row.turn_id ?? undefined, error: err });
-      });
+      const admittedAt = this.turnAdmittedAt.get(messageId);
+      this.turnAdmittedAt.delete(messageId);
+      if (row) {
+        await this.env.REGISTRY.getByName("main").recordTurn({scope:ns,origin:isWeb(row)?"web":"qq",outcome:status==="done"?"ok":"failed"}).catch(err => {
+          logDiag(this.env, this.ctx, { event: "turn_outcome_report_failed", thread: ns, turnId: row.turn_id ?? undefined, error: err });
+        });
+        if (row.turn_id) {
+          const settledAt = Date.now();
+          const receivedAt = Math.round(row.received_at < 1e12 ? row.received_at * 1000 : row.received_at);
+          const effectiveAdmittedAt = admittedAt ?? receivedAt;
+          const out = isWeb(row)
+            ? await this.database.get<{ first_sent: number | null; delivery_wait: number | null }>("SELECT MIN(at) AS first_sent, 0 AS delivery_wait FROM web_outputs WHERE input_id = ?", messageId)
+            : await this.database.get<{ first_sent: number | null; delivery_wait: number | null }>(
+                "SELECT MIN(o.sent_at) AS first_sent, MAX(o.sent_at - COALESCE(i.created_at, o.sent_at)) AS delivery_wait FROM outbox o LEFT JOIN outgoing_intents i ON i.id = o.delivery_id WHERE o.input_id = ?",
+                messageId,
+              );
+          this.ctx.waitUntil(this.env.REQUESTS.getByName("main").recordTurnTiming({
+            thread: ns, turnId: row.turn_id, inputId: messageId, kind: row.kind, origin: isWeb(row) ? "web" : "qq", status,
+            receivedAt, admittedAt: effectiveAdmittedAt,
+            queueWaitMs: Math.max(0, effectiveAdmittedAt - receivedAt),
+            firstDeliveredAt: out?.first_sent ?? null,
+            deliveryWaitMs: out?.first_sent != null && out.delivery_wait != null ? Math.max(0, out.delivery_wait) : null,
+            endedAt: settledAt,
+            totalMs: Math.max(0, settledAt - receivedAt),
+          }).catch(err => {
+            logDiag(this.env, this.ctx, { event: "turn_timing_report_failed", thread: ns, turnId: row.turn_id ?? undefined, error: err });
+          }));
+        }
+      }
       if (row?.kind === "schedule") await this.reportScheduleRun(row, status, answer);
       if (row?.kind === "event") {
         const outcome = await this.eventStatus(row);

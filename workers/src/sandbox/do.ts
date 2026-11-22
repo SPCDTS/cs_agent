@@ -6,10 +6,22 @@ import { imageMime } from "../media/model";
 import type { DirEntry, ExecResult, FileEdit, ReadResult } from "./client";
 import { nativeSandboxClient } from "./native";
 import { createOutputDirectory } from "./output-directory";
-import { logDiag } from "../shared/diagnostics";
+import { classifyError, logDiag } from "../shared/diagnostics";
 import { WorkspaceManager, type WorkspaceManifest, type WorkspaceOperation, type WorkspaceRunResult, type WorkspaceCompareResult } from "./workspace";
 export type { WorkspaceManifest, WorkspaceOperation, WorkspaceRunResult, WorkspaceCompareResult } from "./workspace";
 export type SandboxStatus = "running" | "stopped" | "unavailable";
+export type SandboxTelemetry = {
+  bootCount: number;
+  lastBootMs: number | null;
+  lastBootAt: number | null;
+  exitCount: number;
+  lastExitAt: number | null;
+  lastExitCode: string | null;
+  execCount: number;
+  timeoutCount: number;
+};
+const TELEMETRY_KEY = "sandbox:telemetry";
+const EMPTY_TELEMETRY: SandboxTelemetry = { bootCount: 0, lastBootMs: null, lastBootAt: null, exitCount: 0, lastExitAt: null, lastExitCode: null, execCount: 0, timeoutCount: 0 };
 
 /** 一个 DO 拥有一个持久工作区；容器只提供临时执行环境，空闲销毁不删除 R2 manifest。 */
 export class SandboxDO extends DurableObject<Env> {
@@ -34,21 +46,50 @@ export class SandboxDO extends DurableObject<Env> {
       logDiag(this.env, this.ctx, { event: "workspace_gc_failed", error });
     }
   }
+  private async updateTelemetry(mutate: (current: SandboxTelemetry) => SandboxTelemetry): Promise<SandboxTelemetry> {
+    const current = (await this.ctx.storage.get<SandboxTelemetry>(TELEMETRY_KEY)) ?? EMPTY_TELEMETRY;
+    const next = mutate({ ...EMPTY_TELEMETRY, ...current });
+    await this.ctx.storage.put(TELEMETRY_KEY, next);
+    return next;
+  }
   private async startRuntime(): Promise<Container> {
     const container = this.container();
-    if (!container.running) {
+    const booting = !container.running;
+    const bootStarted = booting ? Date.now() : 0;
+    if (booting) {
       this.ready = false;
       const generation = ++this.runtimeGeneration;
       container.start({ image: container.images.sandbox, enableInternet: true, instance: "lite" });
-      this.ctx.waitUntil(container.monitor().catch(error => {
-        logDiag(this.env, this.ctx, { event: "sandbox_container_exit", error });
+      this.ctx.waitUntil(container.monitor().catch(async error => {
+        const info = classifyError(error);
+        const exitCode = info.code ?? info.errorName ?? "exit";
+        logDiag(this.env, this.ctx, { event: "sandbox_container_exit", code: exitCode, error });
+        await this.updateTelemetry(t => ({ ...t, exitCount: t.exitCount + 1, lastExitAt: Date.now(), lastExitCode: exitCode })).catch(() => {});
+        await this.env.REGISTRY.getByName("main").recordAlert({
+          kind: "sandbox_error", scope: "sandbox", origin: "web", episode: `${this.ctx.id.toString()}:${generation}`,
+          message: `沙箱容器异常退出（${exitCode}），后续调用将自动重建。`,
+        }).catch(() => {});
       }).finally(() => { if (this.runtimeGeneration === generation) this.ready = false; }));
     }
     await container.setInactivityTimeout(SandboxDO.IDLE_MS);
     this.ready = true;
+    if (booting) {
+      const now = Date.now(), bootMs = Math.max(0, now - bootStarted);
+      this.ctx.waitUntil(Promise.all([
+        this.updateTelemetry(t => ({ ...t, bootCount: t.bootCount + 1, lastBootMs: bootMs, lastBootAt: now })),
+        this.env.REGISTRY.getByName("main").resolveAlert("sandbox_error", "sandbox", "web"),
+      ]).catch(() => {}));
+    }
     return container;
   }
-  run(input: { operationId: string; operation: WorkspaceOperation }): Promise<WorkspaceRunResult> { return this.workspace.run(input); }
+  async run(input: { operationId: string; operation: WorkspaceOperation }): Promise<WorkspaceRunResult> {
+    const out = await this.workspace.run(input);
+    if (input.operation.kind === "exec" && out.status === "committed" && "stdout" in out.result) {
+      const timedOut = Boolean(out.result.timedOut);
+      this.ctx.waitUntil(this.updateTelemetry(t => ({ ...t, execCount: t.execCount + 1, timeoutCount: t.timeoutCount + (timedOut ? 1 : 0) })).catch(() => {}));
+    }
+    return out;
+  }
   private async result(operation: WorkspaceOperation, operationId?: string) {
     const run = await this.run({ operationId: operationId ?? crypto.randomUUID(), operation });
     if (run.status !== "committed") throw new Error(run.status === "unknown" ? "operation_unknown" : run.error + (run.issues ? `:${JSON.stringify(run.issues)}` : ""));
@@ -116,6 +157,10 @@ export class SandboxDO extends DurableObject<Env> {
     return this.importSnapshot({ manifest, expectedRevision: input.expectedRevision, paths: input.paths });
   }
   async status(): Promise<SandboxStatus> { const container = this.ctx.container; return !container ? "unavailable" : container.running ? "running" : "stopped"; }
+  async telemetry(): Promise<{ status: SandboxStatus } & SandboxTelemetry> {
+    const saved = (await this.ctx.storage.get<SandboxTelemetry>(TELEMETRY_KEY)) ?? EMPTY_TELEMETRY;
+    return { status: await this.status(), ...EMPTY_TELEMETRY, ...saved };
+  }
   private async destroyRuntime(): Promise<boolean> {
     const container = this.container();
     this.ready = false;

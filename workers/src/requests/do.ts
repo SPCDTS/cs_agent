@@ -5,7 +5,7 @@ import { AgentReadView } from "./view";
 import { subagentName, RETENTION_MS, type SubagentMeta } from "../subagent/model";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
-import type { RequestDetail, RequestQuery, RequestRecord, ToolTrace, ToolSummary } from "./types";
+import type { RequestDetail, RequestQuery, RequestRecord, ToolTrace, ToolSummary, TurnTiming } from "./types";
 import { readAgentTopology, type AgentTopology } from "./topology";
 import type { SubagentActivity } from "../subagent/activity";
 import { RequestRetention, REQUEST_RETENTION } from "./retention";
@@ -57,10 +57,16 @@ export class RequestsDO extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS ops_logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, level TEXT NOT NULL,
         event TEXT NOT NULL, thread TEXT, turn_id TEXT, code TEXT, record TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS ops_logs_at ON ops_logs(at DESC, seq DESC);
+      CREATE TABLE IF NOT EXISTS turn_timings (thread TEXT NOT NULL, turn_id TEXT NOT NULL, ended INTEGER NOT NULL,
+        record TEXT NOT NULL, PRIMARY KEY(thread, turn_id));
+      CREATE INDEX IF NOT EXISTS turn_timings_ended ON turn_timings(thread, ended DESC);
     `);
     const columns = ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(requests)").toArray();
     if (!columns.some(c => c.name === "turn_id")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN turn_id TEXT");
     if (!columns.some(c => c.name === "revision")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN revision INTEGER NOT NULL DEFAULT 0");
+    if (!columns.some(c => c.name === "ttft_ms")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN ttft_ms INTEGER");
+    if (!columns.some(c => c.name === "reasoning_tokens")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN reasoning_tokens INTEGER");
+    if (!columns.some(c => c.name === "cost_usd")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN cost_usd REAL");
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS tool_traces_actor_call ON tool_traces(thread,COALESCE(json_extract(record,'$.actor'),'thread'),call_id,started)");
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS requests_actor_started ON requests(thread,json_extract(record,'$.actor'),started,id)");
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS requests_turn ON requests(thread,turn_id,revision)");
@@ -76,6 +82,7 @@ export class RequestsDO extends DurableObject<Env> {
   mcpAccess(...args: Parameters<AgentReadView["mcpAccess"]>) { return this.readView().mcpAccess(...args); }
   mcpApprovals(...args: Parameters<AgentReadView["mcpApprovals"]>) { return this.readView().mcpApprovals(...args); }
   mcpToolCounts(...args: Parameters<AgentReadView["mcpToolCounts"]>) { return this.readView().mcpToolCounts(...args); }
+  mcpHealth(...args: Parameters<AgentReadView["mcpHealth"]>) { return this.readView().mcpHealth(...args); }
   async subagentList() {
     const view = this.readView(), scope = this.projection.status()!.scope;
     if (!scope.startsWith("thread:")) throw new Error("view_scope_mismatch");
@@ -144,10 +151,11 @@ export class RequestsDO extends DurableObject<Env> {
     // 重投与乱序开始事件不会覆盖终态。
     const previous = sql.exec<{ status: string }>("SELECT status FROM requests WHERE id = ?", r.id).toArray()[0];
     if (previous && previous.status !== "running" && (previous.status !== "interrupted" || r.status === "running")) return;
-    sql.exec(`INSERT INTO requests(id,started,thread,model,purpose,status,input_tokens,output_tokens,cache_read,duration,record,turn_id,revision)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, input_tokens=excluded.input_tokens,
-      output_tokens=excluded.output_tokens,cache_read=excluded.cache_read,duration=excluded.duration,record=excluded.record,turn_id=excluded.turn_id,revision=excluded.revision`,
-      r.id, r.startedAt, r.thread, r.provider + "/" + r.model, r.purpose, r.status, r.inputTokens, r.outputTokens, r.cacheRead, r.durationMs, JSON.stringify(r), r.binding?.turnId ?? null, this.revision());
+    sql.exec(`INSERT INTO requests(id,started,thread,model,purpose,status,input_tokens,output_tokens,cache_read,duration,record,turn_id,revision,ttft_ms,reasoning_tokens,cost_usd)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, input_tokens=excluded.input_tokens,
+      output_tokens=excluded.output_tokens,cache_read=excluded.cache_read,duration=excluded.duration,record=excluded.record,turn_id=excluded.turn_id,revision=excluded.revision,
+      ttft_ms=excluded.ttft_ms,reasoning_tokens=excluded.reasoning_tokens,cost_usd=excluded.cost_usd`,
+      r.id, r.startedAt, r.thread, r.provider + "/" + r.model, r.purpose, r.status, r.inputTokens, r.outputTokens, r.cacheRead, r.durationMs, JSON.stringify(r), r.binding?.turnId ?? null, this.revision(), r.ttftMs ?? null, r.reasoningTokens ?? null, r.costUsd ?? null);
     const payload = JSON.stringify({ context: detail.context, response: detail.response });
     if (r.startedAt >= Date.now() - REQUEST_RETENTION.detailsMs) sql.exec(`INSERT INTO request_details(id,started,bytes,payload) VALUES(?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET started=excluded.started,bytes=excluded.bytes,payload=excluded.payload`,
@@ -170,11 +178,27 @@ export class RequestsDO extends DurableObject<Env> {
     const more = retention.trim({ kind: "tool", id: trace.id });
     if (more || await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + (more ? 1000 : 3600_000));
   }
+  async recordTurnTiming(timing: TurnTiming): Promise<void> {
+    if (timing.endedAt < Date.now() - REQUEST_RETENTION.metadataMs) return;
+    this.ctx.storage.sql.exec(
+      `INSERT INTO turn_timings(thread,turn_id,ended,record) VALUES(?,?,?,?)
+       ON CONFLICT(thread,turn_id) DO UPDATE SET ended=excluded.ended,record=excluded.record`,
+      timing.thread, timing.turnId, timing.endedAt, JSON.stringify(timing),
+    );
+  }
+  recentTurns(thread?: string, limit = 20): TurnTiming[] {
+    const capped = Math.min(100, Math.max(1, Math.trunc(limit)));
+    const rows = thread
+      ? this.ctx.storage.sql.exec<{ record: string }>("SELECT record FROM turn_timings WHERE thread=? ORDER BY ended DESC LIMIT ?", thread, capped).toArray()
+      : this.ctx.storage.sql.exec<{ record: string }>("SELECT record FROM turn_timings ORDER BY ended DESC LIMIT ?", capped).toArray();
+    return rows.map(r => JSON.parse(r.record) as TurnTiming);
+  }
   private prune() {
     const sql = this.ctx.storage.sql, now = Date.now();
     const retention = this.retention();
     sql.exec("DELETE FROM agent_activity WHERE updated < ?", now - 30 * DAY);
     sql.exec("DELETE FROM ops_logs WHERE at < ?", now - 30 * DAY);
+    sql.exec("DELETE FROM turn_timings WHERE ended < ?", now - 30 * DAY);
     sql.exec("DELETE FROM requests WHERE started < ?", now - 30 * DAY);
     sql.exec("DELETE FROM request_details WHERE started < ? OR id NOT IN (SELECT id FROM requests)", now - 7 * DAY);
     sql.exec("DELETE FROM tool_traces WHERE started < ? OR (started < ? AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.thread=tool_traces.thread AND r.turn_id=tool_traces.turn_id))", now - 30 * DAY, now - 3600_000);
@@ -224,7 +248,7 @@ export class RequestsDO extends DurableObject<Env> {
   }
   usage(q: RequestQuery) {
     const { where, args } = this.filter(q), sql = this.ctx.storage.sql;
-    const columns = "COUNT(*) AS requests, COALESCE(SUM(CASE WHEN status IN ('error','aborted','interrupted') THEN 1 ELSE 0 END),0) AS failed, COALESCE(SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),0) AS running, COUNT(input_tokens) AS measured, COALESCE(SUM(input_tokens),0) AS inputTokens, COALESCE(SUM(output_tokens),0) AS outputTokens, COALESCE(SUM(cache_read),0) AS cacheRead, COALESCE(SUM(CASE WHEN cache_read IS NOT NULL THEN input_tokens ELSE 0 END),0) AS cacheInputTokens, COUNT(cache_read) AS cacheMeasured, AVG(duration) AS avgDuration";
+    const columns = "COUNT(*) AS requests, COALESCE(SUM(CASE WHEN status IN ('error','aborted','interrupted') THEN 1 ELSE 0 END),0) AS failed, COALESCE(SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),0) AS running, COUNT(input_tokens) AS measured, COALESCE(SUM(input_tokens),0) AS inputTokens, COALESCE(SUM(output_tokens),0) AS outputTokens, COALESCE(SUM(reasoning_tokens),0) AS reasoningTokens, COALESCE(SUM(cache_read),0) AS cacheRead, COALESCE(SUM(CASE WHEN cache_read IS NOT NULL THEN input_tokens ELSE 0 END),0) AS cacheInputTokens, COUNT(cache_read) AS cacheMeasured, COALESCE(SUM(cost_usd),0) AS costUsd, AVG(duration) AS avgDuration, AVG(ttft_ms) AS avgTtft";
     const summary = sql.exec("SELECT " + columns + " FROM requests WHERE " + where, ...args).one();
     const bucket = q.until - q.since <= 2 * DAY ? 3600_000 : DAY;
     const series = sql.exec("SELECT CAST((started + 28800000) / ? AS INTEGER) * ? - 28800000 AS at, " + columns + " FROM requests WHERE " + where + " GROUP BY at ORDER BY at",
@@ -260,8 +284,13 @@ export class RequestsDO extends DurableObject<Env> {
        SELECT 'tool' AS kind,record,revision FROM tool_traces WHERE ${filter} ORDER BY revision LIMIT 201`,
       thread, turnIds, after, thread, turnIds, after).toArray();
     const page = changed.slice(0, 200);
+    const timings = after === 0 ? sql.exec<{ record: string }>(
+      "SELECT record FROM turn_timings WHERE thread=? AND turn_id IN (SELECT value FROM json_each(?))",
+      thread, turnIds,
+    ).toArray().map(r => JSON.parse(r.record) as TurnTiming) : undefined;
     return { requests: page.filter(r => r.kind === "request").map(r => JSON.parse(r.record) as RequestRecord),
       tools: page.filter(r => r.kind === "tool").map(r => JSON.parse(r.record) as ToolSummary),
+      ...(timings?.length ? { timings } : {}),
       cursor: page.at(-1)?.revision ?? sql.exec<{ revision: number }>("SELECT revision FROM request_revision WHERE id=1").one().revision, more: changed.length > 200 };
   }
 }
