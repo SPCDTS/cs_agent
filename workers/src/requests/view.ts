@@ -14,7 +14,7 @@ import type { ProjectionStore, ViewInfo } from "./projection";
 export type EventQuery = { kind?: string; result?: string; since?: number; before?: number; limit: number };
 export type AuditEvent = { id: number; at: number; kind: string; detail: unknown };
 const EVENT_RESULT_PATH: Record<string, string> = { mcp_call: "$.result", mcp_catalog: "$.status", web_search: "$.result", generate_image: "$.result",
-  web_fetch: "$.result", web_import_image: "$.result", runtime_ops: "$.result", media_recall: "$.result", media_send: "$.result",
+  web_fetch: "$.result", web_import_image: "$.result", runtime_ops: "$.result", model_change: "$.result", media_recall: "$.result", media_send: "$.result",
   coding_exec: "$.result", coding_read: "$.result", coding_write: "$.result", coding_edit: "$.result" };
 
 /** 只使用展示数据库；这里没有执行 DO 的绑定或 Harness。 */

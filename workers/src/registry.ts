@@ -7,7 +7,7 @@ import { MCP_CONFIG, isOAuthServer, publicOrigin, referencedSecret, type OAuthSe
 import { TokenVault, randomSecret, sha256 } from "./mcp/crypto";
 import { DiscoverySchema, discover, exchange, TokenRejected, type OAuthTokens } from "./mcp/oauth";
 import { OAuthFailure } from "./mcp/oauth-fetch";
-import { defaultSettings, effectiveSettings, settingsRevision, type ModelSelection, type Settings, type SettingsSnapshot, defaultOpsSettings, opsSettingsRevision, OpsSettingsSchema, type OpsSettings, type OpsSettingsSnapshot } from "./settings";
+import { defaultSettings, effectiveSettings, settingsRevision, ModelSelectionSchema, type ModelSelection, type Settings, type SettingsSnapshot, defaultOpsSettings, opsSettingsRevision, OpsSettingsSchema, type OpsSettings, type OpsSettingsSnapshot } from "./settings";
 import { MODEL_CREDENTIALS_SCHEMA, SqlCredentialStore, openModels, providerStatuses, selectionProblem, usesDynamicCatalog, type CredentialLease, type ProviderStatus } from "./models";
 import { CHATGPT_SCHEMA, ChatGPTAccounts, CODEX_PROVIDER, accountCodexCatalog, fetchCatalog, type ChatGPTView, type RefreshFailure } from "./models/providers/codex";
 import { GrantStore, digest, type GrantAccess } from "./grants";
@@ -27,8 +27,8 @@ type LoginRow = { state: string; server_id: string; verifier: string; nonce_hash
 export type McpStatus = { server: string; enabled: boolean; credential: "none" | "static" | "oauth"; login: "ok" | "needed" | "error" | "unconfigured" };
 const Pending = Type.Object({ verifier: Type.String(), config: Type.String(), discovery: DiscoverySchema }, { additionalProperties: false });
 const identity = (server: OAuthServer, field: string) => JSON.stringify([server.id, server.credential.accountId, server.credential.revision, field]);
-export type ModelView = { current: ModelSelection; revision: string; providers: ProviderStatus[]; codex: ChatGPTView };
-export type ModelStatus = (ModelSelection & { codexLoggedIn: boolean }) | { unavailable: string };
+export type ModelView = { current: ModelSelection; subagent?: ModelSelection; revision: string; providers: ProviderStatus[]; codex: ChatGPTView };
+export type ModelStatus = (ModelSelection & { subagentModel?: ModelSelection; codexLoggedIn: boolean }) | { unavailable: string };
 export type PutSettingsResult = { ok: true; current: SettingsSnapshot } | { ok: false; error: "conflict"; current: SettingsSnapshot } | { ok: false; error: "invalid_model"; reason: string };
 
 export class RegistryDO extends DurableObject<Env> {
@@ -226,20 +226,67 @@ export class RegistryDO extends DurableObject<Env> {
     return { value, revision: settingsRevision(value), defaults, overrides, updatedAt: row?.updated_at ?? null };
   }
 
+  private async checkModelSelection(providers: ProviderStatus[], selection: ModelSelection): Promise<string | undefined> {
+    if (!Check(ModelSelectionSchema, selection)) return "invalid_format";
+    const problem = selectionProblem(providers, selection)
+      ?? (selection.provider === CODEX_PROVIDER && this.chatgpt.view().needsReauth ? "reauth_required" : undefined);
+    return problem;
+  }
+
+  async validateModel(selection: ModelSelection): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const problem = await this.checkModelSelection(await this.providers(), selection);
+    return problem ? { ok: false, reason: `${selection.provider}/${selection.id}: ${problem}` } : { ok: true };
+  }
+
   /** 模型变了才校验可用性：已选的模型登出后，仍要能保存群与白名单等其他设置。 */
-  async putSettings(value: Settings, expectedRevision: string): Promise<PutSettingsResult> {
-    const before = this.settings().value.model;
-    if (value.model.provider !== before.provider || value.model.id !== before.id) {
-      const reason = selectionProblem(await this.providers(), value.model);
-      if (reason) return { ok: false, error: "invalid_model", reason };
-    }
-    // 校验期间可能有别的保存插进来，CAS 放在 await 之后同步完成。
-    const current = this.settings();
-    if (current.revision !== expectedRevision) return { ok: false, error: "conflict", current };
-    this.ctx.storage.sql.exec(`INSERT INTO settings (key, value, revision, updated_at) VALUES ('runtime', ?, ?, ?)
-      ON CONFLICT(key) DO UPDATE SET value=excluded.value, revision=excluded.revision, updated_at=excluded.updated_at`,
-    JSON.stringify(value), settingsRevision(value), Date.now());
-    return { ok: true, current: this.settings() };
+  putSettings(value: Settings, expectedRevision: string): Promise<PutSettingsResult> {
+    return this.lock("settings:model", async () => {
+      const before = this.settings().value;
+      let providers: ProviderStatus[] | undefined;
+      if (value.model.provider !== before.model.provider || value.model.id !== before.model.id) {
+        providers ??= await this.providers();
+        const reason = await this.checkModelSelection(providers, value.model);
+        if (reason) return { ok: false, error: "invalid_model" as const, reason };
+      }
+      if (value.subagentModel && (!before.subagentModel || value.subagentModel.provider !== before.subagentModel.provider || value.subagentModel.id !== before.subagentModel.id)) {
+        providers ??= await this.providers();
+        const reason = await this.checkModelSelection(providers, value.subagentModel);
+        if (reason) return { ok: false, error: "invalid_model" as const, reason };
+      }
+      // 校验期间可能有别的保存插进来，CAS 放在 await 之后同步完成。
+      const current = this.settings();
+      if (current.revision !== expectedRevision) return { ok: false, error: "conflict" as const, current };
+      this.ctx.storage.sql.exec(`INSERT INTO settings (key, value, revision, updated_at) VALUES ('runtime', ?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, revision=excluded.revision, updated_at=excluded.updated_at`,
+      JSON.stringify(value), settingsRevision(value), Date.now());
+      return { ok: true, current: this.settings() };
+    });
+  }
+
+  /** Agent 主人工具原子修改自身或子任务默认模型，串行锁避免与并发设置修改竞态丢失其他字段。 */
+  updateModels(patch: { model?: ModelSelection; subagentModel?: ModelSelection | null }): Promise<{ ok: true; current: SettingsSnapshot } | { ok: false; error: "invalid_model"; reason: string }> {
+    return this.lock("settings:model", async () => {
+      const providers = await this.providers();
+      if (patch.model) {
+        const reason = await this.checkModelSelection(providers, patch.model);
+        if (reason) return { ok: false, error: "invalid_model" as const, reason: `${patch.model.provider}/${patch.model.id}: ${reason}` };
+      }
+      if (patch.subagentModel) {
+        const reason = await this.checkModelSelection(providers, patch.subagentModel);
+        if (reason) return { ok: false, error: "invalid_model" as const, reason: `${patch.subagentModel.provider}/${patch.subagentModel.id}: ${reason}` };
+      }
+      const { subagentModel: existingSub, ...rest } = this.settings().value;
+      const nextSub = patch.subagentModel === undefined ? existingSub : patch.subagentModel ?? undefined;
+      const next: Settings = {
+        ...rest,
+        model: patch.model ?? rest.model,
+        ...(nextSub ? { subagentModel: nextSub } : {}),
+      };
+      this.ctx.storage.sql.exec(`INSERT INTO settings (key, value, revision, updated_at) VALUES ('runtime', ?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, revision=excluded.revision, updated_at=excluded.updated_at`,
+      JSON.stringify(next), settingsRevision(next), Date.now());
+      return { ok: true, current: this.settings() };
+    });
   }
 
   private async providers(): Promise<ProviderStatus[]> {
@@ -254,20 +301,28 @@ export class RegistryDO extends DurableObject<Env> {
   async executionSettings() {
     const { overrides, value } = this.settings();
     const catalog = this.codexCatalog();
+    const needsCatalog = usesDynamicCatalog(value.model.provider) || Boolean(value.subagentModel && usesDynamicCatalog(value.subagentModel.provider));
     // Codex 凭据故障时，独立的其他 provider 仍能运行。
-    return { overrides, catalog: await (usesDynamicCatalog(value.model.provider) ? catalog : catalog.catch(() => [])) };
+    return { overrides, catalog: await (needsCatalog ? catalog : catalog.catch(() => [])) };
   }
 
   async modelView(): Promise<ModelView> {
     const settings = this.settings();
-    return { current: settings.value.model, revision: settings.revision, providers: await this.providers(),
-      codex: this.chatgpt.view() };
+    return {
+      current: settings.value.model,
+      ...(settings.value.subagentModel ? { subagent: settings.value.subagentModel } : {}),
+      revision: settings.revision,
+      providers: await this.providers(),
+      codex: this.chatgpt.view(),
+    };
   }
 
   async modelStatus(): Promise<ModelStatus> {
     const view = await this.modelView(), problem = selectionProblem(view.providers, view.current)
       ?? (view.current.provider === CODEX_PROVIDER && view.codex.status !== "ready" ? view.codex.status : undefined);
-    return problem ? { unavailable: `${view.current.provider}/${view.current.id}: ${problem}` } : { ...view.current, codexLoggedIn: view.codex.loggedIn };
+    return problem
+      ? { unavailable: `${view.current.provider}/${view.current.id}: ${problem}` }
+      : { ...view.current, ...(view.subagent ? { subagentModel: view.subagent } : {}), codexLoggedIn: view.codex.loggedIn };
   }
 
   // Thread 侧 CredentialStore 的 RPC；凭据只在 Worker 内部的 DO 之间传递，不经任何 HTTP 响应。

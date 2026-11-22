@@ -30,6 +30,7 @@ import { createWebPageTool } from '../tools/web-page';
 import { createImageTool } from '../tools/imagegen';
 import { createAccessExtension } from '../tools/access';
 import { createCloudflareExtension } from '../tools/cloudflare';
+import { createModelManagementExtension } from '../tools/model';
 import { createOpsExtension } from '../tools/ops';
 import { logDiag } from '../shared/diagnostics';
 import { createWorkspaceAdminExtension } from '../tools/workspace-admin';
@@ -74,6 +75,7 @@ export interface ThreadRuntimeHost {
   scheduleAccess(input: InboundRow | undefined): Promise<ScheduleAccess>;
   mcpAuthority(input: InboundRow | undefined): Promise<McpAuthority | undefined>;
   deliver(input: InboundRow, text: string, outputId: string, options?: { target?: Target; attachments?: AssetRef[] }): Promise<{ status: string; message_id?: string; reason?: string }>;
+  syncSelfModel(): Promise<void>;
   audit(kind: string, detail: object): Promise<unknown>;
   runtimeWake(wake: ReturnType<Harness['wake']>): Promise<void>;
   closed(): void;
@@ -188,7 +190,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
         return { output: [{ type: "text", text }] };
       },
     }), host.subagents.tool(async (api, callContext, selection) => host.subagentCaller(await host.currentInput(harness, api, api.conversationId, callContext), selection),
-      async () => (await host.loadSettings(true)).model)].map(tool => ({ ...tool, callers: ["model"] as const })),
+      async () => { const s = await host.loadSettings(true); return s.subagentModel ?? s.model; })].map(tool => ({ ...tool, callers: ["model"] as const })),
   }));
   const ownerTaskAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
     const input = await host.currentInput(harness, api, api.conversationId, callContext);
@@ -232,6 +234,24 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     if (input && host.ownerTurnKind(input) === 'message' && input.session_generation === await host.sessionGeneration()) return input;
   };
   const ownerMayManage = async (api: ToolExecutionApi, c: Context) => !!await ownerManagementInput(api, c);
+  const ownerDirectMessage = async (api: ToolExecutionApi, c: Context) => {
+    const input = await host.currentInput(harness, api, api.conversationId, c);
+    if (!input || input.kind !== "message" || input.user_id === input.self_id || input.session_generation !== await host.sessionGeneration()) return false;
+    return isWebAdmin(input) ? memory.ns === "owner" : ownerIds(host.env).includes(input.user_id);
+  };
+  if (memory.ns === "owner" || memory.ns.startsWith("group:")) {
+    registry.install(createModelManagementExtension({
+      env: host.env,
+      allowed: ownerDirectMessage,
+      syncSelfModel: () => host.syncSelfModel(),
+      setSubagentModel: async (api, c, subagentId, model) => {
+        const who = await host.subagentCaller(await host.currentInput(harness, api, api.conversationId, c), {});
+        if (!who) return { text: "子 agent 只能在用户亲自发消息的回合管理；本轮请勿重试。", error: true };
+        return host.subagents.setModel(who, subagentId, model, `${api.conversationId}:${api.taskId}`);
+      },
+      audit: detail => host.audit("model_change", detail),
+    }));
+  }
   if (memory.ns === 'owner') {
     registry.install(createCloudflareExtension(ownerMayManage, () => host.env.REGISTRY.getByName('main'),
       detail => host.audit('cloudflare_management', detail)));

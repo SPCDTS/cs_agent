@@ -201,6 +201,11 @@ export class ThreadDO extends DurableObject<Env> {
       ownerTurnKind: input => this.ownerTurnKind(input), sandboxTaskForInput: input => this.sandboxTaskForInput(input),
       subagentCaller: (input, selection) => this.subagentCaller(input, selection), scheduleAccess: input => this.scheduleAccess(input),
       mcpAuthority: input => this.mcpAuthority(input), deliver: (input, text, outputId, options) => this.deliver(input, text, outputId, options),
+      syncSelfModel: async () => {
+        const current = await this.runtime?.catch(() => undefined);
+        if (current) await this.syncModel(current);
+        else await this.loadSettings(true);
+      },
       audit: (kind, detail) => this.audit(kind, detail), runtimeWake: wake => this.runtimeWake(wake),
       closed: () => { this.runtime = undefined; this.runtimeStarted = false; },
     });
@@ -668,7 +673,7 @@ export class ThreadDO extends DurableObject<Env> {
   async subagentCreateTempDir(id: string, prefix?: string) { return (await this.subagentWorkspaceFiles(id)).createTempDir(prefix); }
 
   private async subagentCaller(input: InboundRow | undefined, { sandboxId, mcpTools }: { sandboxId?: string; mcpTools?: McpToolSelection }): Promise<SubagentCaller | undefined> {
-    if (input?.kind !== "message" || !input.turn_id || input.user_id === input.self_id) return;
+    if (input?.kind !== "message" || !input.turn_id || input.user_id === input.self_id || input.session_generation !== await this.sessionGeneration()) return;
     const authority = await this.mcpAuthority(input), { mcp } = await this.open();
     const task = await this.sandboxTaskForInput(input), coding = !!task?.permissions.coding && authority?.scope === "owner";
     let resource;

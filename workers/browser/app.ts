@@ -516,8 +516,12 @@ export function renderSettings(snapshot: C.Settings) {
 export async function saveSettings() {
   if (!state.settings) return;
   // 模型由模型卡片切换，这里原样带回当前值；两张卡片共用一个 revision。
-  const value = { groupTrigger: $("s-trigger").value, allowGroups: parseList($("s-groups").value),
-    allowUsers: parseList($("s-users").value), extractNamespaces: parseList($("s-extract").value), model: state.settings.value.model };
+  const value = {
+    groupTrigger: $("s-trigger").value, allowGroups: parseList($("s-groups").value),
+    allowUsers: parseList($("s-users").value), extractNamespaces: parseList($("s-extract").value),
+    model: state.settings.value.model,
+    ...(state.settings.value.subagentModel ? { subagentModel: state.settings.value.subagentModel } : {}),
+  };
   try {
     const saved = await readApi(C.Settings, "PUT", "/admin/settings", { value, expectedRevision: state.settings.revision });
     renderSettings(saved);
@@ -536,7 +540,9 @@ export async function loadModel() {
 export function renderModel(view: C.ModelView) {
   state.model = view;
   const current = view.current, key = current.provider + "/" + current.id;
-  $("m-current").textContent = key + (current.reasoningEffort ? " · 推理 " + current.reasoningEffort : "");
+  const sub = view.subagent;
+  $("m-current").textContent = key + (current.reasoningEffort ? " · 推理 " + current.reasoningEffort : "")
+    + (sub ? `（子任务默认：${sub.provider}/${sub.id}${sub.reasoningEffort ? " · " + sub.reasoningEffort : ""}）` : "");
   const select = $("m-model");
   clear(select);
   for (const provider of view.providers) {

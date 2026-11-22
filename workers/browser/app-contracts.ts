@@ -20,7 +20,7 @@ export const ThreadStats = Type.Union([
 ]);
 export const Overview = Type.Object({
   commit: Type.String(), bridge: Type.Object({ connected: Type.Boolean(), selfId: optionalText, ignored: Type.Number() }),
-  model: Type.Union([Type.Object({ ...ModelSelectionSchema.properties, codexLoggedIn: Type.Optional(Type.Boolean()) }), Type.Object({ unavailable: Type.String() })]),
+  model: Type.Union([Type.Object({ ...ModelSelectionSchema.properties, subagentModel: Type.Optional(ModelSelection), codexLoggedIn: Type.Optional(Type.Boolean()) }), Type.Object({ unavailable: Type.String() })]),
   threads: Type.Array(Type.Object({ key: Type.String(), name: Type.Optional(Type.String()), kind: Type.String(), stats: ThreadStats,
     sandbox: Type.Optional(Type.String()) })),
   sendRules: Type.Array(Type.Object({ scope: Type.String(), until: Type.Number() })),
@@ -85,7 +85,7 @@ export const Settings = Type.Object({ value: SettingsSchema, defaults: SettingsS
   applied: Type.Optional(Type.Boolean()) });
 export type Settings = Static<typeof Settings>;
 const Account = Type.Object({ id: Type.String(), label: Type.String(), status: Type.String(), catalogFailure: Type.Optional(Diagnostic) });
-export const ModelView = Type.Object({ revision: Type.String(), current: ModelSelection,
+export const ModelView = Type.Object({ revision: Type.String(), current: ModelSelection, subagent: Type.Optional(ModelSelection),
   providers: Type.Array(Type.Object({ id: Type.String(), name: Type.String(), available: Type.Boolean(), reason: Type.Optional(Type.String()),
     models: Type.Array(Type.Object({ id: Type.String(), name: Type.String() })) })),
   codex: Type.Object({ status: Type.String(), loggedIn: Type.Boolean(), needsReauth: Type.Optional(Type.Boolean()), email: optionalText,
