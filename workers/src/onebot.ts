@@ -5,14 +5,15 @@ type Frame =
   | { kind: "meta"; selfId: string }
   | { kind: "message"; input: InboundInput }
   | { kind: "notice"; notice: InboundNotice }
-  | { kind: "response"; echo: string; ok: boolean; data: unknown };
+  | { kind: "response"; echo: string; ok: boolean; retcode?: number; data: unknown };
 
 export function parseFrame(raw: string | ArrayBuffer): Frame | undefined {
   let value: unknown;
   try { value = JSON.parse(typeof raw === "string" ? raw : new TextDecoder().decode(raw)); }
   catch { return; }
   if (!isRecord(value)) return;
-  if (typeof value.echo === "string") return { kind: "response", echo: value.echo, ok: value.status === "ok" && value.retcode === 0, data: value.data };
+  if (typeof value.echo === "string") return { kind: "response", echo: value.echo, ok: value.status === "ok" && value.retcode === 0,
+    ...(typeof value.retcode === "number" && Number.isInteger(value.retcode) && Math.abs(value.retcode) <= 2_147_483_647 ? { retcode: value.retcode } : {}), data: value.data };
   if (value.post_type === "meta_event") return { kind: "meta", selfId: id(value.self_id) };
   const notice = normalizeNotice(value);
   if (notice) return { kind: "notice", notice };
