@@ -3,6 +3,7 @@ import { recallMedia } from "../context";
 import { id, isRecord, normalizeMedia, scopeOf, type InboundMedia, type Target } from "../policy";
 import { validScope, type AssetRef } from "../media/model";
 import type { MediaSelection } from "./media";
+import { mediaStage, type MediaTrace } from "../media/diagnostics";
 
 /** 只由宿主从已经核验的回合身份构造；scope是物理QQ会话，namespace是Thread/资产命名空间。 */
 export type VerifiedMediaSource = { scope: string; namespace: string; target: Target };
@@ -38,36 +39,43 @@ export async function lookupHostMedia(input: {
   source: VerifiedMediaSource;
   messageId: string;
   selection?: MediaSelection;
+  trace?: MediaTrace;
 }): Promise<InboundMedia[]> {
-  const target = sourceTarget(input.source);
-  let media = await recallMedia(input.database, input.source.scope, input.messageId);
+  const target = sourceTarget(input.source), trace = input.trace;
+  trace?.setScope(input.source.scope);
+  let media = await mediaStage(trace, "metadata", () => recallMedia(input.database, input.source.scope, input.messageId));
   if (!media.length) {
-    const existing = await input.database.get<{ message_id: string }>("SELECT message_id FROM messages WHERE scope=? AND message_id=?", input.source.scope, input.messageId);
+    const existing = await mediaStage(trace, "metadata", () => input.database.get<{ message_id: string }>("SELECT message_id FROM messages WHERE scope=? AND message_id=?", input.source.scope, input.messageId));
     if (!existing) return [];
-    media = remoteMedia(await input.bridge.getMessage(input.messageId), target, input.messageId);
+    media = await mediaStage(trace, "get_msg", async () => remoteMedia(await input.bridge.getMessage(input.messageId), target, input.messageId));
   }
   const selected = media.filter(item => (input.selection?.kind === undefined || item.kind === input.selection.kind) &&
     (input.selection?.ordinal === undefined || item.ordinal === input.selection.ordinal)).slice(0,5);
   return Promise.all(selected.map(async item => {
-    if (item.assetId) return item;
-    if (item.kind === "image") {
+    const itemTrace = trace?.forOrdinal(item.ordinal);
+    return mediaStage(itemTrace, "resolve_url", async () => {
+      if (item.assetId) return item;
+      if (item.kind === "image") {
+        const file = item.file ?? item.fileId;
+        if (!file || /^https?:\/\//i.test(file)) throw new Error("media_reference_missing");
+        const asset = await mediaStage(itemTrace, "get_image", () => input.bridge.getImage(file, input.source.namespace));
+        return { ...item, assetId: asset.id };
+      }
+      if (item.url) return item;
+      if (item.file && /^https?:\/\//i.test(item.file)) return { ...item, url: item.file };
       const file = item.file ?? item.fileId;
-      if (!file || /^https?:\/\//i.test(file)) throw new Error("media_reference_missing");
-      const asset = await input.bridge.getImage(file, input.source.namespace);
-      return { ...item, assetId: asset.id };
-    }
-    if (item.url) return item;
-    if (item.file && /^https?:\/\//i.test(item.file)) return { ...item, url: item.file };
-    const file = item.file ?? item.fileId;
-    if (!file) throw new Error("media_reference_missing");
-    let url: string;
-    switch(item.kind) {
-      case "audio": url = await input.bridge.getRecord(file); break;
-      case "video": url = await input.bridge.getFile(file); break;
-      case "file": url = item.fileId ? await input.bridge.getFileUrl(target, item.fileId) : await input.bridge.getFile(file); break;
-      default: { const exhaustive: never = item.kind; throw new Error(`invalid_media_kind:${exhaustive}`); }
-    }
-    // 其他附件仍由 MediaRepository.importRemote 检查公网地址、重定向与大小。
-    return { ...item, url };
+      if (!file) throw new Error("media_reference_missing");
+      let url: string;
+      switch(item.kind) {
+        case "audio": url = await mediaStage(itemTrace, "get_record", () => input.bridge.getRecord(file)); break;
+        case "video": url = await mediaStage(itemTrace, "get_file", () => input.bridge.getFile(file)); break;
+        case "file": url = item.fileId
+          ? await mediaStage(itemTrace, target.kind === "private" ? "get_private_file_url" : "get_group_file_url", () => input.bridge.getFileUrl(target, item.fileId!))
+          : await mediaStage(itemTrace, "get_file", () => input.bridge.getFile(file)); break;
+        default: { const exhaustive: never = item.kind; throw new Error(`invalid_media_kind:${exhaustive}`); }
+      }
+      // 其他附件仍由 MediaRepository.importRemote 检查公网地址、重定向与大小。
+      return { ...item, url };
+    });
   }));
 }

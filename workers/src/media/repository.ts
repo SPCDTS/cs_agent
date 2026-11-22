@@ -1,5 +1,6 @@
 import { ASSET_PREFIX, FILE_MAX_BYTES, cleanFileName, imageMime, parseAssetRef, safeMime, sha256, validScope, type AssetKind, type AssetRef } from "./model";
 import { downloadMedia, type DownloadDeps } from "./download";
+import { mediaStage } from "./diagnostics";
 export type { AssetRef, AssetKind } from "./model";
 
 export async function scopePrefix(scope: string): Promise<string> { return `${ASSET_PREFIX}/scopes/${await sha256(validScope(scope))}`; }
@@ -34,7 +35,7 @@ export class MediaRepository {
   async importRemote(input: { url?: string; name?: string; kind: AssetKind }, deps?: DownloadDeps): Promise<AssetRef> {
     if (!input.url) throw new Error("media_url_missing");
     const remote = await downloadMedia(input.url, deps);
-    return this.put({ bytes: remote.bytes, name: input.name ?? input.kind, mime: remote.mime, kind: input.kind });
+    return mediaStage(deps?.trace, "store", () => this.put({ bytes: remote.bytes, name: input.name ?? input.kind, mime: remote.mime, kind: input.kind }));
   }
   async issueToken(id: string, ttlSeconds = 300): Promise<string> {
     const { ref } = await this.get(id);
