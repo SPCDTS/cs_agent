@@ -15,8 +15,8 @@ import { authenticated } from "../auth";
 import type { Env } from "../env";
 import { oauthErrorCode } from "../mcp/oauth-fetch";
 import { ModelSelectionSchema, QQ_ID, SettingsSchema, type Settings } from "../settings";
-import { modelLoginErrorCode, TokenResponseSchema } from "../codex-login";
-import { catalogFailure, refreshFailure } from "../codex-refresh-error";
+import { PROVIDER_SECRET_NAMES } from "../models";
+import { catalogFailure, modelLoginErrorCode, refreshFailure, TokenResponseSchema } from "../models/providers/codex";
 import type { EventQuery } from "../requests/view";
 import { SkillError, parseSkill } from "../skills";
 import { SUBAGENT_ID } from "../subagent/model";
@@ -125,7 +125,7 @@ async function knownView(env: Env, key: string) {
   return threadView(env, key);
 }
 
-const SECRET_NAMES = ["ADMIN_TOKEN", "NAPCAT_TOKEN", "QQ_OWNER", "QQ_ALLOW_USERS", "QQ_ALLOW_GROUPS", "OAUTH_STORE_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY"] as const;
+const SECRET_NAMES = ["ADMIN_TOKEN", "NAPCAT_TOKEN", "QQ_OWNER", "QQ_ALLOW_USERS", "QQ_ALLOW_GROUPS", "OAUTH_STORE_KEY", ...PROVIDER_SECRET_NAMES] as const;
 
 export const ADMIN_ROUTES: AdminRoute[] = [
   { method: "GET", path: "/admin/health", handle: async ({ env }) => json(await healthReport(env)) },

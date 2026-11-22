@@ -1,7 +1,7 @@
 import type { Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
-import { randomSecret, type TokenVault } from "./mcp/crypto";
-import type { RegistryDO } from "./registry";
-import { refreshFailure, type RefreshFailure } from "./codex-refresh-error";
+import { randomSecret, type TokenVault } from "../mcp/crypto";
+import type { RegistryDO } from "../registry";
+import { refreshFailure, type RefreshFailure } from "./providers/codex/errors";
 
 export const MODEL_CREDENTIALS_SCHEMA = `CREATE TABLE IF NOT EXISTS model_credentials (
   provider_id TEXT PRIMARY KEY, credential_enc TEXT NOT NULL, updated_at INTEGER NOT NULL, meta_json TEXT NOT NULL)`;

@@ -1,8 +1,6 @@
 import type { Context, Tool } from "@earendil-works/pi-ai";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
-import { agentSearchOption, hostedSearchSteps, withHostedSearch } from "../src/tools/web-search";
-import { ModelAlarm } from "../src/model-alarm";
 import { zstdDecompressSync } from "node:zlib";
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -11,10 +9,10 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import worker from "../src/index";
 import * as models from "../src/models";
-import { remoteCredentials } from "../src/model-credentials";
+import { agentSearchOption, hostedSearchSteps, ModelAlarm, remoteCredentials } from "../src/models";
+import { isChatGPTCredential, CODEX_CLIENT_ID, CODEX_MODELS_URL, CODEX_BASE_URL, OAuthRefreshError, TOKEN_URL } from "../src/models/providers/codex";
+import { withGoogleSearch } from "../src/models/providers/google";
 import { RegistryDO, type ModelView } from "../src/registry";
-import { isChatGPTCredential, CODEX_CLIENT_ID, CODEX_MODELS_URL, CODEX_BASE_URL, TOKEN_URL } from "../src/codex-login";
-import { OAuthRefreshError } from "../src/codex-refresh-error";
 import { sha256 } from "../src/mcp/crypto";
 import { MediaRepository } from "../src/media/repository";
 import { input, syncedView } from "./helpers";
@@ -554,7 +552,7 @@ describe("Gemini provider 与原生搜索适配", () => {
     const gemini = models.openModels({ ...env, GEMINI_API_KEY: "test-gemini-key" }, store()).getModel("google", "gemini-3.8-flash")!;
     let seenPayload: unknown;
     let seenContext: Context | undefined;
-    const wrapped = withHostedSearch({
+    const wrapped = withGoogleSearch({
       stream: () => { throw new Error("unused"); },
       streamSimple: (m, ctx, opts) => lazyStream(m, async () => (async function* () {
         seenContext = ctx;

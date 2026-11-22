@@ -1,4 +1,4 @@
-import { BodyLimitError, readBoundedText } from "./shared/http-body";
+import { BodyLimitError, readBoundedText } from "../shared/http-body";
 
 // 仅供管理员手动诊断：从实际 owner DO 发起固定的公开 GET，不读取模型凭据。
 const TARGETS = [

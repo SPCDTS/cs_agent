@@ -1,4 +1,3 @@
-import { ModelAlarm } from "../model-alarm";
 import { workspaceExecutionEnv } from "../sandbox/execution-env";
 import { ProjectionPublisher, observeWrites } from "../requests/projection";
 import { DurableObject } from "cloudflare:workers";
@@ -7,12 +6,10 @@ import type { SqliteExecutor } from "@earendil-works/chord/sqlite";
 import { createRegistry, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, section, type Conversation, type EntryId } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { Env } from "../env";
-import { CODEX_PROVIDER } from "../codex-login";
-import { codexModel, modelChange, openModels, type CodexModels } from "../models";
+import { ModelAlarm, loadProviderCatalogs, modelChange, openModels, remoteCredentials, usesDynamicCatalog, type ProviderCatalogs } from "../models";
 import { captureModels } from "../requests/capture";
 import { requestTrace } from "../requests/trace";
 import { contextSource } from "../requests/context-source";
-import { remoteCredentials } from "../model-credentials";
 import { createWebPageTool } from "../tools/web-page";
 import { QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS } from "../context";
 import { memoryDescriptions, memoryParameters } from "../memory/contracts";
@@ -41,7 +38,7 @@ export class SubagentDO extends DurableObject<Env> {
   private readonly observedStorage = observeWrites(this.ctx.storage, () => this.projection.changed());
   private readonly database = new DurableObjectSqliteDatabase(this.observedStorage);
   private initialized?: Promise<void>;
-  private codexModels: CodexModels = [];
+  private catalogs: ProviderCatalogs = {};
   private runtime?: Promise<Runtime>;
   private draining?: Promise<void>;
   private dirty = false;
@@ -228,7 +225,7 @@ export class SubagentDO extends DurableObject<Env> {
     const next = await this.database.get<InboxRow>(`SELECT * FROM inbox WHERE status IN ('running', 'queued')
       ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, received_at, rowid LIMIT 1`);
     if (!next) return false;
-    if (this.runtime && meta.model.provider === CODEX_PROVIDER) await this.loadCodexCatalog();
+    if (this.runtime && usesDynamicCatalog(meta.model.provider)) await this.refreshCatalogs();
     await this.answer(next);
     return true;
   }
@@ -274,8 +271,8 @@ export class SubagentDO extends DurableObject<Env> {
     });
   }
 
-  private async loadCodexCatalog() {
-    this.codexModels = (await this.env.REGISTRY.getByName("main").codexCatalog()).map(codexModel);
+  private async refreshCatalogs() {
+    this.catalogs = await loadProviderCatalogs(this.env.REGISTRY.getByName("main"));
   }
 
   private open(): Promise<Runtime> {
@@ -295,8 +292,8 @@ export class SubagentDO extends DurableObject<Env> {
       return submission?.requestId ? { turnId: "turn:sub:" + meta.id + ":" + first, inputId: submission.requestId, generation: 0 } : undefined;
     }, meta.id);
     const monitor = contextSource(this.ctx.storage, () => harness);
-    if (meta.model.provider === CODEX_PROVIDER) await this.loadCodexCatalog();
-    const models = captureModels(openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")), this.modelAlarm.fetch, () => this.codexModels), this.env, this.ctx, { thread: meta.parent, actor: meta.id, purpose: "subagent" }, trace.binding, monitor.origin);
+    if (usesDynamicCatalog(meta.model.provider)) await this.refreshCatalogs();
+    const models = captureModels(openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")), this.modelAlarm.fetch, () => this.catalogs), this.env, this.ctx, { thread: meta.parent, actor: meta.id, purpose: "subagent" }, trace.binding, monitor.origin);
     const parent = () => this.env.THREAD.getByName(meta.parent);
     const registry = createRegistry();
     registry.install(monitor.extension);

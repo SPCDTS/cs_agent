@@ -8,11 +8,8 @@ import { TokenVault, randomSecret, sha256 } from "./mcp/crypto";
 import { DiscoverySchema, discover, exchange, TokenRejected, type OAuthTokens } from "./mcp/oauth";
 import { OAuthFailure } from "./mcp/oauth-fetch";
 import { defaultSettings, effectiveSettings, settingsRevision, type ModelSelection, type Settings, type SettingsSnapshot, defaultOpsSettings, opsSettingsRevision, OpsSettingsSchema, type OpsSettings, type OpsSettingsSnapshot } from "./settings";
-import { MODEL_CREDENTIALS_SCHEMA, SqlCredentialStore, type CredentialLease } from "./model-credentials";
-import { openModels, providerStatuses, selectionProblem, type ProviderStatus } from "./models";
-import { CODEX_PROVIDER, accountCodexCatalog, fetchCatalog } from "./codex-login";
-import type { RefreshFailure } from "./codex-refresh-error";
-import { CHATGPT_SCHEMA, ChatGPTAccounts, type ChatGPTView } from "./chatgpt-accounts";
+import { MODEL_CREDENTIALS_SCHEMA, SqlCredentialStore, openModels, providerStatuses, selectionProblem, usesDynamicCatalog, type CredentialLease, type ProviderStatus } from "./models";
+import { CHATGPT_SCHEMA, ChatGPTAccounts, CODEX_PROVIDER, accountCodexCatalog, fetchCatalog, type ChatGPTView, type RefreshFailure } from "./models/providers/codex";
 import { GrantStore, digest, type GrantAccess } from "./grants";
 import { AlertStore, type AlertInput, type TurnReport } from "./alerts";
 import { ownerIds } from "./policy";
@@ -256,7 +253,7 @@ export class RegistryDO extends DurableObject<Env> {
     const { overrides, value } = this.settings();
     const catalog = this.codexCatalog();
     // Codex 凭据故障时，独立的其他 provider 仍能运行。
-    return { overrides, catalog: await (value.model.provider === CODEX_PROVIDER ? catalog : catalog.catch(() => [])) };
+    return { overrides, catalog: await (usesDynamicCatalog(value.model.provider) ? catalog : catalog.catch(() => [])) };
   }
 
   async modelView(): Promise<ModelView> {

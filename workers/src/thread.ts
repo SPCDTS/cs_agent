@@ -2,11 +2,9 @@ import { MemoryAdmin } from "./memory/admin";
 import { McpAdmin } from "./mcp/admin";
 import { openThreadRuntime, applyToolProfile, type Runtime } from "./thread/runtime";
 import { isWeb, isWebAdmin, profileOf, targetOf, type InboundRow, type ToolProfile } from "./thread/model";
-import { ModelAlarm } from "./model-alarm";
 import { workPath } from "./sandbox/client";
 import { ProjectionPublisher, observeWrites } from "./requests/projection";
 import { MCP_POLICY_SCHEMA } from "./mcp/policy";
-import { modelEgressDiagnostics } from "./model-egress";
 import { createWorkspaceAdminApi, type WorkspaceAdminApi, type WorkspaceMergeInput } from "./sandbox/admin";
 import type { Delivery, DeliverySource } from "./delivery";
 import { gcMediaTickets, type AssetRef } from "./media/repository";
@@ -23,9 +21,8 @@ import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target, type Tur
 import { threadOpsSettings, effectiveSettings, type Settings } from "./settings";
 import { MESSAGE_SCHEMA, markMessageRecalled, recordMessage, recall, withReplyContext, type RecallOptions } from "./context";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
-import { modelChange, codexModel, openModels, sameSelection, type CodexModels } from "./models";
+import { ModelAlarm, hydrateCatalogs, modelChange, modelEgressDiagnostics, openModels, remoteCredentials, sameSelection, type ProviderCatalogs } from "./models";
 import { captureModels } from "./requests/capture";
-import { remoteCredentials } from "./model-credentials";
 import { MEMORY_SUPPORT_SCHEMA, MEMORY_LIFECYCLE_TRIGGERS } from "./memory/lifecycle";
 import { MEMORY_SCHEMA } from "./memory/schema";
 import { MEMORY_RULE_SCHEMA } from "./memory/rule-schema";
@@ -59,7 +56,7 @@ export class ThreadDO extends DurableObject<Env> {
   private readonly database = new DurableObjectSqliteDatabase(this.observedStorage);
   private readonly sandboxTasks = new SandboxTasks(this.database);
   private initialized?: Promise<void>;
-  private codexModels: CodexModels = [];
+  private catalogs: ProviderCatalogs = {};
   private modelsCache?: MutableModels;
   private runtime?: Promise<Runtime>;
   private admissions: Promise<void> = Promise.resolve();
@@ -189,7 +186,7 @@ export class ThreadDO extends DurableObject<Env> {
 
   // 回合与记忆抽取共用一个 Models；OAuth 凭据经 Registry 读写，刷新也在 Registry 的锁里串行。
   private models(): MutableModels {
-    return this.modelsCache ??= openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")), this.modelAlarm.fetch, () => this.codexModels);
+    return this.modelsCache ??= openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")), this.modelAlarm.fetch, () => this.catalogs);
   }
 
   private async openRuntime(): Promise<Runtime> {
@@ -839,7 +836,7 @@ export class ThreadDO extends DurableObject<Env> {
       const load: Promise<Settings> = this.env.REGISTRY.getByName("main").executionSettings().then(snapshot => {
         const current = this.settingsCache;
         if (current && current.load !== load) return current.load;
-        this.codexModels = snapshot.catalog.map(codexModel);
+        this.catalogs = hydrateCatalogs(snapshot);
         return effectiveSettings(this.env, snapshot.overrides);
       });
       cache = this.settingsCache = { at: Date.now(), load };

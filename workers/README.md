@@ -21,7 +21,7 @@
 
 配对码有效期为 10 分钟，只授权一次凭据导入。账号注册与稳定 host id 保存在 Registry，凭据使用 `OAUTH_STORE_KEY` 加密；本机助手不保存令牌文件，页面不会收到访问令牌。Thread 经 Registry 租锁串行续期，切换账号不会把旧请求的续期结果写给新账号。
 
-管理页可切换账号、刷新目录和登出。登录固定使用 Codex client id 与 `/oauth/authorize`、`/oauth/token`。新登录身份验证通过后先加密保存；模型目录暂时失败会显示「已授权，目录待恢复」并保留旧活动账号，选择新账号点击「使用所选账号」即可重试目录，无需重复登录。模型目录由 Registry 的按需 alarm 请求，使用 DO 自身的执行上下文；不固定出口 IP 或国家。管理页只显示 HTTP 状态、错误分类和请求标识，不显示上游正文或凭据。请独立登录 cs-agent，不复制正在使用的 Codex CLI / 桌面端凭据，以免多端争用轮换令牌。实现位于 `src/{codex-login,chatgpt-accounts,model-credentials,models}.ts` 与 `src/admin/chatgpt-helper.ts`。
+管理页可切换账号、刷新目录和登出。登录固定使用 Codex client id 与 `/oauth/authorize`、`/oauth/token`。新登录身份验证通过后先加密保存；模型目录暂时失败会显示「已授权，目录待恢复」并保留旧活动账号，选择新账号点击「使用所选账号」即可重试目录，无需重复登录。模型目录由 Registry 的按需 alarm 请求，使用 DO 自身的执行上下文；不固定出口 IP 或国家。管理页只显示 HTTP 状态、错误分类和请求标识，不显示上游正文或凭据。请独立登录 cs-agent，不复制正在使用的 Codex CLI / 桌面端凭据，以免多端争用轮换令牌。实现位于 `src/models/` 与 `src/admin/chatgpt-helper.ts`。
 
 点击「刷新模型列表」后，当前账号在 Codex 目录中可见的模型即可供管理页、主 agent 和子 agent 使用。上下文窗口、输入类型和推理能力取自目录，内置定义补充缺失字段。Codex 客户端协议版本固定在 `codex-protocol/package.json`，Dependabot 每周检查更新并提交 PR。这个独立清单只提供版本号，Worker 构建无需安装 CLI。验证协议更新时，应从账号目录选择型号并做一次真实推理。
 
