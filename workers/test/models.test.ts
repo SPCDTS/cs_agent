@@ -1,5 +1,7 @@
 import type { Context, Tool } from "@earendil-works/pi-ai";
-import { agentSearchOption } from "../src/tools/web-search";
+import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
+import { agentSearchOption, hostedSearchSteps, withHostedSearch } from "../src/tools/web-search";
 import { ModelAlarm } from "../src/model-alarm";
 import { zstdDecompressSync } from "node:zlib";
 import { env, reset, runInDurableObject } from "cloudflare:test";
@@ -406,10 +408,11 @@ describe("多账号目录恢复与共享生图", () => {
     expect((await models.openModels(env, store()).getAuth("openai-codex"))?.auth.apiKey).toBe(accessToken("subject-a"));
   });
 
-  it.each(["deepseek", "openai-codex"])("%s 回合用相同的 Codex 授权生图，网页只展示资产、不发送 QQ", async provider => {
+  it.each(["deepseek", "openai-codex", "google"])("%s 回合用相同的 Codex 授权生图，网页只展示资产、不发送 QQ", async provider => {
     network(); await login();
     await store().modify("deepseek", async () => ({ type: "api_key", key: "synthetic-deepseek" }));
-    const selection = { provider, id: provider === "openai-codex" ? "gpt-6-astra" : models.openModels(env, store()).getModels("deepseek")[0]!.id };
+    await store().modify("google", async () => ({ type: "api_key", key: "synthetic-gemini" }));
+    const selection = { provider, id: provider === "openai-codex" ? "gpt-6-astra" : models.openModels(env, store()).getModels(provider)[0]!.id };
     expect((await selectModel(selection)).status).toBe(200);
     const spec = models.MODEL_PROVIDERS[provider]!, original = spec.create;
     const faux = fauxProvider({ provider, models: [{ id: selection.id }], tokensPerSecond: Infinity });
@@ -532,4 +535,77 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
   expect(parentCalls).toBeGreaterThanOrEqual(2);
   expect(childCalls).toBe(2);
   expect(alarms.mock.calls.length).toBeGreaterThanOrEqual(parentCalls + childCalls);
+});
+
+describe("Gemini provider 与原生搜索适配", () => {
+  it("按 GEMINI_API_KEY 报告可用性、过滤已下线及专用端点并补齐 Gemini 4 型号", async () => {
+    const missing = (await models.providerStatuses(models.openModels(env, store()))).find(p => p.id === "google");
+    expect(missing).toMatchObject({ id: "google", name: "Gemini", available: false, reason: "missing_gemini_key" });
+
+    const active = models.openModels({ ...env, GEMINI_API_KEY: "test-gemini-key" }, store());
+    const status = (await models.providerStatuses(active)).find(p => p.id === "google")!;
+    expect(status).toMatchObject({ id: "google", available: true });
+    const ids = status.models.map(m => m.id);
+    expect(ids).toEqual(expect.arrayContaining(["gemini-3.8-flash", "gemini-3.1-pro-preview", "gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen", "gemini-4-neon"]));
+    expect(ids.some(id => id.startsWith("gemini-2.5-") || id.startsWith("deep-research-") || id.endsWith("-image") || id.includes("-live"))).toBe(false);
+  });
+
+  it("为 google-generative-ai 注入 googleSearch 与服务端调用开关，记录搜索轨迹且不污染续轮历史", async () => {
+    const gemini = models.openModels({ ...env, GEMINI_API_KEY: "test-gemini-key" }, store()).getModel("google", "gemini-3.8-flash")!;
+    let seenPayload: unknown;
+    let seenContext: Context | undefined;
+    const wrapped = withHostedSearch({
+      stream: () => { throw new Error("unused"); },
+      streamSimple: (m, ctx, opts) => lazyStream(m, async () => (async function* () {
+        seenContext = ctx;
+        seenPayload = await opts?.onPayload?.({ model: m.id, contents: [], config: { tools: [{ functionDeclarations: [{ name: "send_message" }] }] } }, m);
+        await opts?.onProviderStreamEvent?.({ candidates: [{ content: { parts: [
+          { toolCall: { id: "gs_call_1", toolType: "GOOGLE_SEARCH_WEB", args: { queries: ["Node.js 26 release", "Workers runtime"] } } },
+        ] } }] }, m);
+        await opts?.onProviderStreamEvent?.({ candidates: [{
+          content: { parts: [{ toolResponse: { id: "gs_call_1", toolType: "GOOGLE_SEARCH_WEB", response: {} } }] },
+          groundingMetadata: { groundingChunks: [{ web: { uri: "https://nodejs.org/en", title: "Node.js" } }] },
+        }] }, m);
+        const msg = { ...fauxAssistantMessage("ok"), provider: "google", api: "google-generative-ai" as const, model: m.id };
+        yield { type: "done" as const, reason: "stop" as const, message: msg };
+      })()),
+    });
+
+    const firstStream = wrapped.streamSimple(gemini, normalizeContext({
+      messages: [
+        { role: "system", content: "规则", toolsAdded: [{ name: "web_search", description: "legacy", parameters: {} as Tool["parameters"] }], timestamp: 1 },
+        { role: "user", content: [{ type: "text", text: "查一下" }], timestamp: 2 },
+      ],
+    }), { ...agentSearchOption, apiKey: "test" });
+    const first = await firstStream.result();
+    expect(seenPayload).toMatchObject({
+      config: {
+        tools: [{ functionDeclarations: [{ name: "send_message" }] }, { googleSearch: {} }],
+        toolConfig: { includeServerSideToolInvocations: true },
+      },
+    });
+    expect(hostedSearchSteps(first)).toMatchObject([{
+      item: {
+        type: "web_search_call",
+        id: "gs_call_1",
+        status: "completed",
+        action: { type: "search", query: "Node.js 26 release / Workers runtime", queries: ["Node.js 26 release", "Workers runtime"] },
+        sources: [{ url: "https://nodejs.org/en", title: "Node.js" }],
+      },
+    }]);
+
+    // 续轮回放时剥离旧版 web_search 声明，且不向 Gemini 消息塞入 Responses 专用签名块。
+    await wrapped.streamSimple(gemini, normalizeContext({
+      messages: [
+        { role: "system", content: "规则", toolsAdded: [{ name: "web_search", description: "legacy", parameters: {} as Tool["parameters"] }], timestamp: 1 },
+        { role: "user", content: [{ type: "text", text: "查一下" }], timestamp: 2 },
+        first,
+        { role: "user", content: [{ type: "text", text: "继续" }], timestamp: 3 },
+      ],
+    }), { ...agentSearchOption, apiKey: "test" }).result();
+    const replayedAssistant = seenContext?.messages.find(m => m.role === "assistant");
+    expect(replayedAssistant && "content" in replayedAssistant ? replayedAssistant.content.some(b => b.type === "thinking") : true).toBe(false);
+    const replayedSystem = seenContext?.messages.find(m => m.role === "system");
+    expect(replayedSystem && "toolsAdded" in replayedSystem ? replayedSystem.toolsAdded : []).toEqual([]);
+  });
 });

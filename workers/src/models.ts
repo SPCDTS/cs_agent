@@ -1,6 +1,8 @@
 import { createModels, createProvider, type Models, type MutableModels, type Provider } from "@earendil-works/pi-ai/models";
 import type { Api, Model, Credential, CredentialStore, ProviderStreams } from "@earendil-works/pi-ai";
 import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
+import { googleProvider } from "@earendil-works/pi-ai/providers/google";
+import { GOOGLE_MODELS } from "@earendil-works/pi-ai/providers/google.models";
 import { openAICodexResponsesApi } from "@earendil-works/pi-ai/api/openai-codex-responses.lazy";
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
@@ -56,8 +58,33 @@ function codexProvider({ fetch, codexModels = () => [] }: ProviderOptions = {}):
   return { ...provider, getModels: codexModels, getAllModels: codexModels, filterModels: available, filterAllModels: available };
 }
 
+const GOOGLE_EXTRA_MODELS: readonly { id: string; name: string; maxTokens: number }[] = [
+  { id: "gemini-4-carbon", name: "Gemini 4 Carbon", maxTokens: 32_768 },
+  { id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen", maxTokens: 65_536 },
+  { id: "gemini-4-neon", name: "Gemini 4 Neon", maxTokens: 65_536 },
+];
+
+function geminiModels(): readonly Model<"google-generative-ai">[] {
+  // 排除新账号已下线的 2.5 系列及非标准文本工具对话的专用端点。
+  const builtin = Object.values(GOOGLE_MODELS).filter(model =>
+    !model.id.startsWith("gemini-2.5-") && !model.id.startsWith("deep-research-")
+    && !model.id.endsWith("-image") && !model.id.includes("-live"));
+  const base = GOOGLE_MODELS["gemini-4-argon"];
+  const known = new Set<string>(builtin.map(model => model.id));
+  const extra = base ? GOOGLE_EXTRA_MODELS.filter(entry => !known.has(entry.id)).map(entry => ({ ...base, ...entry })) : [];
+  return [...builtin, ...extra];
+}
+
+function geminiProvider(): Provider {
+  // Google 适配器不允许传入自定义 fetch（拒绝 ModelAlarm.fetch），直连公开端点即可。
+  const provider = googleProvider();
+  const catalog = geminiModels();
+  return { ...provider, getModels: () => catalog, getAllModels: () => catalog, ...withHostedSearch(provider) };
+}
+
 export const MODEL_PROVIDERS: Record<string, ProviderSpec> = {
   deepseek: { name: "DeepSeek", listed: () => true, create: () => { const provider = deepseekProvider(); return { ...provider, ...withHostedSearch(provider, openAIResponsesApi()) }; }, unavailable: "missing_key" },
+  google: { name: "Gemini", listed: () => true, create: geminiProvider, unavailable: "missing_gemini_key" },
   [CODEX_PROVIDER]: { name: "ChatGPT 订阅", listed: () => true, create: codexProvider, unavailable: "login_required" },
   ...(FAUX_PROVIDER ? { faux: FAUX_PROVIDER } : {}),
 };

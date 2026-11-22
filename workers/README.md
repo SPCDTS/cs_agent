@@ -12,7 +12,7 @@
 
 ## 模型与 ChatGPT 登录
 
-模型选择保存在 Registry，后续回合读取当前配置。DeepSeek 使用 `DEEPSEEK_API_KEY`。ChatGPT 订阅使用 Codex 原生 OAuth，provider id `openai-codex` 和已有会话模型选择保留，推理走 `chatgpt.com/backend-api/codex/responses`，复用 pi-ai 的 Codex SSE 适配。
+模型选择保存在 Registry，后续回合读取当前配置。DeepSeek 使用 `DEEPSEEK_API_KEY`，Gemini 使用 `GEMINI_API_KEY`。ChatGPT 订阅使用 Codex 原生 OAuth，provider id `openai-codex` 和已有会话模型选择保留，推理走 `chatgpt.com/backend-api/codex/responses`，复用 pi-ai 的 Codex SSE 适配。
 
 1. 在管理页的模型设置中添加账号或选择已有账号，开始授权。
 2. 下载本机助手，用 Node.js 24+ 执行页面给出的命令并输入一次性配对码。

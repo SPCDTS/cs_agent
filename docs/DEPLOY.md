@@ -28,7 +28,7 @@ npm run check
 私有配置不进入 Git。`.env.example` 只列上传脚本使用的配置名；真实 `.env`、`secrets/` 继续由 Git 忽略。
 
 - 必需：`NAPCAT_TOKEN`、`QQ_OWNER`、`ADMIN_TOKEN`、`OAUTH_STORE_KEY`。
-- 模型：DeepSeek 使用 `DEEPSEEK_API_KEY`；ChatGPT 订阅在管理页用一次性本机助手完成 Codex 原生授权。流程与诊断见 [模型与登录](../workers/README.md#模型与-chatgpt-登录)。
+- 模型：DeepSeek 使用 `DEEPSEEK_API_KEY`，Gemini 使用 `GEMINI_API_KEY`；ChatGPT 订阅在管理页用一次性本机助手完成 Codex 原生授权。流程与诊断见 [模型与登录](../workers/README.md#模型与-chatgpt-登录)。
 - Gmail：按需提供 `GMAIL_CLIENT_ID`、`GMAIL_CLIENT_SECRET`、`GMAIL_REFRESH_TOKEN`，推送来源配置在 Wrangler vars。
 - MCP：`workers/mcp.json` 是首次初始化模板，默认空目录。已有 Registry 中保存的服务和 secret 引用不会被新部署覆盖；新实例通过 agent 或管理页接入，Token 加密保存在 Registry，无需逐个上传 Cloudflare Secret。见 [动态 MCP 接入](MCP-SETUP.md)；Workshop 本机连接见 [本机说明](WORKSHOP-LOCAL.md)。
 

@@ -125,7 +125,7 @@ async function knownView(env: Env, key: string) {
   return threadView(env, key);
 }
 
-const SECRET_NAMES = ["ADMIN_TOKEN", "NAPCAT_TOKEN", "QQ_OWNER", "QQ_ALLOW_USERS", "QQ_ALLOW_GROUPS", "OAUTH_STORE_KEY", "DEEPSEEK_API_KEY"] as const;
+const SECRET_NAMES = ["ADMIN_TOKEN", "NAPCAT_TOKEN", "QQ_OWNER", "QQ_ALLOW_USERS", "QQ_ALLOW_GROUPS", "OAUTH_STORE_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY"] as const;
 
 export const ADMIN_ROUTES: AdminRoute[] = [
   { method: "GET", path: "/admin/health", handle: async ({ env }) => json(await healthReport(env)) },
