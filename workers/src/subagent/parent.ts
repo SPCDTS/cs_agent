@@ -57,13 +57,13 @@ const PARAMETERS = Type.Object({
   action: Type.Union([Type.Literal("spawn"), Type.Literal("message"), Type.Literal("list"), Type.Literal("cancel")]),
   sandboxId: Type.Optional(ResourceIdSchema),
   mcpTools: Type.Optional(McpToolSelectionSchema),
-  task: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "spawn: a self-contained task description" })),
-  summary: Type.Optional(Type.String({ minLength: 1, maxLength: 80, description: "spawn: provide a 15–30 character Chinese task summary for the admin topology, describing the work without credentials or raw arguments" })),
-  id: Type.Optional(Type.String({ pattern: `^${SUBAGENT_ID}$`, description: "message / cancel: the subagent id returned by spawn or list" })),
-  text: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "message: a follow-up message for that subagent" })),
-  timeoutMs: Type.Optional(Type.Integer({ minimum: MIN_TIMEOUT_MS, description: "spawn: optional task deadline in ms; omit for no automatic timeout" })),
+  task: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "spawn 必填：自包含的任务目标、上下文与验收标准" })),
+  summary: Type.Optional(Type.String({ minLength: 1, maxLength: 80, description: "spawn 必填：15–30 字中文任务简介（供管理台展示，不含凭据或原始参数）" })),
+  id: Type.Optional(Type.String({ pattern: `^${SUBAGENT_ID}$`, description: "message / cancel 必填：spawn 或 list 返回的子 agent ID" })),
+  text: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "message 必填：追加给该子 agent 的说明" })),
+  timeoutMs: Type.Optional(Type.Integer({ minimum: MIN_TIMEOUT_MS, description: "spawn 可选：明确截止时长（毫秒）；无硬期限请省略" })),
 }, { additionalProperties: false });
-const DESCRIPTION = `Proactively delegate independent research, implementation, review or long-running work to background subagents with their own context. For spawn, provide a self-contained task, acceptance criteria and a short Chinese summary. spawn returns immediately: continue independent work, then yield when waiting for results; do not poll or repeat the delegated task. Results arrive automatically as a '[子 agent 完成]' input; integrate and verify them before reporting through the current reply channel. message continues an existing subagent, list shows this chat's subagents, cancel stops unnecessary work. There is no fixed concurrency, task lifetime or model-call budget; timeoutMs is optional. Subagents inherit approved MCP and skills. Optional mcpTools narrows MCP to the named servers and raw tool names, without MCP resource access. An empty array grants no MCP tools. sandboxId on spawn assigns a concrete resource from sandbox_list.resources. The same resource ID shares files and runtime; to work independently, call sandbox_create first and assign its returned ID. Multiple children may use that same new ID. Omit sandboxId to inherit the parent default resource; spawn never creates or clones a workspace. Each child may use only its assigned Cloudflare workspace. Access to remote environments follows the authorized MCP tools. Subagents cannot send messages, grant permissions or publish skills.`;
+const DESCRIPTION = "管理后台独立上下文子 agent（spawn 派出 / message 追问 / list 查看 / cancel 取消）。spawn 立即返回，结果以“[子 agent 完成]”自动唤醒父回合；勿轮询 list。默认继承当前会话已批准的技能与 MCP；传 mcpTools 可按服务与原始工具名收敛权限（空数组为不授 MCP，且不含 MCP 资源读取）。传 sandboxId 绑定 sandbox_list 中的工作区（同 ID 共享文件与运行时；需隔离请先调 sandbox_create 再传入返回 ID；省略则继承父默认工作区）。子 agent 不能直接发消息、改权限或发布技能。";
 
 /** 父线程的子 agent 登记：派出、交代、取消、汇报入队与超时，都经这张表。 */
 export class ParentSubagents {

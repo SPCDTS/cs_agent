@@ -14,6 +14,9 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import * as models from "../src/models";
 
+let seq = 0;
+const nextInput = (text: string, userId = 10000001, groupId?: number, mention = false) => input(++seq, text, userId, groupId, mention);
+
 afterEach(async () => {
   vi.restoreAllMocks();
   await reset();
@@ -41,7 +44,7 @@ describe("coding tools", () => {
     vi.spyOn(SandboxDO.prototype, "createTempDir").mockResolvedValue("/work/.codemode/full-text");
     const write = vi.spyOn(SandboxDO.prototype, "writeFile").mockResolvedValue({ bytes: 50000 });
     const seen = scriptedModel([{ name: "codemode", args: { code: 'text("完整文本".repeat(12500));' } }]);
-    await env.THREAD.getByName("owner").submit(input(1, "生成完整输出", 10000001));
+    await env.THREAD.getByName("owner").submit(nextInput("生成完整输出", 10000001));
     expect(write).toHaveBeenCalledWith("/work/.codemode/full-text/output.txt", "完整文本".repeat(12500));
     expect(seen.outputs.join("\n")).toContain("Full output: /work/.codemode/full-text/output.txt");
   });
@@ -56,7 +59,7 @@ describe("coding tools", () => {
         if (failure === "generation") await runInDurableObject(env.THREAD.getByName("owner"), (_current, currentState) => { currentState.storage.sql.exec("UPDATE session_state SET generation=generation+1 WHERE id=1"); });
         return "/work/.codemode/test";
       });
-      await threadWithBindings(instance, state, currentEnv).submit(input(1, "截图", 10000001));
+      await threadWithBindings(instance, state, currentEnv).submit(nextInput("截图", 10000001));
     });
     expect(write).toHaveBeenCalledTimes(failure === "persistence" ? 1 : 0);
     expect(seen.outputs.join("\n")).toContain(failure === "persistence" ? "persistence_failed" : "permission_denied");
@@ -67,18 +70,18 @@ describe("coding tools", () => {
     const exported = vi.spyOn(SandboxDO.prototype, "exportAsset");
     const seen = scriptedModel([{ name: "send_file", args: { path: "/work/out/image.png", sandboxId: resource.id } }]);
     const group = kind === "group";
-    await env.THREAD.getByName(group ? "group:200000001" : "owner").submit(input(1, "发送图片", group ? 10000004 : 10000001, group ? 200000001 : undefined, group));
+    await env.THREAD.getByName(group ? "group:200000001" : "owner").submit(nextInput("发送图片", group ? 10000004 : 10000001, group ? 200000001 : undefined, group));
     expect(exported).not.toHaveBeenCalled();
     expect(seen.outputs.join("\n")).toContain(group ? "permission_denied" : "invalid_request");
   });
   it("owner 与群成员获得 CodeMode、网页读取和生图，沙箱工具只经 CodeMode 暴露", async () => {
     const seen = scriptedModel([{ name: "", args: {} }, { name: "", args: {} }]);
-    expect(await env.THREAD.getByName("owner").submit(input(1, "写个脚本", 10000001))).toEqual({ status: "done" });
+    expect(await env.THREAD.getByName("owner").submit(nextInput("写个脚本", 10000001))).toEqual({ status: "done" });
     expect(seen.requests[0]!.tools).toContain("codemode");
-    expect(Object.values(seen.requests[0]!.sections)).toContain(CLOUDFLARE_INSTRUCTIONS + CLOUDFLARE_RESOURCE_INSTRUCTIONS);
+    expect(Object.values(seen.requests[0]!.sections)).toContain(`<sandbox>\n${CLOUDFLARE_INSTRUCTIONS}${CLOUDFLARE_RESOURCE_INSTRUCTIONS}\n</sandbox>`);
     for (const name of [...CODING_TOOLS, "skill_inspect", "skill_publish"]) expect(seen.requests[0]!.tools).not.toContain(name);
-    expect(await env.THREAD.getByName("group:200000001").submit(input(2, "跑个脚本", 10000004, 200000001, true))).toEqual({ status: "done" });
-    expect(Object.values(seen.requests[1]!.sections)).toContain(CLOUDFLARE_INSTRUCTIONS);
+    expect(await env.THREAD.getByName("group:200000001").submit(nextInput("跑个脚本", 10000004, 200000001, true))).toEqual({ status: "done" });
+    expect(Object.values(seen.requests[1]!.sections)).toContain(`<sandbox>\n${CLOUDFLARE_INSTRUCTIONS}\n</sandbox>`);
     for (const name of CODING_TOOLS) expect(seen.requests[1]!.tools).not.toContain(name);
     for (const request of seen.requests) expect(request.tools).toEqual(expect.arrayContaining(["codemode", "web_page", "generate_image"]));
   });
@@ -87,7 +90,7 @@ describe("coding tools", () => {
     vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
     const exec = vi.spyOn(SandboxDO.prototype, "exec").mockResolvedValue({ stdout: "ok", stderr: "", code: 0, timedOut: false, truncated: false });
     const seen = scriptedModel([{ name: "codemode", args: { code: 'text(await tools.bash({command:"one"})); text(await tools.bash({command:"two"}));' } }]);
-    expect(await env.THREAD.getByName("owner").submit(input(1, "运行", 10000001))).toEqual({ status: "done" });
+    expect(await env.THREAD.getByName("owner").submit(nextInput("运行", 10000001))).toEqual({ status: "done" });
     expect(exec).toHaveBeenCalledTimes(2);
     expect(exec.mock.calls[0]![1]!.operationId).not.toBe(exec.mock.calls[1]![1]!.operationId);
     expect(seen.outputs.join("\n")).toContain("ok");
@@ -123,14 +126,14 @@ describe("coding tools", () => {
     };
     faux.setResponses([respond]);
     vi.spyOn(models, "openModels").mockImplementation(() => { const registry = createModels(); registry.setProvider(faux.provider); return registry; });
-    await env.THREAD.getByName("owner").submit(input(1, "查看图片", 10000001));
+    await env.THREAD.getByName("owner").submit(nextInput("查看图片", 10000001));
     expect(images).toContain(data);
   });
 
   it("refuses direct model sandbox calls", async () => {
     const exec = vi.spyOn(SandboxDO.prototype, "exec");
     scriptedModel([{ name: "bash", args: { command: "must-not-run" } }]);
-    await env.THREAD.getByName("owner").submit(input(1, "运行", 10000001));
+    await env.THREAD.getByName("owner").submit(nextInput("运行", 10000001));
     expect(exec).not.toHaveBeenCalled();
   });
 
@@ -143,7 +146,7 @@ describe("coding tools", () => {
         else await runInDurableObject(env.THREAD.getByName("owner"), (_current, currentState) => { currentState.storage.sql.exec("UPDATE session_state SET generation = generation + 1 WHERE id=1"); });
         return { stdout: "first", stderr: "", code: 0, timedOut: false, truncated: false };
       });
-      await threadWithBindings(_instance, state, currentEnv).submit(input(1, "运行", 10000001));
+      await threadWithBindings(_instance, state, currentEnv).submit(nextInput("运行", 10000001));
       expect(exec).toHaveBeenCalledTimes(1);
     });
     expect(seen.outputs.join("\n")).toContain("本回合无权使用沙箱工具");
@@ -152,14 +155,14 @@ describe("coding tools", () => {
   it("refuses sandbox calls in event turns even when Code Mode is available", async () => {
     const exec = vi.spyOn(SandboxDO.prototype, "exec");
     const seen = scriptedModel([{ name: "codemode", args: { code: 'text(await tools.bash({command:"forbidden"}));' } }]);
-    await env.THREAD.getByName("owner").submit({ ...input(1, "事件", 10000001), kind: "event" });
+    await env.THREAD.getByName("owner").submit({ ...nextInput("事件", 10000001), kind: "event" });
     expect(exec).not.toHaveBeenCalled();
     expect(seen.outputs.join("\n")).toContain("本回合无权使用沙箱工具");
   });
 
   it("tells the model the sandbox is unavailable and audits only the classification", async () => {
     const seen = scriptedModel([{ name: "codemode", args: { code: 'text(await tools.bash({command:"cat 秘密文件.txt"}));' } }, { name: "codemode", args: { code: 'text(await tools.write({path:"out/a.txt",content:"机密内容"}));' } }, { name: "", args: {} }]);
-    expect(await env.THREAD.getByName("owner").submit(input(1, "跑一下", 10000001))).toEqual({ status: "done" });
+    expect(await env.THREAD.getByName("owner").submit(nextInput("跑一下", 10000001))).toEqual({ status: "done" });
     expect(seen.outputs[0]).toContain("sandbox_unavailable");
     expect(seen.outputs[1]).toContain("sandbox_unavailable");
     const exec = await auditRows("coding_exec"), write = await auditRows("coding_write");
@@ -171,7 +174,7 @@ describe("coding tools", () => {
   it("shows stdout, stderr and a non-zero exit code to the model", async () => {
     const exec = vi.spyOn(SandboxDO.prototype, "exec").mockResolvedValue({ stdout: "built\n", stderr: "warning: x\n", code: 2, timedOut: false, truncated: false });
     const seen = scriptedModel([{ name: "codemode", args: { code: 'text(await tools.bash({command:"make",timeout:90}));' } }, { name: "", args: {} }]);
-    expect(await env.THREAD.getByName("owner").submit(input(1, "编译", 10000001))).toEqual({ status: "done" });
+    expect(await env.THREAD.getByName("owner").submit(nextInput("编译", 10000001))).toEqual({ status: "done" });
     expect(exec).toHaveBeenCalledWith("make", { cwd: "/work", timeoutMs: 90_000, operationId: expect.stringMatching(/^task:/) });
     expect(seen.outputs[0]).toContain("built\n\n[stderr]\nwarning: x\n\nCommand exited with code 2");
     expect(await auditRows("coding_exec")).toEqual([{ result: "ok", commandLength: 4, code: 2, ms: expect.any(Number) }]);
@@ -185,7 +188,7 @@ describe("coding tools", () => {
       { name: "codemode", args: { code: 'text(await tools.edit({path:"main.py",edits:JSON.stringify([{oldText:"a",newText:"A"}])}));' } },
       { name: "", args: {} },
     ]);
-    expect(await env.THREAD.getByName("owner").submit(input(1, "改一下", 10000001))).toEqual({ status: "done" });
+    expect(await env.THREAD.getByName("owner").submit(nextInput("改一下", 10000001))).toEqual({ status: "done" });
     expect(seen.outputs[0]).toContain("a\nb\n\n[Showing lines 1-2 of 5. Use offset=3 to continue.]");
     expect(edit).toHaveBeenCalledWith("main.py", [{ oldText: "a", newText: "A" }], expect.stringMatching(/^task:/));
     expect(seen.outputs[1]).toContain("Successfully replaced 1 block(s) in main.py.");
@@ -212,7 +215,7 @@ it("Code Mode 创建资源并把显式 sandboxId 路由至该 Cloudflare DO", as
     return { stdout: "ok", stderr: "", code: 0, timedOut: false, truncated: false };
   });
   const seen = scriptedModel([{ name: "codemode", args: { code: 'const list=await tools.sandbox_list({}); const created=await tools.sandbox_create({providerId:"cloudflare",sourceId:list.assignedSandboxId}); text(created); text(await tools.bash({sandboxId:created.id,command:"pwd"})); text(await tools.bash({command:"pwd"}));' } }]);
-  await env.THREAD.getByName("owner").submit(input(1, "创建独立沙箱", 10000001));
+  await env.THREAD.getByName("owner").submit(nextInput("创建独立沙箱", 10000001));
   expect(seen.outputs.join("\n")).toContain('"kind":"cloudflare"');
   expect(targets).toHaveLength(2);
   expect(targets[0]).not.toBe(targets[1]);

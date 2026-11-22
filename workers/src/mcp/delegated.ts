@@ -41,7 +41,7 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
       const access = await host.validateSubagentAccess(id);
       if (!agent.callable.some(tool => tool.name === "bash") || !access?.capabilities.coding || !access.authority.owner) return;
       return CLOUDFLARE_DELEGATED_INSTRUCTIONS + (access.sandbox ? "分配给你的资源 ID：" + access.sandbox.id + "。同 ID 的 agent 共享文件；只有父 agent 分配的新资源才独立。" : "这是升级前已派出的独立工作区。");
-    }, { tag: false })],
+    })],
     tools: [
     defineTool({ name: "bash", callers: ["tools"], description: "在分配的 Cloudflare 资源执行命令，最长60秒；同 ID 的 agent 共享此工作区。",
       parameters: Type.Object({ command: Type.String({ minLength: 1 }), timeout: Type.Optional(Type.Number({ minimum: 1, maximum: 60 })) }, { additionalProperties: false }),
