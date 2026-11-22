@@ -2,6 +2,7 @@ import { env, reset, runInDurableObject, evictDurableObject, runDurableObjectAla
 import { afterEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { RequestsDO } from "../src/requests/do";
+import { ProjectionPublisher, type ProjectionBatch } from "../src/requests/projection";
 import { ThreadDO } from "../src/thread";
 import { threadView } from "../src/admin/read-views";
 import { ModelAlarm } from "../src/model-alarm";
@@ -89,4 +90,33 @@ it("子任务列表先按真实活动排序再截取，较早创建的活跃任�
   expect(response.status).toBe(200);expect(list).toHaveLength(50);
   expect(list[0]).toMatchObject({id:activeId,lastActiveAt:now});
   expect(list.at(-1)?.id).toBe("00000000-0000-0000-0000-000000000002");
+});
+
+it("在飞投影期间写入维护 KV 后仍会同步最新 info",async()=>{
+  await runInDurableObject(env.THREAD.getByName("owner"),async(_instance,state)=>{
+    const applied:ProjectionBatch[]=[],agingAt=1_700_000_000_000,consolidateAt=1_700_000_001_000;
+    let entered!:()=>void,release!:()=>void;
+    const reached=new Promise<void>(r=>{entered=r;}),gate=new Promise<void>(r=>{release=r;});
+    const fakeEnv={...env,REQUESTS:{getByName:()=>({
+      applyProjection:async(batch:ProjectionBatch)=>{
+        applied.push(batch);
+        // 1) 在中间批次（complete:false）RPC 期间写入 KV，尾部重读 info 应立即带上。
+        if(applied.length===1)await state.storage.put("maint:aging_last_run",agingAt);
+        // 2) 在 complete:true RPC 期间写入 KV 并并发 flush，应触发续跑补发最新 info。
+        if(applied.length===2){entered();await gate;}
+      },
+    })}} as unknown as typeof env;
+    state.storage.sql.exec("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL)");
+    const publisher=new ProjectionPublisher(state,fakeEnv,async()=>"thread:owner",async()=>{});
+    publisher.install();
+    state.storage.sql.exec("INSERT INTO events(at, kind, detail) VALUES (1, 'memory_consolidate', '{}')");
+    const first=publisher.flush();
+    await reached;
+    await state.storage.put("maint:consolidate_last_run",consolidateAt);
+    const second=publisher.flush();
+    release();
+    await Promise.all([first,second]);
+    expect(applied[1]).toMatchObject({complete:true,info:{agingLastRun:agingAt,consolidateLastRun:null}});
+    expect(applied.at(-1)).toMatchObject({complete:true,info:{agingLastRun:agingAt,consolidateLastRun:consolidateAt}});
+  });
 });
