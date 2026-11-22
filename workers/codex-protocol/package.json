@@ -1,0 +1,7 @@
+{
+  "name": "cs-agent-codex-protocol",
+  "private": true,
+  "devDependencies": {
+    "@openai/codex": "0.171.0"
+  }
+}
