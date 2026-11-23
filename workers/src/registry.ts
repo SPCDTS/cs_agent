@@ -1,3 +1,4 @@
+import { SharedCredentials, SHARED_CREDENTIAL_SCHEMA, type WriteCredential } from "./credentials/store";
 import { EDGE_SCHEMA, EdgeStore } from "./communication/edges";
 import { DurableObject } from "cloudflare:workers";
 import { Type } from "typebox";
@@ -41,6 +42,7 @@ export class RegistryDO extends DurableObject<Env> {
   private readonly alertStore = new AlertStore(this.ctx.storage);
   private alertDrain?: Promise<void>;
   private readonly vault = new TokenVault(this.env.OAUTH_STORE_KEY);
+  private readonly httpCredentials = new SharedCredentials(this.ctx.storage.sql, this.vault);
   private readonly mcpServers = new McpServerStore(this.ctx.storage.sql, this.vault, this.env.PUBLIC_ORIGIN);
   private readonly cloudflare = new CloudflareGrant(this.ctx.storage.sql, this.vault, this.env);
   private readonly cloudManager = new CloudflareManagement(this.ctx.storage.sql, scope => this.lock('cf:grant', async () => {
@@ -60,6 +62,7 @@ export class RegistryDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`
+      ${SHARED_CREDENTIAL_SCHEMA}
       ${EDGE_SCHEMA}
       CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (
         server_id TEXT NOT NULL, account_id TEXT NOT NULL, revision TEXT NOT NULL, issuer TEXT NOT NULL,
@@ -94,6 +97,30 @@ export class RegistryDO extends DurableObject<Env> {
   deviceClaim(id: string, token: string, claim: string) { return this.lock('device:' + id, () => this.devices.claim(id, token, claim)); }
   deviceReady(id: string, token: string, claim: string) { return this.lock('device:' + id, () => this.devices.ready(id, token, claim)); }
   deviceRevoke(id: string) { return this.lock('device:' + id, () => this.devices.revoke(id)); }
+
+  sharedCredentialList(scope: string) { return this.httpCredentials.list(scope); }
+  async sharedCredentialSave(change: WriteCredential, bytes: Uint8Array) {
+    const saved = await this.httpCredentials.save(change, bytes);
+    this.closeCredentialAlerts(saved.ref);
+    return saved;
+  }
+  sharedCredentialGrant(ref: string, group: string, allow: boolean) { return this.httpCredentials.share(ref, group, allow); }
+  sharedCredentialForget(ref: string, expectedRevision: string) {
+    return this.ctx.storage.transactionSync(() => {
+      const result = this.httpCredentials.forget(ref, expectedRevision);
+      this.closeCredentialAlerts(ref);
+      return result;
+    });
+  }
+  private closeCredentialAlerts(ref: string) {
+    for (const origin of ["qq", "web"] as const) this.resolveAlert("credential_login", "credential:" + ref, origin);
+  }
+  sharedCredentialRequest(scope: string, ref: string, url: string, origin: "qq" | "web") {
+    return this.httpCredentials.request(scope, ref, url, revision => {
+      this.recordAlert({ kind: "credential_login", scope: "credential:" + ref, origin, episode: revision,
+        message: `共享凭证 ${ref} 需要更新，请在主人会话重新登录并导入新的凭证文件。` });
+    });
+  }
 
   mcpConfig() { return this.mcpServers.config(); }
   mcpServersList() { return this.mcpServers.list(); }

@@ -5,6 +5,7 @@ import type { OpsSettings } from "./settings";
 
 export const AlertKindSchema = Type.Union([
   Type.Literal("model_auth"),
+  Type.Literal("credential_login"),
   Type.Literal("model_failures"),
   Type.Literal("qq_disconnect"),
   Type.Literal("schedule_paused"),
