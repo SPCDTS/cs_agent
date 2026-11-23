@@ -1,4 +1,4 @@
-import { copyJson, type JsonValue } from "@earendil-works/chord";
+import { copyJson, type JsonValue } from "@earendil-works/chord/json";
 import { Type, type TSchema } from "typebox";
 import { Check } from "typebox/value";
 import type { McpLimits } from "./config";

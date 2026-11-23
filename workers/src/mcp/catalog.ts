@@ -1,4 +1,4 @@
-import { copyJson } from "@earendil-works/chord";
+import { copyJson } from "@earendil-works/chord/json";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import type { SqliteDatabase } from "@earendil-works/chord/sqlite";
 import { Type } from "typebox";

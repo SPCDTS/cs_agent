@@ -1,8 +1,7 @@
 import type { Context } from "@earendil-works/chord/context";
 import { sha256Hex } from "../shared/hash";
-import { Type } from "@earendil-works/pi-ai";
+import { Type, type Static, type TSchema } from "typebox";
 import { defineExtension, defineTool, section, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
-import type { Static, TSchema } from "typebox";
 import { Check } from "typebox/value";
 import type { SandboxDO } from "../sandbox/do";
 import { CreateResourceSchema, ResourceIdSchema, ResourceListSchema, SandboxResourceSchema } from "../sandbox/resources";
@@ -64,11 +63,13 @@ export const SandboxReadOutput = Type.Union([
 
 const text = (value: string, isError = false): ToolExecutionResult => ({ ...(isError ? { isError } : {}), output: [{ type: "text", text: value }] });
 
+type CodingArgs<P extends TSchema> = Parameters<ToolRegistration<P>["execute"]>[0];
+
 type CodingTool<P extends TSchema> = Omit<ToolRegistration<P>, "execute"> & {
   kind: CodingAuditKind;
   /** 调用前就能确定的审计字段（如命令长度），失败时也要记。 */
-  audit?(args: Static<P>): object;
-  run(args: Static<P>, sandbox: SandboxApi, api: ToolExecutionApi, context: Context): Promise<{ result: ToolExecutionResult; outcome?: string; audit?: object }>;
+  audit?(args: CodingArgs<P>): object;
+  run(args: CodingArgs<P>, sandbox: SandboxApi, api: ToolExecutionApi, context: Context): Promise<{ result: ToolExecutionResult; outcome?: string; audit?: object }>;
 };
 
 function codingTool<P extends TSchema>(deps: CodingDeps, { kind, audit, run, ...tool }: CodingTool<P>) {
@@ -78,7 +79,7 @@ function codingTool<P extends TSchema>(deps: CodingDeps, { kind, audit, run, ...
       if (!await deps.allowed(api, context, kind)) return text(NOT_ALLOWED, true);
       const started = Date.now(), before = audit?.(args) ?? {};
       try {
-        const { result, outcome, audit: after } = await run(args, await deps.sandbox("sandboxId" in args && typeof args.sandboxId === "string" ? args.sandboxId : undefined), api, context);
+        const { result, outcome, audit: after } = await run(args, await deps.sandbox(args && typeof args === "object" && "sandboxId" in args && typeof args.sandboxId === "string" ? args.sandboxId : undefined), api, context);
         await deps.record(kind, { result: outcome ?? "ok", ...before, ...after, ms: Date.now() - started });
         return result;
       } catch (error) {

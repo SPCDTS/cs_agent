@@ -1,4 +1,4 @@
-import { copyJson } from "@earendil-works/chord";
+import { copyJson } from "@earendil-works/chord/json";
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { McpLimits } from "./config";

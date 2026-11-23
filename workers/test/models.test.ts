@@ -314,6 +314,34 @@ describe("model selection and Codex Responses", () => {
     expect(upstream).toHaveBeenCalledTimes(1);
   });
 
+  it("GPT-6.2 Astra 的两个子任务在请求中保留相同的 developer 前缀", async () => {
+    network({ [CODEX_MODELS_URL]: async () => Response.json({ models: [{ slug: "gpt-6.2-astra", display_name: "Astra", visibility: "list" }] }) });
+    await login();
+    const base = models.openModels(env, store()), [model] = await base.getAvailable("openai-codex");
+    expect(model.id).toBe("gpt-6.2-astra");
+    const requests: { input: unknown[]; instructions?: string }[] = [];
+    network({ [CODEX_BASE_URL + "/responses"]: async request => {
+      requests.push(await request.json());
+      return new Response('data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n', { headers: { "Content-Type": "text/event-stream" } });
+    } });
+    const rules = "共用的工具说明与执行规则";
+    const tasks = ["核对第一个文件", "核对第二个文件"];
+    for (const task of tasks) {
+      const context: Context = { messages: [
+        { role: "system", content: rules, timestamp: 0 },
+        { role: "user", content: task, timestamp: 1 },
+      ] };
+      expect((await base.streamSimple(model, context, { transport: "sse" }).result()).stopReason).toBe("stop");
+    }
+    expect(requests).toHaveLength(2);
+    for (const [index, request] of requests.entries()) {
+      expect(request).not.toHaveProperty("instructions");
+      expect(request.input[0]).toMatchObject({ role: "developer", content: rules });
+      expect(request.input.at(-1)).toMatchObject({ role: "user", content: [{ type: "input_text", text: tasks[index] }] });
+    }
+    expect(requests[1].input.slice(0, -1)).toEqual(requests[0].input.slice(0, -1));
+  });
+
   it("旧会话只声明原生搜索，保留历史函数调用、结果和其他工具的撤销提示", async () => {
     network(); await login();
     const base = models.openModels(env, store()), [model] = await base.getAvailable("openai-codex");

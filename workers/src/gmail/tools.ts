@@ -1,5 +1,5 @@
 import type { Context } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import type { GmailResult, EventsDO } from "../events/do";
 import type { TurnKind } from "../policy";

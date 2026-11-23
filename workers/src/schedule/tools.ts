@@ -1,5 +1,5 @@
 import type { Context } from "@earendil-works/chord/context";
-import { Type, type Static } from "@earendil-works/pi-ai";
+import { Type, type Static } from "typebox";
 import { defineExtension, defineTool, section, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import type { Env } from "../env";
 import { formatBeijingTime } from "../memory/time";

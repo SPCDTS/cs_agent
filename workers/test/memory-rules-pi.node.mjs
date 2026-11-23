@@ -14,7 +14,7 @@ const message=(value)=>({role:"system",content:"",sections:{"memory-rules":value
 const view=messages=>({messages,entries:messages.filter(m=>m.role==="system").map((m,i)=>({kind:"pi.system",id:String(i),model:[m]}))});
 const context={};
 test("pinned Pi keeps thrown sections but explicit degradation replaces them; unchanged/null patches and rebuilt head are deterministic",async()=>{
-  assert.equal(JSON.parse(await readFile(new URL("../node_modules/@earendil-works/pi-durable/package.json",import.meta.url))).version,"1.4.0");
+  assert.equal(JSON.parse(await readFile(new URL("../node_modules/@earendil-works/pi-durable/package.json",import.meta.url))).version,"1.6.0");
   const shown=new Map([["memory-rules",old]]);
   const thrown=await renderSections([{key:"memory-rules",tag:false,render:()=>{throw Error("read");}}],{},shown,()=>{},context);
   assert.equal(thrown.get("memory-rules"),old);

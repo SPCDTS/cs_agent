@@ -16,7 +16,7 @@ import type { SubagentCodingOperation, SubagentCapabilityHost } from "./mcp/dele
 import { DurableObject } from "cloudflare:workers";
 import { MemoryManager } from "./memory/management";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
-import type { Static } from "@earendil-works/pi-ai";
+import type { Static } from "typebox";
 import { InboxDoc, LiveDoc, type Harness, type Conversation, type SettledSubmissionRecord, type Submission } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { Env } from "./env";

@@ -9,7 +9,7 @@ import { installCodemode } from "../codemode";
 import { SandboxReadOutput } from "../tools/coding";
 import { boundedJson, compileMcpSchema } from "./schema";
 import { MCP_CONFIG } from "./config";
-import { slug, toolNames } from "./names";
+import { toolNames } from "./names";
 import { McpAuthoritySchema, snapshotCatalogs, type McpAuthority } from "./access";
 import { SandboxResourceSchema, type SandboxResource } from "../sandbox/resources";
 import type { SandboxTask } from "../sandbox/task-access";
@@ -60,13 +60,15 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
   if (catalogs.length) {
     registry.install(defineExtension({ name: "cs.subagent.mcp",
       sections: [section("mcp-delegation", () => "MCP 只能使用派出目录、环境范围与父线程当前授权的交集；写调用可能等待逐次审批。网页来源保持网页，不得另行通知 QQ。" + MCP_RESULT_INSTRUCTIONS)] }));
-    for (const catalog of catalogs) registry.install(defineExtension({ name: `cs.subagent.mcp.${catalog.serverId}`, tools: catalog.tools.map(tool => {
-      const name = toolNames(catalog, tool).nativeName, input = compileMcpSchema(tool.inputSchema, MCP_CONFIG.limits);
-      const output = tool.outputSchema ? compileMcpSchema(tool.outputSchema, MCP_CONFIG.limits) : undefined;
-      return defineTool({ name, description: tool.description, parameters: input.schema,
-        structuredOutputSchema: mcpCodemodeSchema(output?.schema), replay: "unsafe", callers: ["tools"],
-        execute: async (args, api) => mcpCodemodeResult(await host.subagentMcp(id, { name, args, operationId: String(api.taskId) })) });
-    }) }));
+    for (const catalog of catalogs) registry.install(defineExtension({ name: `cs.subagent.mcp.${catalog.serverId}`,
+      ...(catalog.tools.length ? { namespace: { name: catalog.serverId, description: "" } } : {}),
+      tools: catalog.tools.map(tool => {
+        const name = toolNames(catalog, tool).nativeName, input = compileMcpSchema(tool.inputSchema, MCP_CONFIG.limits);
+        const output = tool.outputSchema ? compileMcpSchema(tool.outputSchema, MCP_CONFIG.limits) : undefined;
+        return defineTool({ name, description: tool.description, parameters: input.schema,
+          structuredOutputSchema: mcpCodemodeSchema(output?.schema), replay: "unsafe", callers: ["tools"],
+          execute: async (args, api) => mcpCodemodeResult(await host.subagentMcp(id, { name, args, operationId: String(api.taskId) })) });
+      }) }));
     if (snapshot?.resourceAllow?.some(row => row.prefixes.length)) registry.install(defineExtension({ name: "cs.subagent.mcp.resources", tools: (["list", "templates", "read"] as const).map(action => defineTool({
       name: `mcp_resources_${action}`, description: "读取已授权 MCP 服务的资源或目录。",
       parameters: Type.Object({ server: Type.String({ minLength: 1, maxLength: 64 }), uri: Type.Optional(Type.String({ maxLength: 4096 })) }, { additionalProperties: false }),
@@ -78,7 +80,6 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
       const access = await host.validateSubagentAccess(id);
       return !!access; // 至少可调用附件 read；exec/写入/MCP 仍由父宿主逐次独立检查。
     },
-    namespaces: () => catalogs.map(c => ({ name: c.serverId, prefix: `mcp_${slug(c.serverId, 16)}_` })),
   });
 }
 
