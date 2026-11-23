@@ -10,15 +10,16 @@ import { MediaRepository } from "../src/media/repository";
 import type { InboundInput } from "../src/policy";
 import type { InboundRow } from "../src/thread/model";
 import type { SandboxTask } from "../src/sandbox/task-access";
-import { input } from "./helpers";
+import { action, connect, input, reply } from "./helpers";
+import { scriptedModel } from "./events-helpers";
 
-afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+const sockets: WebSocket[] = [];
+afterEach(async () => { for (const socket of sockets.splice(0)) socket.close(); vi.restoreAllMocks(); await reset(); });
 const group = "group:200000001";
 type Internal = {
   queueInput(input: InboundInput): Promise<string>;
   sendAgentMessage(args: AgentSend, seed: string, input: InboundRow): Promise<AgentReceipt>;
   sandboxTaskForInput(input: InboundRow): Promise<SandboxTask | undefined>;
-  deliver(input: InboundRow, text: string, id: string): Promise<{status: string; reason?: string}>;
 };
 async function seed(scope: string, value: InboundInput) {
   await runInDurableObject(env.THREAD.getByName(scope), async (instance, state) => {
@@ -50,7 +51,7 @@ describe("agent communication MVP", () => {
     expect(() => assertNoCredentials("refresh_token=synthetic-long-token")).toThrow("agent_credentials_forbidden");
   });
 
-  it("thread to thread enters existing inbound once, preserves local authority, never impersonates owner or sends QQ", async () => {
+  it("thread to thread enters existing inbound once, preserves local authority, never impersonates owner or automatically sends QQ", async () => {
     await seed("owner", input(1, "owner local", 10000001));
     await seed(group, input(2, "member local", 10000003, 200000001));
     const accepted = await send("owner", { to: group, text: "peer message" });
@@ -68,13 +69,41 @@ describe("agent communication MVP", () => {
       const previous = await api.sandboxTaskForInput(source), current = await api.sandboxTaskForInput(row);
       expect(previous?.permissions.coding).toBe(true);
       expect(current).toBeUndefined();
-      expect(await api.deliver(row, "must not leave", "out")).toEqual({status:"rejected",reason:"agent_reply_requires_agent_send"});
       expect(state.storage.sql.exec("SELECT * FROM outgoing_intents").toArray()).toHaveLength(0);
     });
     // A different group member still speaks through the same session edge.
     await seed(group, input(3, "another member", 10000004, 200000001));
     expect((await send(group, {to:"owner",text:"reply"}, "reply")).status).toBe("accepted");
     await expect(send(group, {to:"group:200000002",text:"denied"})).rejects.toThrow("agent_session_denied");
+  });
+
+  it("sends text and a received file only to the local QQ user route, sharing one two-send budget", async () => {
+    await seed("owner", input(1, "owner", 10000001));
+    await seed(group, input(2, "member", 10000003, 200000001));
+    await env.SANDBOX.getByName("owner").saveAttachment("/work/report.txt", new TextEncoder().encode("report"));
+    await env.SANDBOX.getByName(group).saveAttachment("/work/private.txt", new TextEncoder().encode("not received"));
+    const path = "/work/agent-files/" + messageId("owner", "0:send-1").slice(6) + "/0-report.txt";
+    const seen = scriptedModel([
+      { name: "send_message", args: { text: "wrong group", target: "qq:group:200000002" } },
+      { name: "send_file", args: { path: "/work/private.txt" } },
+      { name: "send_message", args: { text: "refresh_token=synthetic-test-value" } },
+      { name: "send_message", args: { text: "result ready" } },
+      { name: "send_file", args: { path } },
+      { name: "send_message", args: { text: "extra" } },
+    ]);
+    const { socket, frames } = await connect(sockets);
+    expect((await send("owner", {to:group, text:"report", files:["/work/report.txt"]})).files).toEqual([path]);
+    const message = await action(frames);
+    expect(message.params).toMatchObject({ group_id:"200000001", message:[{type:"text",data:{text:"result ready"}}] });
+    reply(socket, message.echo);
+    const file = await action(frames, 0, "upload_group_file");
+    expect(file.params).toMatchObject({group_id:"200000001",name:"0-report.txt"});
+    reply(socket, file.echo, 90000002);
+    await expect.poll(() => seen.outputs.join("\n"), {timeout:5000}).toContain("agent_turn_send_limit");
+    expect(seen.outputs[0]).toContain("send_denied");
+    expect(seen.outputs[1]).toContain("agent_file_access_denied");
+    expect(seen.outputs[2]).toContain("agent_credentials_forbidden");
+    expect(await env.BRIDGE.getByName("napcat").deliveryList()).toHaveLength(2);
   });
 
   it("queues a peer behind a busy thread and consumes it through the native runtime", async () => {
