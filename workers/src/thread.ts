@@ -376,7 +376,19 @@ export class ThreadDO extends DurableObject<Env> {
   private async syncModel(runtime: Runtime): Promise<"deferred" | undefined> {
     const selection = await this.loadSettings(true).then(settings => settings.model, () => runtime.selection);
     if (sameSelection(selection, runtime.selection)) return;
-    if (!await this.idle(runtime)) return "deferred";
+    if (this.switchCompacting) return "deferred";
+    const [live, inbox] = await Promise.all([
+      runtime.harness.snapshot(LiveDoc, runtime.root.id, context),
+      runtime.harness.snapshot(InboxDoc, runtime.root.id, context),
+    ]);
+    if (live?.run || live?.compactions?.length) return "deferred";
+    // 失败 run 保留在 InboxDoc 的待决项（live.run 为空）不能视作运行中，否则 waitForIdle 立即结算会永久卡死队列；
+    // 此时也不能调 root.compact() 提交 write，否则会先把滞留项在旧模型上拉起运行，因此直接切换至新模型交由下一轮接管。
+    if (inbox?.items.length) {
+      await runtime.root.configure(modelChange(selection), context);
+      runtime.selection = selection;
+      return;
+    }
     const view = await runtime.root.context(context);
     if (!shouldCompactBeforeSwitch(view, runtime.selection, selection)) {
       await runtime.root.configure(modelChange(selection), context);
@@ -472,7 +484,7 @@ export class ThreadDO extends DurableObject<Env> {
         const barrier = rows.findIndex(row => profileOf(row) !== runtime.profile);
         const admissible = rows.slice(0, barrier < 0 ? rows.length : barrier);
         if (admissible.length && await this.syncModel(runtime) === "deferred") {
-          waitForIdle();
+          if (!this.switchCompacting) waitForIdle();
           return;
         }
         for (const row of admissible) {

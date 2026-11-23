@@ -14,8 +14,8 @@ const GOOGLE_EXTRA_MODELS: readonly { id: string; name: string; maxTokens: numbe
   { id: "gemini-4-neon", name: "Gemini 4 Neon", maxTokens: 65_536 },
 ];
 
-// 跨供应商或跨模型续轮无原生 thoughtSignature 时，按 Gemini 3/4 官方规范填入跳过校验哨兵（base64）。
-const SKIP_THOUGHT_SIGNATURE = btoa("skip_thought_signature_validator");
+// 跨供应商或跨模型续轮无原生 thoughtSignature 时，按 @google/genai 规范原样填入跳过校验哨兵字面量。
+export const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
 
 function geminiModels(): readonly Model<"google-generative-ai">[] {
   // 排除新账号已下线的 2.5 系列及非标准文本工具对话的专用端点。

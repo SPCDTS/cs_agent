@@ -615,7 +615,7 @@ describe("Gemini provider 与原生搜索适配", () => {
 
     let capturedSearchPayload: Record<string, unknown> | undefined;
     let capturedPlainPayload: Record<string, unknown> | undefined;
-    const skipSentinel = btoa("skip_thought_signature_validator");
+    const skipSentinel = "skip_thought_signature_validator";
     const nativeSig = btoa("native_gemini_sig_bytes!");
 
     const wrapped = withGoogleSearch({
@@ -666,6 +666,46 @@ describe("Gemini provider 与原生搜索适配", () => {
       expect(cfg.thinkingConfig).toBeUndefined();
     }
     expect((capturedPlainPayload?.config as { tools?: unknown })?.tools).toBeUndefined();
+
+    // 验证经真实 @google/genai 适配器序列化后的 HTTP 请求体原样携带字面量 skip_thought_signature_validator（无二次 base64）
+    let wireBody: Record<string, unknown> | undefined;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (req, init) => {
+      const raw = typeof init?.body === "string" ? init.body : await new Request(req, init).text();
+      wireBody = JSON.parse(raw) as Record<string, unknown>;
+      return new Response(
+        'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}\n\n\r\n',
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    });
+    const realTranscript = normalizeContext({
+      messages: [
+        { role: "user", content: "查东京天气", timestamp: 1 },
+        {
+          role: "assistant",
+          api: "openai-codex-responses",
+          provider: "openai-codex",
+          model: "gpt-6-astra",
+          content: [{ type: "toolCall", id: "call_foreign_1", name: "get_weather", arguments: { city: "Tokyo" } }],
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "toolUse",
+          timestamp: 2,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "call_foreign_1",
+          toolName: "get_weather",
+          content: [{ type: "text", text: "22C" }],
+          isError: false,
+          timestamp: 3,
+        },
+      ],
+      tools: [{ name: "get_weather", description: "weather", parameters: { type: "object", properties: { city: { type: "string" } } } }],
+    });
+    const realRes = await active.streamSimple(proLatest, realTranscript).result();
+    expect(realRes.stopReason).toBe("stop");
+    const wireContents = wireBody?.contents as { role: string; parts: Record<string, unknown>[] }[] | undefined;
+    const modelTurn = wireContents?.find(c => c.role === "model");
+    expect(modelTurn?.parts[0]?.thoughtSignature).toBe("skip_thought_signature_validator");
   });
 
   it("clampCompactionContext 在小窗口兜底压缩时保留既有摘要与尾部对话并严格限制字符预算", () => {

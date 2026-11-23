@@ -417,6 +417,129 @@ describe("owner 非 subagent 自切主模型与子任务模型", () => {
     expect(laterCompacts.map(e => e.model)).toEqual(["small-256k", "fallback-128k"]);
     expect(events.at(-1)).toMatchObject({ kind: "chat", model: "fallback-128k", hasSummary: true });
   });
+
+  it("失败回合在 InboxDoc 保留待决排队项时，切换模型后新消息不死锁且由新模型统一承接", async () => {
+    const seen: { model: string; texts: string[] }[] = [];
+    let firstStarted = false;
+    let releaseFirst = false;
+    let failMode = true;
+
+    const faux = fauxProvider({
+      models: [{ id: "test" }, { id: "fast" }],
+      tokensPerSecond: Infinity,
+    });
+    let activeModel = "unknown";
+    const respond: FauxResponseFactory = async transcript => {
+      faux.setResponses([respond]);
+      if (transcript.messages.some(m => m.role === "user" && typeof m.content === "string" && m.content.startsWith(MEMORY_EXTRACT_PROMPT))) {
+        return fauxAssistantMessage("[]");
+      }
+      if (failMode) {
+        firstStarted = true;
+        while (!releaseFirst) await new Promise(r => setTimeout(r, 10));
+        if (seen.length === 0) {
+          seen.push({ model: activeModel, texts: ["first"] });
+        }
+        return { ...fauxAssistantMessage(""), stopReason: "error", errorMessage: "400 invalid_request_error" };
+      }
+      const userTexts = transcript.messages
+        .filter(m => m.role === "user")
+        .map(m => typeof m.content === "string" ? m.content : m.content.filter(b => b.type === "text").map(b => b.text).join(""));
+      seen.push({ model: activeModel, texts: userTexts });
+      return fauxAssistantMessage("恢复成功");
+    };
+    faux.setResponses([respond]);
+    const wrapped = {
+      ...faux.provider,
+      stream: ((m, c, o) => { activeModel = m.id; return faux.provider.stream(m, c, o); }) as typeof faux.provider.stream,
+      streamSimple: ((m, c, o) => { activeModel = m.id; return faux.provider.streamSimple(m, c, o); }) as typeof faux.provider.streamSimple,
+    };
+    vi.spyOn(models, "openModels").mockImplementation(() => {
+      const m = createModels();
+      m.setProvider(wrapped);
+      return m;
+    });
+
+    const owner = env.THREAD.getByName("owner");
+    const firstSubmit = owner.submit(input(1, "首条运行将失败", 10000001));
+    await expect.poll(() => firstStarted).toBe(true);
+    // 跨用户消息走 followUp 进入 InboxDoc 排队，待第 1 轮失败后按 afterFailedRun='keep' 留在 InboxDoc
+    const secondSubmit = owner.submit(input(2, "排队待决消息", 10000002));
+    await expect.poll(async () => runInDurableObject(owner, (_i, s) =>
+      s.storage.sql.exec<{ when_busy: string | null }>("SELECT when_busy FROM inbound WHERE platform_message_id = '2'").toArray()[0]?.when_busy,
+    )).toBe("followUp");
+    releaseFirst = true;
+    expect(await firstSubmit).toEqual({ status: "failed" });
+    failMode = false;
+
+    // 切换主模型至 fast，再发第 3 条消息：syncModel 不得把滞留 InboxDoc 误判为忙碌死锁，且第 2+3 条全部由新模型 fast 执行
+    const rev = (await env.REGISTRY.getByName("main").settings()).revision;
+    const putRes = await worker.fetch(new Request("https://test/admin/model", {
+      method: "PUT",
+      headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: { provider: "faux", id: "fast" }, expectedRevision: rev }),
+    }), { ...env, ADMIN_TOKEN: TOKEN });
+    expect(putRes.status).toBe(200);
+
+    const thirdSubmit = owner.submit(input(3, "触发恢复的新消息", 10000001));
+    expect(await Promise.all([secondSubmit, thirdSubmit])).toEqual([{ status: "done" }, { status: "done" }]);
+    expect(seen.map(s => s.model)).toEqual(["test", "fast", "fast"]);
+    expect(seen[1]!.texts.some(t => t.includes("排队待决消息"))).toBe(true);
+    expect(seen[2]!.texts.some(t => t.includes("触发恢复的新消息"))).toBe(true);
+    await owner.syncAdminView("owner");
+  });
+
+  it("子任务原动态目录模型凭据损坏时，仍可冷启动并平滑切换到健康模型继续执行", async () => {
+    let spawnedId = "";
+    const { calls, outputs } = setupModels(
+      [
+        { tool: "subagent", args: { action: "spawn", task: "先跑首轮", summary: "动态目录逃生", model: { provider: "faux", id: "worker" } } },
+        { text: "已派出" },
+        { text: "收到首轮汇报" },
+        () => ({ tool: "subagent", args: { action: "message", id: spawnedId, text: "切到健康模型 pro 继续", model: { provider: "faux", id: "pro" } } }),
+        { text: "已切模追问" },
+        { text: "收到逃生汇报" },
+      ],
+      [
+        { text: "首轮长结果：" + "X".repeat(6_000) },
+        { text: "逃生后成功回答" },
+      ],
+    );
+
+    const owner = env.THREAD.getByName("owner");
+    expect(await owner.submit(input(1, "启动子任务", 10000001))).toEqual({ status: "done" });
+    spawnedId = idOf(outputs.parent[0]!);
+    await expect.poll(() => calls.parent.length).toBeGreaterThanOrEqual(3);
+
+    // 模拟该子任务此前持久化的 AgentDoc 与 meta 绑定在 openai-codex，随后 Registry 中 Codex 密文损坏并触发冷启动重开
+    const subStub = env.SUBAGENT.getByName(subagentName("owner", spawnedId));
+    await runInDurableObject(subStub, async (inst, state) => {
+      const rt = await (inst as unknown as { open(): Promise<{ root: { configure(p: unknown, c: unknown): Promise<void> } }> }).open();
+      await rt.root.configure(models.modelChange({ provider: "openai-codex", id: "gpt-6-astra" }), { signal: new AbortController().signal });
+      const metaRow = state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'subagent'").toArray()[0]!;
+      const meta = { ...JSON.parse(metaRow.value), model: { provider: "openai-codex", id: "gpt-6-astra" } };
+      state.storage.sql.exec("UPDATE meta SET value = ? WHERE key = 'subagent'", JSON.stringify(meta));
+      // 清空内存 runtime 迫使下次走完整 openRuntime() + switchModel()
+      (inst as unknown as { runtime?: undefined }).runtime = undefined;
+    });
+
+    const registry = env.REGISTRY.getByName("main");
+    await runInDurableObject(registry, async (_inst, state) => {
+      state.storage.sql.exec(
+        "INSERT OR REPLACE INTO model_credentials (provider_id, credential_enc, updated_at, meta_json) VALUES ('openai-codex', 'v1.corrupted.ciphertext', ?, '{}')",
+        Date.now(),
+      );
+    });
+    await expect(registry.codexCatalog()).rejects.toThrow();
+
+    expect(await owner.submit(input(2, "从损坏的 Codex 切到健康模型", 10000001))).toEqual({ status: "done" });
+    await expect.poll(() => calls.child.length).toBe(2);
+    await expect.poll(() => calls.parent.length).toBeGreaterThanOrEqual(6);
+    expect(calls.child[1]!.model).toBe("pro");
+    await subStub.syncAdminView();
+    await owner.syncAdminView("owner");
+  });
+
 });
 
 
@@ -436,7 +559,10 @@ it("message(model) 通过持久通信入箱后立即使用新模型，且保留�
   await expect.poll(() => calls.parent.length).toBeGreaterThanOrEqual(6);
   expect(calls.child[1]!.model).toBe("pro");
   expect(outputs.parent[1]).toContain("模型已切换为 faux/pro");
-  await runInDurableObject(env.SUBAGENT.getByName(subagentName("owner", idOf(outputs.parent[0]!))), (_i, s) => {
+  const sub = env.SUBAGENT.getByName(subagentName("owner", idOf(outputs.parent[0]!)));
+  await runInDurableObject(sub, (_i, s) => {
     expect(s.storage.sql.exec("SELECT request_id,agent_hash FROM inbox WHERE agent_hash IS NOT NULL").toArray()).toHaveLength(1);
   });
+  await sub.syncAdminView();
+  await owner.syncAdminView("owner");
 });

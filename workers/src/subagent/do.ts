@@ -350,7 +350,8 @@ export class SubagentDO extends DurableObject<Env> {
   }
 
   private async switchModel(runtime: Runtime, next: ModelSelection, meta: SubagentMeta): Promise<void> {
-    if (usesDynamicCatalog(next.provider) || usesDynamicCatalog(runtime.selection.provider)) await this.refreshCatalogs();
+    if (usesDynamicCatalog(next.provider)) await this.refreshCatalogs();
+    else if (usesDynamicCatalog(runtime.selection.provider)) await this.refreshCatalogs().catch(() => {});
     const view = await runtime.root.context(context);
     if (!shouldCompactBeforeSwitch(view, runtime.selection, next)) {
       await runtime.root.configure(modelChange(next), context);
@@ -537,9 +538,9 @@ export class SubagentDO extends DurableObject<Env> {
       },
     }, context);
     const root = await harness.root(context, { agent: modelChange(meta.model) });
-    // 已有会话保留持久化 AgentDoc 的原模型，在 answer() 切换边界先用原模型压缩再切换。
+    // 已有会话保留持久化 AgentDoc 的原模型，在 answer() 切换边界先用原模型压缩再切换；原动态目录凭据损坏时不阻断向健康新模型逃生。
     const persistedAgent = selectionFromAgent(await root.agent(context), meta.model);
-    if (usesDynamicCatalog(persistedAgent.selection.provider) && !usesDynamicCatalog(meta.model.provider)) await this.refreshCatalogs();
+    if (usesDynamicCatalog(persistedAgent.selection.provider) && !usesDynamicCatalog(meta.model.provider)) await this.refreshCatalogs().catch(() => {});
     if (!persistedAgent.persisted) await root.configure(modelChange(meta.model), context);
     // 读取子会话只打开存储；执行由 alarm → drain → answer 的 submit 启动。
     void harness.closed.then(() => { this.runtime = undefined; void delegated.close(); });
