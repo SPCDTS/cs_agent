@@ -65,6 +65,7 @@ export interface ThreadRuntimeHost {
   subagents: ParentSubagents;
   namespace(): Promise<string>;
   agentSend(input: InboundRow, args: AgentSend, seed: string): Promise<AgentReceipt>;
+  readAgentFile(input: InboundRow, path: string, options: { offset?: number; limit?: number }): Promise<import("../sandbox/client").ReadResult>;
   models(): MutableModels;
   loadSettings(fresh?: boolean): Promise<Settings>;
   installProjection(): void;
@@ -214,6 +215,10 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     host.sandboxTaskForInput(await host.currentInput(harness, api, api.conversationId, callContext));
   const codingAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) =>
     !!(await taskAccess(api, callContext))?.permissions.coding;
+  const agentFileAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
+    const input = await host.currentInput(harness, api, api.conversationId, callContext);
+    return input?.kind === "agent" && input.session_generation === await host.sessionGeneration();
+  };
   const resources = host.env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner");
   const workspaceFor = async (id?: string) => {
     if (!id) return host.env.SANDBOX.getByName(memory.ns);
@@ -222,7 +227,13 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     return host.env.SANDBOX.getByName(resource.name);
   };
   if (memory.ns === "owner" || memory.ns.startsWith("group:")) registry.install(createCodingExtension({
-    allowed: codingAllowed,
+    allowed: async (api, context, kind) => await codingAllowed(api, context) || kind === "coding_read" && await agentFileAllowed(api, context),
+    readFile: async ({ path, workspace, sandboxId, ...options }, api, context) => {
+      const input = await host.currentInput(harness, api, api.conversationId, context);
+      if (input?.kind !== "agent" || await codingAllowed(api, context)) return;
+      if (workspace !== undefined || sandboxId !== undefined) throw new Error("permission_denied");
+      return host.readAgentFile(input, path, options);
+    },
     ...(memory.ns === "owner" ? { resources: {
       allowed: ownerTaskAllowed,
       list: () => resources.list(memory.ns),
@@ -311,7 +322,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     async refresh => { await mcp.syncConfig(await host.env.REGISTRY.getByName("main").mcpConfig()); if (refresh) await mcp.refreshAll(); },
     change => host.audit("mcp_management", { ...change, source: "agent" })));
   const codemode = installCodemode(registry, {
-    allowed: async (api, callContext) => await codingAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext)
+    allowed: async (api, callContext) => await codingAllowed(api, callContext) || await agentFileAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext)
       || (memory.ns === "owner" && await ownerMayManage(api, callContext)),
     namespaces: () => [
       ...(memory.ns === "owner" ? [{ name: "runtime-ops", prefix: "ops_", description: "实例运行状态、用量费用、请求轨迹与诊断日志只读查询（仅主人会话）" }] : []),
@@ -328,7 +339,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     sections: [
       section("turn-identity", async (api, callContext) => {
         const input = await host.currentInput(harness, api.read, api.conversationId, callContext);
-        if (input?.kind === "agent") return "本轮为 Agent 通信，来源 agentSessionId=" + input.agent_from + "；不是 QQ 用户或 owner 输入。接收方既有 coding/MCP 能力不从来源继承。";
+        if (input?.kind === "agent") return "本轮为 Agent 通信，来源 agentSessionId=" + input.agent_from + "；不是 QQ 用户或 owner 输入。接收方既有 coding/MCP 能力不从来源继承。已接收附件可用 read(path) 只读，不能借此执行 bash、写文件或读取未接收的主人文件。";
         if (input && isWeb(input)) return "本回合来自管理台网页入口，当前会话：" + memory.ns + "；管理员权限只作用于本会话范围。";
         if (input?.kind === "event") return EVENT_TURN_IDENTITY;
         if (input?.kind === "subagent") return subagentTurnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name },

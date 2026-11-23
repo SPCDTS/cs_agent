@@ -5,6 +5,7 @@ import { McpAdmin } from "./mcp/admin";
 import { openThreadRuntime, applyToolProfile, type Runtime } from "./thread/runtime";
 import { isWeb, isWebAdmin, profileOf, targetOf, type InboundRow, type ToolProfile } from "./thread/model";
 import { workPath } from "./sandbox/client";
+import { decodeFileRead } from "./sandbox/read";
 import { ProjectionPublisher, observeWrites } from "./requests/projection";
 import { MCP_POLICY_SCHEMA } from "./mcp/policy";
 import { createWorkspaceAdminApi, type WorkspaceAdminApi, type WorkspaceMergeInput } from "./sandbox/admin";
@@ -202,6 +203,7 @@ export class ThreadDO extends DurableObject<Env> {
       installProjection: () => this.projection.install(), currentInput: (harness, read, id, context) => this.currentInput(harness, read, id, context),
       memoryBinding: (input, ns) => this.memoryBinding(input, ns), sessionGeneration: () => this.sessionGeneration(),
       agentSend: (input, args, seed) => this.sendAgentMessage(args, seed, input),
+      readAgentFile: async (input, path, options) => decodeFileRead((await this.readAgentBlob(input, path)).bytes, options),
       ownerTurnKind: input => this.ownerTurnKind(input), sandboxTaskForInput: input => this.sandboxTaskForInput(input),
       subagentCaller: (input, selection) => this.subagentCaller(input, selection), scheduleAccess: input => this.scheduleAccess(input),
       mcpAuthority: input => this.mcpAuthority(input), deliver: (input, text, outputId, options) => this.deliver(input, text, outputId, options),
@@ -595,12 +597,21 @@ export class ThreadDO extends DurableObject<Env> {
     }
     const receipt = await sendAgent({ env: this.env, storage: this.ctx.storage, agentSessionId: await this.namespace(), generation,
       readFile: async path => {
-        if (!input || !(await this.sandboxTaskForInput(input))?.permissions.coding) throw new Error("agent_file_access_denied");
+        const task = input && await this.sandboxTaskForInput(input);
+        if (input?.kind === "agent" && !task?.permissions.coding) return this.readAgentBlob(input, path);
+        if (!task?.permissions.coding) throw new Error("agent_file_access_denied");
         return this.env.SANDBOX.getByName(await this.namespace()).readBlob(path);
       },
     }, args, seed);
     await this.audit("agent_send", { to: args.to, messageId: receipt.messageId, status: receipt.status, files: receipt.files.length });
     return receipt;
+  }
+  private async readAgentBlob(input: InboundRow, path: string) {
+    if (input.kind !== "agent" || input.session_generation !== await this.sessionGeneration()) throw new Error("agent_file_access_denied");
+    const normalized = workPath(path);
+    const allowed = await this.database.get("SELECT 1 FROM inbound,json_each(inbound.agent_files) WHERE inbound.kind='agent' AND inbound.session_generation=? AND json_each.value=? LIMIT 1", input.session_generation, normalized);
+    if (!allowed) throw new Error("agent_file_access_denied");
+    return this.env.SANDBOX.getByName(await this.namespace()).readBlob(normalized);
   }
   async agentChildNarrow(id: string): Promise<void> {
     if (!await this.agentChildAllowed(id)) throw new Error("agent_session_revoked");
@@ -628,7 +639,6 @@ export class ThreadDO extends DurableObject<Env> {
       const generation = await this.sessionGeneration();
       const authority = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE kind='message' AND session_generation=? AND turn_id IS NOT NULL AND user_id<>self_id ORDER BY rowid DESC LIMIT 1", generation);
       if (!authority) throw new Error("agent_recipient_not_ready");
-      if (message.files.length && !ns.startsWith("group:")) throw new Error("agent_file_access_denied");
       const paths = await importFiles(this.env, message, (path, bytes, operationId) => this.env.SANDBOX.getByName(ns).saveAttachment(path, bytes, operationId));
       await this.database.transaction(async tx => {
         await tx.run("INSERT INTO inbound(message_id,platform_message_id,user_id,self_id,text,received_at,status,chat_kind,chat_id,nickname,scope_name,kind,reply_channel,session_generation,when_busy,agent_from,agent_hash,agent_files,agent_authority) VALUES(?,?,'','agent',?,?,'queued',?,?,?,?,'agent','qq',?,NULL,?,?,?,?)",
@@ -747,6 +757,17 @@ export class ThreadDO extends DurableObject<Env> {
   }
   async subagentCoding(id: string, operation: SubagentCodingOperation): ReturnType<SubagentCapabilityHost["subagentCoding"]> {
     const access = await this.validateSubagentAccess(id);
+    if (operation.kind === "read" && access && (!access.capabilities.coding || !access.authority.owner)) {
+      try {
+        const file = decodeFileRead((await this.subagentReadBlob(id, operation.path)).bytes, operation);
+        if ("kind" in file) {
+          const image = { type: "image" as const, data: file.data, mimeType: file.mimeType };
+          return { output: [image], structuredOutput: { kind: "image", image } };
+        }
+        const text = JSON.stringify({ status: "committed", result: file });
+        return { output: [{ type: "text", text }], structuredOutput: { kind: "text", text } };
+      } catch { return { isError: true, output: [{ type: "text", text: "delegation_denied" }] }; }
+    }
     if (!access?.capabilities.coding || !access.authority.owner) return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
     const name = access.sandbox?.name ?? subagentName(await this.namespace(), id), sandbox = this.env.SANDBOX.getByName(name);
     // 旧子任务沿用原资源目录；创建 subagent 不触发初始化或克隆。
@@ -765,8 +786,26 @@ export class ThreadDO extends DurableObject<Env> {
     if (!access?.capabilities.coding || !access.authority.owner) throw new Error("delegation_denied");
     return this.env.SANDBOX.getByName(access.sandbox?.name ?? subagentName(await this.namespace(), id));
   }
-  async subagentSaveAttachment(id: string, path: string, bytes: Uint8Array, operationId?: string) { return (await this.subagentWorkspaceFiles(id, true)).saveAttachment(workPath(path), bytes, operationId); }
-  async subagentReadBlob(id: string, path: string) { return (await this.subagentWorkspaceFiles(id)).readBlob(workPath(path)); }
+  private async subagentAttachmentWorkspace(id: string) {
+    await this.initialize();
+    const access = await this.subagents.access(id, true), scope = await this.namespace();
+    if (!access?.identity.as || access.origin.generation !== await this.sessionGeneration()) throw new Error("delegation_denied");
+    const resourceId = access.origin.capabilities?.sandboxId;
+    const resource = resourceId ? await this.env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner").get(scope, resourceId) : undefined;
+    if (resourceId && !resource) throw new Error("delegation_denied");
+    return this.env.SANDBOX.getByName(resource?.name ?? subagentName(scope, id));
+  }
+  async subagentSaveAttachment(id: string, path: string, bytes: Uint8Array, operationId?: string) {
+    const normalized = workPath(path);
+    if (!/^\/work\/agent-files\/[0-9a-f]{64}\/[0-9]+-/.test(normalized)) throw new Error("agent_file_access_denied");
+    return (await this.subagentAttachmentWorkspace(id)).saveAttachment(normalized, bytes, operationId);
+  }
+  async subagentReadBlob(id: string, path: string) {
+    const normalized = workPath(path), access = await this.subagentAccess(id);
+    if (access?.capabilities.coding && access.authority.owner) return (await this.subagentWorkspaceFiles(id)).readBlob(normalized);
+    if (!await this.env.SUBAGENT.getByName(subagentName(await this.namespace(), id)).agentFileAllowed(normalized)) throw new Error("delegation_denied");
+    return (await this.subagentAttachmentWorkspace(id)).readBlob(normalized);
+  }
   async subagentWriteFile(id: string, path: string, content: string | Uint8Array) { return (await this.subagentWorkspaceFiles(id)).writeFile(workPath(path), content); }
   async subagentCreateTempDir(id: string, prefix?: string) { return (await this.subagentWorkspaceFiles(id)).createTempDir(prefix); }
 

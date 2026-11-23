@@ -124,7 +124,7 @@ export class SandboxDO extends DurableObject<Env> {
     }, prefix);
   }
   async saveAttachment(path: string, bytes: Uint8Array, operationId?: string): Promise<void> {
-    await this.result({ kind: "writeBytes", path, data: bytes, createOnly: true }, operationId);
+    await this.workspace.saveAttachment(path, bytes, operationId ?? crypto.randomUUID());
   }
   async editFile(path: string, edits: FileEdit[], operationId?: string): Promise<{ replaced: number }> {
     const result = await this.result({ kind: "edit", path, edits }, operationId);

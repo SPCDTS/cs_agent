@@ -630,3 +630,30 @@ it("管理台可分页查看子会话正文与工具记录，且读取不唤醒�
   await thread("owner").syncAdminView("owner");
   expect((await admin("GET",path)).status).toBe(404);
 });
+
+it.each(["subagent", "agent_send"])("%s rejects a different member while the owner child is actually executing", async mode => {
+  const running = gate(), group = "group:200000001";
+  const { seen, outputs } = twoModels([
+    spawn("owner-authorized-task"), { text: "spawned" },
+    (out): Step => mode === "subagent" ? { tool: "subagent", args: { action: "message", id: idOf(out[0]), text: "FOREIGN-INJECTION" } }
+      : { tool: "agent_send", args: { to: "sub:" + group + ":" + idOf(out[0]), text: "FOREIGN-INJECTION" } },
+    { text: "rejected" }, { text: "owner report received" },
+  ], [{ text: "owner-result", after: running.promise }]);
+  await thread(group).submit(input(1, "start", 10000001, 200000001, true));
+  const sub = await onlySubagent(group);
+  await vi.waitFor(() => expect(seen.child).toHaveLength(1));
+  const before = await child(group, sub.id).status();
+  expect(before?.meta.status).toBe("running");
+  try {
+    await thread(group).submit(input(2, "foreign followup", 10000003, 200000001, true));
+    expect(outputs.parent.join("\n")).toContain("agent_child_identity_denied");
+    expect((await child(group, sub.id).status())?.meta.identity).toEqual(before?.meta.identity);
+    await runInDurableObject(child(group, sub.id), (_i, s) => {
+      expect(s.storage.sql.exec("SELECT text FROM inbox WHERE text LIKE '%FOREIGN-INJECTION%'").toArray()).toHaveLength(0);
+    });
+  } finally { running.open(); }
+  const [report] = await reports(group, 1);
+  expect(report?.user_id).toBe("10000001");
+  expect(report?.text).toContain("owner-result");
+  expect(seen.child.every(turn => !turn.user.includes("FOREIGN-INJECTION"))).toBe(true);
+});

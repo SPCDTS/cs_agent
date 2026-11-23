@@ -118,7 +118,10 @@ export class ParentSubagents {
     await this.host.db.transaction(async tx => {
       const row = await tx.get<Row>("SELECT * FROM subagents WHERE id=?", id);
       if (!row) throw new Error("agent_session_revoked");
-      const identity = narrowIdentity(JSON.parse(row.identity_json) as SubagentIdentity, next);
+      const current = JSON.parse(row.identity_json) as SubagentIdentity;
+      const identity = narrowIdentity(current, next);
+      // 无法保留原派出主体时在入箱前拒绝，不向仍在执行的 owner 上下文注入跨成员输入。
+      if (!identity.as || identity.as.owner !== current.as?.owner) throw new Error("agent_child_identity_denied");
       await tx.run("UPDATE subagents SET identity_json=? WHERE id=?", JSON.stringify(identity), id);
     });
   }
@@ -130,7 +133,11 @@ export class ParentSubagents {
     if ((JSON.parse(row.origin_json) as SubagentOrigin).generation !== caller.origin.generation) return {text:"该子任务属于已归档会话，请重新 spawn。",error:true};
     if ((JSON.parse(row.origin_json) as SubagentOrigin).replyChannel !== caller.origin.replyChannel) return { text: "这个子任务属于另一个回复入口，请在当前入口新建子任务。", error: true };
     // 通信地址仍按会话绑定；人类派出的能力只能收敛，不能被别的发言人借用。
-    await this.narrow(id, caller.identity);
+    try { await this.narrow(id, caller.identity); }
+    catch (error) {
+      if (error instanceof Error && error.message === "agent_child_identity_denied") return { text: error.message, error: true };
+      throw error;
+    }
     const thread = await this.host.thread();
     await this.host.communicate(subagentName(thread, id), text, seed, caller.identity);
     const current = await this.child(thread, id).status();

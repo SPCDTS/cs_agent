@@ -148,6 +148,11 @@ export class SubagentDO extends DurableObject<Env> {
   }
 
 
+  async agentFileAllowed(path: string): Promise<boolean> {
+    const meta = await this.meta();
+    return !!meta && meta.status !== "cancelled" && !!await this.database.get(
+      "SELECT 1 FROM inbox,json_each(inbox.agent_files) WHERE json_each.value=? LIMIT 1", path);
+  }
   async agentProof(id: string, hash: string): Promise<boolean> {
     const meta = await this.meta();
     return !!meta && meta.status !== "cancelled" && await this.env.THREAD.getByName(meta.parent).agentChildAllowed(meta.id) && proves(this.ctx.storage, id, hash, meta.createdAt);

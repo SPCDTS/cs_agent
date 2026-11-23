@@ -1,4 +1,4 @@
-import { env, reset, runInDurableObject } from "cloudflare:test";
+import { env, reset, runInDurableObject, evictDurableObject } from "cloudflare:test";
 import { afterEach, expect, it, vi } from "vitest";
 import { createRegistry } from "@earendil-works/pi-durable";
 import { input } from "./helpers";
@@ -75,7 +75,7 @@ it("group to owner keeps a session principal, cannot borrow owner sandbox, and M
   });
 });
 
-it.each(["subagent.message", "agent_send"])("%s narrows owner child capabilities before another member's input and invalidates an already queued report", async mode => {
+it.each(["subagent.message", "agent_send"])("%s rejects another member before insertion without contaminating persistent identity or the old report", async mode => {
   const { address, identity, origin } = await child(group);
   await env.THREAD.getByName(group).subagentReport({ subagentId: cid, requestId: "old", text: "done", identity, outcome: "done", state: { status: "done", version: 1 } } as any);
   await seed(group, 10000003, 2);
@@ -83,19 +83,19 @@ it.each(["subagent.message", "agent_send"])("%s narrows owner child capabilities
     const report = s.storage.sql.exec<any>("SELECT * FROM inbound WHERE kind='subagent'").one();
     expect((await (i as any).mcpAuthority(report)).owner).toBe(true);
     if (mode === "subagent.message") {
-      await (i as any).subagents.message({ identity: { turn: "message", as: { userId: "10000003", nickname: "", owner: false } }, origin }, cid, "member followup", "followup");
+      expect(await (i as any).subagents.message({ identity: { turn: "message", as: { userId: "10000003", nickname: "", owner: false } }, origin }, cid, "member followup", "followup")).toMatchObject({ error: true, text: "agent_child_identity_denied" });
     } else {
       const member = s.storage.sql.exec<any>("SELECT * FROM inbound WHERE kind='message' ORDER BY rowid DESC LIMIT 1").one();
-      await (i as any).sendAgentMessage({ to: address, text: "member followup" }, "followup", member);
+      await expect((i as any).sendAgentMessage({ to: address, text: "member followup" }, "followup", member)).rejects.toThrow("agent_child_identity_denied");
     }
-    expect(JSON.parse(s.storage.sql.exec<any>("SELECT identity_json FROM subagents WHERE id=?", cid).one().identity_json).as).toBeUndefined();
-    expect(await i.validateSubagentAccess(cid)).toBeUndefined();
-    expect(await (i as any).mcpAuthority(report)).toBeUndefined();
-    expect(await (i as any).scheduleAccess(report)).toEqual({ kind: "none" });
+    expect(JSON.parse(s.storage.sql.exec<any>("SELECT identity_json FROM subagents WHERE id=?", cid).one().identity_json)).toEqual(identity);
+    expect((await (i as any).mcpAuthority(report)).owner).toBe(true);
+    expect((await (i as any).scheduleAccess(report)).kind).toBe("manage");
     await s.storage.deleteAlarm();
   });
   await runInDurableObject(env.SUBAGENT.getByName(address), async (_i, s) => {
-    expect(s.storage.sql.exec("SELECT * FROM inbox WHERE agent_hash IS NOT NULL").toArray()).toHaveLength(1);
+    expect(s.storage.sql.exec("SELECT * FROM inbox WHERE agent_hash IS NOT NULL").toArray()).toHaveLength(0);
+    expect(JSON.parse(s.storage.sql.exec<any>("SELECT value FROM meta WHERE key='subagent'").one().value).identity).toEqual(identity);
     await s.storage.deleteAlarm();
   });
 });
@@ -113,9 +113,8 @@ it("an Agent round forwarding to its owner's child cannot preserve human-owner d
   await send(group, "owner", "peer-request");
   await runInDurableObject(env.THREAD.getByName("owner"), async (i, s) => {
     const peer = s.storage.sql.exec("SELECT * FROM inbound WHERE kind='agent'").one();
-    expect((await (i as any).sendAgentMessage({ to: address, text: "forwarded request" }, "forward", peer)).status).toBe("accepted");
-    expect(await i.validateSubagentAccess(cid)).toBeUndefined();
-    expect((await i.subagentCoding(cid, { kind: "read", operationId: "forbidden", path: "/work/private.txt" })).isError).toBe(true);
+    await expect((i as any).sendAgentMessage({ to: address, text: "forwarded request" }, "forward", peer)).rejects.toThrow("agent_child_identity_denied");
+    expect((await (i as any).subagentAccess(cid, true)).authority.owner).toBe(true);
     await s.storage.deleteAlarm();
   });
   await runInDurableObject(env.SUBAGENT.getByName(address), (_i, s) => s.storage.deleteAlarm());
@@ -148,6 +147,7 @@ it.each(["second-file", "inbound-sql"])("real importFiles -> SandboxDO -> Worksp
   if (failure === "inbound-sql") for (let n = 0; n < 33; n++) await sandbox.writeFile("/work/later.txt", String(n), "later-" + n);
   if (failure === "inbound-sql") await runInDurableObject(env.THREAD.getByName(group), (_i, s) => { s.storage.sql.exec("DROP TRIGGER fail_agent_insert"); });
   if (failure === "second-file") await new MediaRepository({ bucket: env.ASSETS, scope: "owner" }).put({ bytes: new TextEncoder().encode("two"), name: "two.txt", mime: "text/plain" });
+  await evictDurableObject(sandbox);
   const receipt = await env.THREAD.getByName(group).agentReceive(message);
   expect(receipt.status).toBe("accepted");
   expect(receipt.files).toHaveLength(2);
@@ -251,4 +251,24 @@ it("pending reports freeze metadata across child version changes without retaini
     await s.storage.deleteAlarm();
   });
   expect(redactReport('example authorization=Basic c3ludGhldGljLWNyZWRlbnRpYWw= end')).not.toContain("c3ludGhldGljLWNyZWRlbnRpYWw");
+});
+
+it("a child without coding_exec can receive, read and return only its registered attachments", async () => {
+  const { address } = await child(group);
+  await env.SANDBOX.getByName(group).saveAttachment("/work/source.txt", new TextEncoder().encode("child-visible"), "child-source");
+  const receipt = await runInDurableObject(env.THREAD.getByName(group), async (i, s) => {
+    const row = s.storage.sql.exec("SELECT * FROM inbound WHERE kind='message'").one();
+    return (i as any).sendAgentMessage({ to: address, text: "file", files: ["/work/source.txt"] }, "child-file", row);
+  });
+  const parent = env.THREAD.getByName(group);
+  expect((await parent.validateSubagentAccess(cid))?.capabilities.coding).toBe(false);
+  await runInDurableObject(parent, async i => {
+    expect(JSON.stringify(await i.subagentCoding(cid, { kind: "read", operationId: "read-attachment", path: receipt.files[0] }))).toContain("child-visible");
+    expect((await i.subagentCoding(cid, { kind: "exec", operationId: "no-exec", command: "echo forbidden", timeoutMs: 1000 })).isError).toBe(true);
+    expect((await i.subagentCoding(cid, { kind: "read", operationId: "private-read", path: "/work/private.txt" })).isError).toBe(true);
+  });
+  await runInDurableObject(env.SUBAGENT.getByName(address), async (i, s) => {
+    expect((await (i as any).sendAgentMessage({ to: group, text: "return", files: receipt.files }, "child-return")).status).toBe("accepted");
+    await s.storage.deleteAlarm();
+  });
 });

@@ -37,7 +37,7 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
       parameters: Type.Object({ name: Type.String({ minLength: 1, maxLength: 64 }), path: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })) }, { additionalProperties: false }),
       replay: "safe", execute: args => host.subagentSkill(id, args) }),
   ] }));
-  if (capabilities.coding) registry.install(defineExtension({ name: "cs.subagent.coding",
+  registry.install(defineExtension({ name: "cs.subagent.coding",
     sections: [section("sandbox", async ({ agent }) => {
       const access = await host.validateSubagentAccess(id);
       if (!agent.callable.some(tool => tool.name === "bash") || !access?.capabilities.coding || !access.authority.owner) return;
@@ -56,7 +56,7 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
     defineTool({ name: "edit", callers: ["tools"], description: "在分配的沙箱工作区执行精确文本替换。",
       parameters: Type.Object({ path: Type.String({ minLength: 1 }), edits: Type.Array(Type.Object({ oldText: Type.String({ minLength: 1 }), newText: Type.String() }, { additionalProperties: false }), { minItems: 1 }) }, { additionalProperties: false }),
       replay: "unsafe", execute: (args, api) => host.subagentCoding(id, { kind: "edit", operationId: String(api.taskId), ...args }) }),
-  ] }));
+  ].filter(tool => capabilities.coding || tool.name === "read") }));
   if (catalogs.length) {
     registry.install(defineExtension({ name: "cs.subagent.mcp",
       sections: [section("mcp-delegation", () => "MCP 只能使用派出目录、环境范围与父线程当前授权的交集；写调用可能等待逐次审批。网页来源保持网页，不得另行通知 QQ。" + MCP_RESULT_INSTRUCTIONS)] }));
@@ -76,7 +76,7 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
   return installCodemode(registry, {
     allowed: async () => {
       const access = await host.validateSubagentAccess(id);
-      return !!access && (!!access.capabilities.coding && access.authority.owner || catalogs.length > 0 && !!access.capabilities.mcp);
+      return !!access; // 至少可调用附件 read；exec/写入/MCP 仍由父宿主逐次独立检查。
     },
     namespaces: () => catalogs.map(c => ({ name: c.serverId, prefix: `mcp_${slug(c.serverId, 16)}_` })),
   });
