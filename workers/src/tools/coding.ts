@@ -15,11 +15,7 @@ export type CodingDeps = {
   /** 由宿主验证本回合与工作区范围；每次嵌套调用都重新检查。 */
   allowed(api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, context: Context, kind?: CodingAuditKind): Promise<boolean>;
   sandbox(id?: string): SandboxApi | Promise<SandboxApi>;
-  resources?: {
-    list(): Promise<Static<typeof ResourceListSchema>>;
-    create(operationId: string, input: Static<typeof CreateResourceSchema>): Promise<Static<typeof SandboxResourceSchema>>;
-    allowed(api: ToolExecutionApi, context: Context): Promise<boolean>;
-  };
+  resourceInstructions?: boolean;
   /** 可选的已接收附件只读入口；返回 undefined 才沿用普通沙箱读取。 */
   readFile?(input: { path: string; workspace?: string; sandboxId?: string; offset?: number; limit?: number }, api: ToolExecutionApi, context: Context): Promise<ReadResult | undefined>;
   /** 可选的跨群只读入口；宿主仍逐次核对 owner 任务授权。 */
@@ -189,6 +185,18 @@ export function createCodingExtension(deps: CodingDeps) {
       },
     }),
   ];
+  return defineExtension({
+    name: "cs.coding",
+    sections: [section("sandbox", async (api, context) => api.agent.callable.some(tool => tool.name === "bash") && await deps.allowed({ ...api.read, conversationId: api.conversationId }, context) ? CLOUDFLARE_INSTRUCTIONS + (deps.resourceInstructions ? CLOUDFLARE_RESOURCE_INSTRUCTIONS : "") : undefined)],
+    tools: tools.map(tool => ({ ...tool, callers: ["tools"] as const })),
+  });
+}
+
+export function sandboxResourceTools(resources: {
+    list(): Promise<Static<typeof ResourceListSchema>>;
+    create(operationId: string, input: Static<typeof CreateResourceSchema>): Promise<Static<typeof SandboxResourceSchema>>;
+    allowed(api: ToolExecutionApi, context: Context): Promise<boolean>;
+  }) {
   // DO RPC 对象带有生命周期 symbol。Code Mode 只接收经过验证的 JSON 数据。
   function resourceResult<S extends TSchema>(schema: S, result: Static<S>): ToolExecutionResult {
     const raw = JSON.stringify(result);
@@ -196,8 +204,7 @@ export function createCodingExtension(deps: CodingDeps) {
     if (!Check(schema, value)) return text("invalid_resource：Cloudflare 工作区记录无效。", true);
     return { ...text(raw), structuredOutput: value };
   }
-  const resources = deps.resources;
-  const resourceTools = resources ? [
+  return [
     defineTool({ name: "sandbox_list", replay: "safe", callers: ["tools"],
       description: "列出当前会话的 Cloudflare 工作区 resources 与默认 ID assignedSandboxId。",
       parameters: Type.Object({}, { additionalProperties: false }), structuredOutputSchema: ResourceListSchema,
@@ -218,10 +225,5 @@ export function createCodingExtension(deps: CodingDeps) {
           return text(code + "：无法创建 Cloudflare 工作区。", true);
         }
       } }),
-  ] : [];
-  return defineExtension({
-    name: "cs.coding",
-    sections: [section("sandbox", async (api, context) => api.agent.callable.some(tool => tool.name === "bash") && await deps.allowed({ ...api.read, conversationId: api.conversationId }, context) ? CLOUDFLARE_INSTRUCTIONS + (resources ? CLOUDFLARE_RESOURCE_INSTRUCTIONS : "") : undefined)],
-    tools: [...tools.map(tool => ({ ...tool, callers: ["tools"] as const })), ...resourceTools],
-  });
+  ];
 }

@@ -42,7 +42,7 @@ import { MediaRepository, type AssetRef } from '../media/repository';
 import type { SkillCatalog } from '../skills';
 import type { ParentSubagents, SubagentCaller } from '../subagent/parent';
 import type { SandboxTask } from '../sandbox/task-access';
-import { createCodingExtension } from '../tools/coding';
+import { createCodingExtension, sandboxResourceTools } from '../tools/coding';
 import { decodeFileRead } from '../sandbox/read';
 import { workPath } from '../sandbox/client';
 import { workspaceExecutionEnv } from '../sandbox/execution-env';
@@ -289,11 +289,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
       if (workspace !== undefined || sandboxId !== undefined) throw new Error("permission_denied");
       return host.readAgentFile(input, path, options);
     },
-    ...(memory.ns === "owner" ? { resources: {
-      allowed: ownerTaskAllowed,
-      list: () => resources.list(memory.ns),
-      create: (operationId, input) => resources.create(memory.ns, operationId, input),
-    } } : {}),
+    resourceInstructions: memory.ns === "owner",
     sandbox: workspaceFor,
     readWorkspace: async ({ workspace, path, ...options }, api, context) => {
       if (!await ownerTaskAllowed(api, context)) throw new Error("permission_denied");
@@ -323,21 +319,26 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     registry.install(createCloudflareExtension(ownerMayManage, () => host.env.REGISTRY.getByName('main'),
       detail => host.audit('cloudflare_management', detail)));
     registry.install(createOpsExtension({
+      resourceTools: sandboxResourceTools({
+        allowed: ownerTaskAllowed,
+        list: () => resources.list(memory.ns),
+        create: (operationId, input) => resources.create(memory.ns, operationId, input),
+      }),
       env: host.env,
       allowed: ownerMayManage,
       currentTurnId: async (api, c) => (await host.currentInput(harness, api, api.conversationId, c))?.turn_id ?? undefined,
       audit: detail => host.audit('runtime_ops', detail),
     }));
+    registry.install(createAccessExtension({
+      allowManage: async (api, c) => {
+        const input = await ownerManagementInput(api, c);
+        if (!input) return;
+        const id = isWebAdmin(input) ? ownerIds(host.env)[0] : input.user_id;
+        return id ? 'qq:' + id : undefined;
+      },
+      registry:()=>host.env.REGISTRY.getByName("main"),bridge:()=>host.env.BRIDGE.getByName("napcat"),
+    }));
   }
-  registry.install(createAccessExtension({
-    allowManage: async (api, c) => {
-      const input = await ownerManagementInput(api, c);
-      if (!input) return;
-      const id = isWebAdmin(input) ? ownerIds(host.env)[0] : input.user_id;
-      return id ? 'qq:' + id : undefined;
-    },
-    registry:()=>host.env.REGISTRY.getByName("main"),bridge:()=>host.env.BRIDGE.getByName("napcat"),
-  }));
   registry.install(createWorkspaceAdminExtension({
     allowed: ownerTaskAllowed,
     sandbox:()=>host.env.SANDBOX.getByName(memory.ns),registry:()=>host.env.REGISTRY.getByName("main"),

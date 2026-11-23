@@ -17,13 +17,16 @@ export function childAddress(value: string): { parent: string; id: string } | un
   return match ? { parent: match[1]!, id: match[2]! } : undefined;
 }
 /** 部署配置是独立通信能力；不读取 QQ send grant，也不接受通配目标。 */
-export function configuredEdge(config: string | undefined, from: string, to: string): boolean {
-  if (!config) return false;
+export function baselineEdges(config: string | undefined): [string, string][] {
+  if (!config) return [];
   let edges: unknown;
   try { edges = JSON.parse(config); } catch { throw new Error("agent_invalid_config"); }
   if (!Array.isArray(edges) || edges.length > 100 || edges.some(edge => !Array.isArray(edge) || edge.length !== 2 ||
     edge.some(id => typeof id !== "string" || !new RegExp(SESSION_PATTERN).test(id)))) throw new Error("agent_invalid_config");
-  return edges.some(edge => edge[0] === from && edge[1] === to);
+  return edges as [string, string][];
+}
+export function configuredEdge(config: string | undefined, from: string, to: string): boolean {
+  return baselineEdges(config).some(edge => edge[0] === from && edge[1] === to);
 }
 export const fingerprint = (message: AgentMessage) => sha256Hex(JSON.stringify(message));
 export const messageId = (from: string, seed: string) => "agent:" + sha256Hex(from + ":" + seed);

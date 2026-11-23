@@ -1,7 +1,7 @@
 import { copyJson } from "@earendil-works/chord/json";
 import type { Context } from "@earendil-works/chord/context";
 import { Type } from "typebox";
-import { defineExtension, defineTool, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool, type ToolRegistration, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { Env } from "../env";
 import { healthReport } from "../admin/health";
 import { threadView } from "../admin/read-views";
@@ -11,6 +11,7 @@ export type OpsExtensionDeps = {
   env: Env;
   allowed(api: ToolExecutionApi, context: Context): Promise<boolean>;
   currentTurnId(api: ToolExecutionApi, context: Context): Promise<string | undefined>;
+  resourceTools?: readonly ToolRegistration[];
   audit(detail: { tool: string; result: string }): Promise<unknown>;
 };
 
@@ -280,7 +281,7 @@ export function createOpsExtension(deps: OpsExtensionDeps) {
 
   return defineExtension({
     name: "cs.ops",
-    namespace: { name: "runtime-ops", description: "实例运行状态、用量费用、请求轨迹与诊断日志只读查询（仅主人会话）" },
-    tools: [healthTool, ...codemodeTools],
+    namespace: { name: "runtime-ops", description: "运行状态、用量、请求轨迹、诊断日志和沙箱资源管理" },
+    tools: [healthTool, ...codemodeTools, ...deps.resourceTools ?? []],
   });
 }
