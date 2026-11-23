@@ -1,9 +1,11 @@
+import { SharedMount } from "./shared-mount";
+import type { SharedAccess } from "../shared/capability-files";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
 import type { GcReport } from "./workspace-gc";
 import { MediaRepository, type AssetRef } from "../media/repository";
 import { imageMime } from "../media/model";
-import type { DirEntry, ExecResult, FileEdit, ReadResult } from "./client";
+import { sandboxPath, type DirEntry, type ExecResult, type FileEdit, type ReadResult } from "./client";
 import { nativeSandboxClient } from "./native";
 import { createOutputDirectory } from "./output-directory";
 import { classifyError, logDiag } from "../shared/diagnostics";
@@ -30,6 +32,8 @@ export class SandboxDO extends DurableObject<Env> {
   private runtimeGeneration = 0;
   private readonly client = nativeSandboxClient({ container: () => this.startRuntime() });
   private readonly workspace = new WorkspaceManager({ workspace: `workspace:${this.ctx.id.toString()}`, bucket: this.env.ASSETS, storage: this.ctx.storage,
+    shared: new SharedMount(() => this.env.REGISTRY.getByName("main"), this.ctx.id.toString(),
+      access => nativeSandboxClient({ container: () => this.startRuntime() }, access)),
     runtime: this.client, runtimeReady: () => this.ready && Boolean(this.ctx.container?.running), resetRuntime: () => this.destroyRuntime() });
   private container(): Container {
     const container = this.ctx.container;
@@ -89,7 +93,7 @@ export class SandboxDO extends DurableObject<Env> {
     }
     return container;
   }
-  async run(input: { operationId: string; operation: WorkspaceOperation }): Promise<WorkspaceRunResult> {
+  async run(input: { operationId: string; operation: WorkspaceOperation; sharedAccess?: SharedAccess }): Promise<WorkspaceRunResult> {
     const out = await this.workspace.run(input);
     if (input.operation.kind === "exec" && out.status === "committed" && "stdout" in out.result) {
       const timedOut = Boolean(out.result.timedOut);
@@ -97,23 +101,23 @@ export class SandboxDO extends DurableObject<Env> {
     }
     return out;
   }
-  private async result(operation: WorkspaceOperation, operationId?: string) {
-    const run = await this.run({ operationId: operationId ?? crypto.randomUUID(), operation });
+  private async result(operation: WorkspaceOperation, operationId?: string, sharedAccess?: SharedAccess) {
+    const run = await this.run({ operationId: operationId ?? crypto.randomUUID(), operation, sharedAccess });
     if (run.status !== "committed") throw new Error(run.status === "unknown" ? "operation_unknown" : run.error + (run.issues ? `:${JSON.stringify(run.issues)}` : ""));
     return run.result;
   }
-  async exec(cmd: string, options: { cwd?: string; timeoutMs: number; operationId?: string }): Promise<ExecResult> {
-    const result = await this.result({ kind: "exec", command: cmd, cwd: options.cwd, timeoutMs: options.timeoutMs }, options.operationId);
+  async exec(cmd: string, options: { cwd?: string; timeoutMs: number; operationId?: string; sharedAccess?: SharedAccess }): Promise<ExecResult> {
+    const result = await this.result({ kind: "exec", command: cmd, cwd: options.cwd, timeoutMs: options.timeoutMs }, options.operationId, options.sharedAccess);
     if (!("stdout" in result)) throw new Error("sandbox_error");
     return result;
   }
-  async readFile(path: string, options: { offset?: number; limit?: number } = {}): Promise<ReadResult> {
-    const result = await this.result({ kind: "read", path, ...options });
+  async readFile(path: string, options: { offset?: number; limit?: number } = {}, sharedAccess?: SharedAccess): Promise<ReadResult> {
+    const result = await this.result({ kind: "read", path, ...options }, undefined, sharedAccess);
     if (!("text" in result) && !("kind" in result)) throw new Error("sandbox_error");
     return result;
   }
-  async writeFile(path: string, content: string | Uint8Array, operationId?: string): Promise<{ bytes: number }> {
-    const result = await this.result(typeof content === "string" ? { kind: "write", path, text: content } : { kind: "writeBytes", path, data: content }, operationId);
+  async writeFile(path: string, content: string | Uint8Array, operationId?: string, sharedAccess?: SharedAccess): Promise<{ bytes: number }> {
+    const result = await this.result(typeof content === "string" ? { kind: "write", path, text: content } : { kind: "writeBytes", path, data: content }, operationId, sharedAccess);
     if (!("bytes" in result)) throw new Error("sandbox_error");
     return result;
   }
@@ -130,14 +134,20 @@ export class SandboxDO extends DurableObject<Env> {
     if (!/^agent:[0-9a-f]{64}$/.test(messageId) || !Number.isInteger(count) || count < 0 || count > 5) throw new Error("invalid_request");
     await this.workspace.retireAttachments(Array.from({ length: count }, (_, index) => "agent-import:" + messageId + ":" + index));
   }
-  async editFile(path: string, edits: FileEdit[], operationId?: string): Promise<{ replaced: number }> {
-    const result = await this.result({ kind: "edit", path, edits }, operationId);
+  async editFile(path: string, edits: FileEdit[], operationId?: string, sharedAccess?: SharedAccess): Promise<{ replaced: number }> {
+    const result = await this.result({ kind: "edit", path, edits }, operationId, sharedAccess);
     if (!("replaced" in result)) throw new Error("sandbox_error");
     return result;
   }
   list(path: string): Promise<DirEntry[]> { return this.workspace.list(path); }
   files(revision?: string): Promise<WorkspaceManifest> { return this.workspace.files(revision); }
-  readBlob(path: string, revision?: string): Promise<{ bytes: Uint8Array; mime: string; name: string }> { return this.workspace.readBlob(path, revision); }
+  async readBlob(path: string, revision?: string, sharedAccess?: SharedAccess): Promise<{ bytes: Uint8Array; mime: string; name: string }> {
+    if (!path.startsWith("/shared/")) return this.workspace.readBlob(path, revision);
+    if (!sharedAccess || revision) throw new Error("permission_denied");
+    const relative = sandboxPath(path).slice("/shared/".length);
+    const bytes = await this.env.REGISTRY.getByName("main").sharedRead(sharedAccess, relative);
+    return { bytes, mime: imageMime(bytes) ?? "application/octet-stream", name: relative.split("/").at(-1)! };
+  }
   async exportAsset(path: string, scope: string, name?: string): Promise<AssetRef> {
     const file = await this.readBlob(path);
     return new MediaRepository({ bucket: this.env.ASSETS, scope }).put({ ...file, name: name ?? file.name, kind: imageMime(file.bytes) ? "image" : "file" });

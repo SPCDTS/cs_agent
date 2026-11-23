@@ -294,7 +294,16 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
       list: () => resources.list(memory.ns),
       create: (operationId, input) => resources.create(memory.ns, operationId, input),
     } } : {}),
-    sandbox: workspaceFor,
+    sandbox: async (id,api,context) => {
+      const sandbox=await workspaceFor(id);
+      const sharedAccess=await ownerTaskAllowed(api,context) ? "owner" : "reader";
+      return {
+        exec:(cmd,options)=>sandbox.exec(cmd,{...options,sharedAccess}),
+        readFile:(path,options)=>sandbox.readFile(path,options,sharedAccess),
+        writeFile:(path,content,operationId)=>sandbox.writeFile(path,content,operationId,sharedAccess),
+        editFile:(path,edits,operationId)=>sandbox.editFile(path,edits,operationId,sharedAccess),
+      };
+    },
     readWorkspace: async ({ workspace, path, ...options }, api, context) => {
       if (!await ownerTaskAllowed(api, context)) throw new Error("permission_denied");
       const file = await host.env.SANDBOX.getByName(workspace).readBlob(workPath(path));
@@ -431,8 +440,12 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     }),
     env: target => workspaceExecutionEnv({ id: "cloudflare:" + host.env.SANDBOX.idFromName(memory.ns), cwd: target.cwd,
       files: async callContext => {
-        if (!await codingAllowed({ conversationId: target.conversationId, snapshot: target.read.snapshot.bind(target.read) }, callContext)) throw new Error("permission_denied");
-        return workspaceFor();
+        const api={conversationId:target.conversationId,snapshot:target.read.snapshot.bind(target.read)};
+        if (!await codingAllowed(api,callContext)) throw new Error("permission_denied");
+        const sharedAccess=await ownerTaskAllowed(api,callContext) ? "owner" : "reader";
+        const sandbox=await workspaceFor();
+        return { readBlob:(path,revision)=>sandbox.readBlob(path,revision,sharedAccess),
+          writeFile:(path,bytes,id)=>sandbox.writeFile(path,bytes,id,sharedAccess),createTempDir:prefix=>sandbox.createTempDir(prefix) };
       },
     }),
     onWake: wake => host.ctx.waitUntil(host.runtimeWake(wake)),

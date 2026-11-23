@@ -3,7 +3,7 @@ import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
 import { FILE_MAX_BYTES } from "../media/model";
 import { decodeFileRead } from "./read";
-import { EXEC_MAX_TIMEOUT_MS, WORK_ROOT, SandboxError, sandboxFailure, workPath, type SandboxClient } from "./client";
+import { EXEC_MAX_TIMEOUT_MS, WORK_ROOT, SandboxError, sandboxFailure, sandboxPath, workPath, type SandboxClient } from "./client";
 
 export type NativeContainer = Pick<Container, "exec">;
 export type NativeFiles = Pick<Files, "readFile" | "writeFile" | "stat" | "readDirectory" | "mkdir" | "remove">;
@@ -18,7 +18,7 @@ const decoder = new TextDecoder("utf-8", { ignoreBOM: true, fatal: false });
 const encoder = new TextEncoder();
 
 /** 运行时只有 Files 和原生进程入口。缓存只驻留当前容器，旧 manifest 已追踪的缓存路径仍保留。 */
-export function nativeSandboxClient(deps: Dependencies): SandboxClient {
+export function nativeSandboxClient(deps: Dependencies, sharedAccess?: "owner" | "reader"): SandboxClient {
   function failure(error: unknown): never {
     if (error instanceof SandboxError) throw error;
     const code = sandboxFailure(error);
@@ -51,7 +51,7 @@ export function nativeSandboxClient(deps: Dependencies): SandboxClient {
       return value;
     });
   }
-  const resolve = (path: string) => helper("resolve", { path: workPath(path) }, Type.String({ pattern: "^/work(?:/|$)" }));
+  const resolve = (path: string) => helper("resolve", { path: sandboxPath(path) }, Type.String({ pattern: "^/(?:work|shared)(?:/|$)" }));
   async function bytes(path: string): Promise<Uint8Array> {
     const absolute = await resolve(path), fs = await files();
     const stat = await fs.stat(absolute, { user });
@@ -72,8 +72,8 @@ export function nativeSandboxClient(deps: Dependencies): SandboxClient {
     return { bytes: size };
   }
   return {
-    snapshot: (retainedPaths = []) => helper("snapshot", { retainedPaths }, Snapshot),
-    readBlob: path => boundary(() => bytes(path)),
+    snapshot: (retainedPaths = []) => helper("snapshot", { retainedPaths, ...(sharedAccess ? {shared:true} : {}) }, Snapshot),
+    readBlob: path => boundary(() => bytes(sharedAccess ? workPath(path,"/shared") : path)),
     restore: (snapshot, readBlob) => boundary(async () => {
       const stage = "/tmp/sandbox-import-" + crypto.randomUUID(), fs = await files();
       await fs.mkdir(stage, { user });
@@ -85,20 +85,20 @@ export function nativeSandboxClient(deps: Dependencies): SandboxClient {
           await fs.mkdir(target.slice(0, target.lastIndexOf("/")), { recursive: true, user });
           await fs.writeFile(target, await readBlob(file), { user });
         }
-        await helper("restore", { stage, snapshot }, Restored);
+        await helper("restore", { stage, snapshot, sharedAccess }, Restored);
       } finally { await fs.remove(stage, { recursive: true, force: true, user }); }
     }),
     exec: (command, options) => {
       if (!Number.isFinite(options.timeoutMs)) return Promise.reject(new SandboxError("invalid_request"));
       const timeoutMs = Math.min(EXEC_MAX_TIMEOUT_MS, Math.max(1, Math.trunc(options.timeoutMs)));
-      return helper("exec", { command, cwd: workPath(options.cwd ?? WORK_ROOT), timeoutMs }, Exec, timeoutMs);
+      return helper("exec", { command, cwd: sandboxPath(options.cwd ?? WORK_ROOT), timeoutMs }, Exec, timeoutMs);
     },
     readFile: (path, options = {}) => boundary(async () => decodeFileRead(await bytes(path), options)),
     writeFile: (path, text) => boundary(() => write(path, text)),
     mkdir: path => boundary(async () => { await (await files()).mkdir(await resolve(path), { recursive: true, user }); }),
     remove: path => boundary(async () => {
       const absolute = await resolve(path);
-      if (absolute === WORK_ROOT) throw new SandboxError("path_denied");
+      if (absolute === WORK_ROOT || absolute === "/shared") throw new SandboxError("path_denied");
       await (await files()).remove(absolute, { recursive: true, force: true, user });
     }),
     editFile: (path, edits) => boundary(async () => {

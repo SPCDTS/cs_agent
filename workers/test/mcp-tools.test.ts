@@ -101,10 +101,10 @@ describe("MCP transport, snapshots and connection lifetime", () => {
   it("uses SDK Streamable HTTP pagination with static secrets, accepts optional GET 405, and closes sessions", async () => {
     const remote = fakeRemote();
     await runInDurableObject(env.THREAD.getByName("owner"), async () => {
-      const server = { ...MCP_CONFIG.servers[0], credential: { kind: "external-account", accountId: "fixture", revision: "1" } as const,
-        transport: { ...MCP_CONFIG.servers[0].transport, secretHeaders: { Authorization: "STATIC_HEADER" } } };
-      const staticEnv = { ...env, STATIC_HEADER: "Bearer synthetic-static" };
-      const connection = await McpConnection.open(server, staticEnv, MCP_CONFIG.limits, new AbortController().signal, () => {});
+      const registry=env.REGISTRY.getByName("main");
+      const record=await registry.mcpServerPut({id:"static",url:MCP_CONFIG.servers[0].transport.url,auth:"token"},"absent");
+      const {server}=await registry.mcpCredentialPut("static",record.revision,{Authorization:"Bearer synthetic-static"});
+      const connection = await McpConnection.open(server, env, MCP_CONFIG.limits, new AbortController().signal, () => {});
       expect(await connection.listTools(new AbortController().signal)).toHaveLength(4);
       await connection.close();
     });

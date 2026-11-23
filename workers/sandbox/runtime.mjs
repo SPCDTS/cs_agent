@@ -46,13 +46,15 @@ export function tailCollector(cap = OUTPUT_CAP) {
     },
   };
 }
-export function createSandboxRuntime({ root, shell = "/bin/bash", user, env = {} }) {
+export function createSandboxRuntime({ root, sharedRoot, shell = "/bin/bash", user, env = {} }) {
   const commandEnv = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", TERM: "dumb", HOME: "/home/sandbox", USER: "sandbox", ...env };
   const own = async file => { if (user) await fs.chown(file, user.uid, user.gid); };
   const workspace = workspaceControl({ root, own });
+  const shared = sharedRoot && workspaceControl({root:sharedRoot, own, includeCaches:true});
+  const resolve = raw => resolveInside(sharedRoot && typeof raw==="string" && within(sharedRoot,raw) ? sharedRoot : root,raw);
   async function exec({ command, cwd, timeoutMs = 60000 }) {
     if (typeof command !== "string" || !command.trim() || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) fail("invalid_request");
-    const directory = await resolveInside(root, cwd ?? root);
+    const directory = await resolve(cwd ?? root);
     if (!(await fs.stat(directory)).isDirectory()) fail("not_a_directory");
     return new Promise((resolve, reject) => {
       const child = spawn(shell, ["-c", command], { cwd: directory, env: commandEnv, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"], ...(user ? { uid: user.uid, gid: user.gid } : {}) });
@@ -80,22 +82,31 @@ export function createSandboxRuntime({ root, shell = "/bin/bash", user, env = {}
       });
     });
   }
-  async function restore({ stage, snapshot }) {
+  async function restore({ stage, snapshot, sharedAccess }) {
     // stage 由 Worker 随机生成；不允许把其它容器目录作为恢复输入或清理目标。
     if (typeof stage !== "string" || !/^\/tmp\/sandbox-import-[a-f0-9-]{36}$/.test(stage)) fail("path_denied");
-    if ((await fs.realpath(stage)) !== stage) fail("path_denied");
-    const { id } = await workspace.start(snapshot);
+    if ((await fs.realpath(stage)) !== path.join(await fs.realpath("/tmp"),path.basename(stage))) fail("path_denied");
+    const target = sharedAccess === undefined ? workspace : shared;
+    if (!target || sharedAccess !== undefined && !["reader","owner"].includes(sharedAccess)) fail("invalid_request");
+    const { id } = await target.start(snapshot);
     for (const file of snapshot.files) {
       const source = await resolveInside(stage, file.path);
-      await workspace.put(id, file.path, await fs.readFile(source));
+      await target.put(id, file.path, await fs.readFile(source));
     }
-    return workspace.commit(id);
+    if (sharedAccess!=="reader") return target.commit(id);
+    if (user) await fs.chown(sharedRoot,0,0);
+    await fs.chmod(sharedRoot,0o755);
+    return target.commit(id,async (dest,isDirectory)=>{
+      if (user) await fs.chown(dest,0,0);
+      const mode=isDirectory ? 0o555 : 0o444 | ((await fs.stat(dest)).mode & 0o111);
+      await fs.chmod(dest,mode);
+    });
   }
-  return { resolve: raw => resolveInside(root, raw), exec, snapshot: retainedPaths => workspace.scan(retainedPaths), restore };
+  return { resolve, exec, snapshot: (retainedPaths, isShared) => (isShared ? shared : workspace).scan(retainedPaths), restore };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const runtime = createSandboxRuntime({ root: "/work", user: { uid: 1000, gid: 1000 } });
+  const runtime = createSandboxRuntime({ root: "/work", sharedRoot:"/shared", user: { uid: 1000, gid: 1000 } });
   try {
     const chunks = []; for await (const chunk of process.stdin) chunks.push(chunk);
     const input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -104,7 +115,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     switch (action) {
       case "resolve": result = await runtime.resolve(input.path); break;
       case "exec": result = await runtime.exec(input); break;
-      case "snapshot": result = await runtime.snapshot(input.retainedPaths); break;
+      case "snapshot": result = await runtime.snapshot(input.retainedPaths,input.shared); break;
       case "restore": result = await runtime.restore(input); break;
       default: fail("invalid_request");
     }

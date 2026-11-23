@@ -30,7 +30,7 @@ npm run check
 - 必需：`NAPCAT_TOKEN`、`QQ_OWNER`、`ADMIN_TOKEN`、`OAUTH_STORE_KEY`。
 - 模型：DeepSeek 使用 `DEEPSEEK_API_KEY`，Gemini 使用 `GEMINI_API_KEY`；ChatGPT 订阅在管理页用一次性本机助手完成 Codex 原生授权。流程与诊断见 [模型与登录](../workers/README.md#模型与-chatgpt-登录)。
 - Gmail：按需提供 `GMAIL_CLIENT_ID`、`GMAIL_CLIENT_SECRET`、`GMAIL_REFRESH_TOKEN`，推送来源配置在 Wrangler vars。
-- MCP：`workers/mcp.json` 是首次初始化模板，默认空目录。已有 Registry 中保存的服务和 secret 引用不会被新部署覆盖；新实例通过 agent 或管理页接入，Token 加密保存在 Registry，无需逐个上传 Cloudflare Secret。见 [动态 MCP 接入](MCP-SETUP.md)；Workshop 本机连接见 [本机说明](WORKSHOP-LOCAL.md)。
+- MCP：`workers/mcp.json` 是首次初始化模板，默认空目录。已有服务与可用的旧 Secret 引用会迁移到共享能力目录；新实例通过主人沙箱或管理页接入，外置服务凭据随服务目录管理。见 [动态 MCP 接入](MCP-SETUP.md)；Workshop 本机连接见 [本机说明](WORKSHOP-LOCAL.md)。
 
 在具备 Bash、Python 和 Wrangler 登录的环境中，可从仓库根运行 `bash workers/scripts/put-secrets.sh deployments/my.local.json`。先准备私有 `secrets/` 目录；脚本读取 `.env`，仅在缺失时生成管理员口令和 OAuth 加密密钥，并通过 stdin 上传。不要覆盖既有 `OAUTH_STORE_KEY`，否则已有凭据无法解密。也可先生成部署配置，再逐项使用 `npx wrangler secret put <名称> --config wrangler.deploy.json`；所有凭据操作必须显式指向同一档案。
 

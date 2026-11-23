@@ -1,3 +1,4 @@
+import { expireMcpLogin } from "./mcp-helpers";
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
@@ -177,7 +178,7 @@ describe("runtime MCP onboarding", () => {
     expect(response.status).toBe(200);
     expect(await registry().accessToken(id)).toBe(ACCESS);
     await probeActivate();
-    await runInDurableObject(registry(), (_instance, state) => { state.storage.sql.exec("UPDATE mcp_oauth_tokens SET expires_at=? WHERE server_id=?", Date.now() - 1, id); });
+    await expireMcpLogin(id);
     expect(await registry().accessToken(id)).toBe(`${ACCESS}-refreshed`);
     expect(remote.state.refreshes).toBe(1);
   });

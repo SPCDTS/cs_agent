@@ -1,3 +1,4 @@
+import { createDecipheriv } from "node:crypto";
 import { OAuthFailure } from "./oauth-fetch";
 import { sha256Bytes } from "../shared/hash";
 
@@ -8,6 +9,22 @@ export class TokenVault {
   readonly configured: boolean;
   private key?: Promise<CryptoKey>;
   constructor(private readonly secret?: string) { this.configured = !!secret && /^[a-f\d]{64}$/i.test(secret); }
+  /** 升级旧 SQL 密文时同步解密，使内容与迁移标记可在一个 SQLite 事务提交。 */
+  legacyValue(value: string, identity: string): string {
+    if (!this.configured || !this.secret) throw new OAuthFailure("unconfigured");
+    try {
+      const [version, nonce, raw, extra] = value.split(".");
+      if (version !== "v1" || !nonce || !raw || extra !== undefined) throw new Error();
+      const ciphertext = Buffer.from(raw, "base64url");
+      const cipher = createDecipheriv("aes-256-gcm", Buffer.from(this.secret, "hex"), Buffer.from(nonce, "base64url"));
+      cipher.setAAD(Buffer.from(identity));
+      cipher.setAuthTag(ciphertext.subarray(-16));
+      return Buffer.concat([cipher.update(ciphertext.subarray(0, -16)), cipher.final()]).toString("utf8");
+    } catch {
+      throw new OAuthFailure("oauth_token");
+    }
+  }
+
   private getKey(): Promise<CryptoKey> {
     if (!this.configured || !this.secret) throw new OAuthFailure("unconfigured");
     return this.key ??= crypto.subtle.importKey("raw", Buffer.from(this.secret, "hex"), "AES-GCM", false, ["encrypt", "decrypt"]);

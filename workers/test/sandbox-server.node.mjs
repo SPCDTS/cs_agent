@@ -1,3 +1,5 @@
+import { createHash, randomUUID } from "node:crypto";
+import { chmodSync,statSync } from "node:fs";
 import { test, before, after } from "node:test";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
@@ -95,5 +97,26 @@ await writeFile("out/jersey.png", new Uint8Array(await image.arrayBuffer()));`;
   } finally {
     server.closeAllConnections();
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
+
+test("真实 bash 在共享技能目录运行，普通 Cookie 在群视图可读，结果写入私有目录", {skip:process.platform==="win32"}, async()=>{
+  const sharedRoot=path.join(base,"shared"),relative="skills/query/cookies.txt",content=Buffer.from("session=fixture");
+  mkdirSync(sharedRoot);
+  const stage="/tmp/sandbox-import-"+randomUUID();
+  mkdirSync(path.join(stage,"skills/query"),{recursive:true});
+  writeFileSync(path.join(stage,relative),content);
+  const shared=createSandboxRuntime({root,sharedRoot,shell});
+  try {
+    await shared.restore({stage,sharedAccess:"reader",snapshot:{directories:["skills","skills/query"],files:[
+      {path:relative,bytes:content.length,sha256:createHash("sha256").update(content).digest("hex"),mode:0o600}],totalBytes:content.length}});
+    const result=await shared.exec({cwd:path.join(sharedRoot,"skills/query"),command:`cat cookies.txt > "${root}/result.txt"`});
+    assert.equal(result.code,0,result.stderr);
+    assert.equal(readFileSync(path.join(root,"result.txt"),"utf8"),content.toString());
+    assert.equal(statSync(path.join(sharedRoot,relative)).mode & 0o222,0);
+    if (process.getuid()!==0) assert.notEqual((await shared.exec({cwd:sharedRoot,command:"echo change > skills/query/cookies.txt"})).code,0);
+  } finally {
+    for (const dir of ["","skills","skills/query"]) if (existsSync(path.join(sharedRoot,dir))) chmodSync(path.join(sharedRoot,dir),0o755);
+    rmSync(stage,{recursive:true,force:true});
   }
 });

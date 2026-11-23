@@ -16,7 +16,7 @@
 
 | 文件 | 内容 |
 | --- | --- |
-| `secrets/workshop/mcp-token.txt` | 本机 MCP 的原始令牌，云端 secret 加上 `Bearer ` 前缀 |
+| `secrets/workshop/mcp-token.txt` | 本机 MCP 的原始令牌；在云端连接的认证头中使用 |
 | `secrets/workshop/tunnel-credentials.json` | cloudflared 创建的 Tunnel 凭据 |
 | `data/workshop-bridge/cloudflared.exe` | 从 Cloudflare 官方发布下载的程序 |
 | `data/workshop-bridge/local.json` | 官方 CLI 路径、cloudflared 路径、允许访问的本机根目录 |
@@ -53,7 +53,7 @@
 }
 ```
 
-私有目录只授予当前用户和 SYSTEM 访问。令牌与完整请求头不能写入仓库、命令行参数或调试日志。轮换 MCP 令牌时同步更新云端 secret 并重启本机连接。
+私有目录只授予当前用户和 SYSTEM 访问。令牌与完整请求头不能写入仓库、命令行参数或调试日志。轮换 MCP 令牌时同步更新服务目录中的认证头并重启本机连接。
 
 ## 命令行配置与运行
 
@@ -65,7 +65,7 @@ Cloudflare 使用官方命令行；`cloudflared tunnel login` 需要一次浏览
 & .\data\workshop-bridge\cloudflared.exe tunnel route dns cs-workshop-local workshop.spcdts.dev
 ```
 
-已有接入沿用 `workers/mcp.json` 首次导入的 `CS2_WORKSHOP_AUTHORIZATION` 引用；`workers/scripts/put-secrets.sh` 可上传该 secret，值走 stdin。动态 MCP 功能上线后，新接入或更换连接通过管理页配置，不再修改 `mcp.json`：认证选择 Token，在认证头 `Authorization` 填写本机令牌，再检测和启用工具。详见 [动态 MCP 接入](MCP-SETUP.md)。此过程不修改 Workshop 本体。
+已有接入会将可用的 `CS2_WORKSHOP_AUTHORIZATION` 旧绑定迁入 `/shared/mcp/cs2-workshop/headers.json`。新接入或更换令牌时，在管理页选择 Token，在认证头 `Authorization` 填写本机令牌，检测后启用工具。后续使用服务目录里的凭据。[动态 MCP 接入](MCP-SETUP.md)
 
 准备好上述本机文件后，在主工作区执行：
 

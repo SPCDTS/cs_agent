@@ -28,7 +28,33 @@
 - 重新保存已有连接会清除旧凭据、工具选择和检测结果。只换 Token 时使用“保存凭据并检测”。
 - 停用保留配置及凭据；移除删除配置和该服务的 OAuth 登录数据。更换连接或凭据后，已有群授权失效，需在“权限与运维”重新确认。
 
-Token 不通过聊天或模型工具参数接收，不回显。凭据使用现有 `OAUTH_STORE_KEY` 加密保存在 Registry；不要更换这把密钥。变更审计复用 owner 会话的 `mcp_management` 事件，只包含服务 ID、操作和来源，不含凭据。
+管理台的 Token 输入框不回显凭据。凭据使用现有 `OAUTH_STORE_KEY` 加密保存在 Registry；不要更换这把密钥。变更审计复用 owner 会话的 `mcp_management` 事件，只包含服务 ID、操作和来源，不含凭据。
+
+## 共享目录
+
+每个服务占用主人沙箱中的 `/shared/mcp/<服务 ID>/`。管理台与 MCP 连接器使用同一份文件。群会话通过已有的群授权调用具体工具，群沙箱中没有 MCP 连接目录。
+
+| 文件 | 用途 |
+| --- | --- |
+| `server.json` | 服务 ID、HTTPS 地址、认证方式、启用状态、允许的工具与资源前缀。可先通过管理台创建一条连接，再在主人沙箱编辑。 |
+| `headers.json` | Token 认证头的 JSON 对象，例如 `{"Authorization":"Bearer <令牌>"}`。在管理台保存 Token 会更新此文件。 |
+| `oauth.json` | OAuth 登录与续期写入的登录态，含 issuer、access_token、refresh_token、scope 和 expires_at（毫秒时间戳或 null）。登出后删除。 |
+
+主人也可以在一次沙箱操作中创建服务目录和 `server.json`。下面是一份可启用的只读工具配置，服务实际提供的工具名需要与 `allow` 一致。
+
+```json
+{
+  "id": "query",
+  "enabled": true,
+  "transport": { "kind": "streamable-http", "url": "https://example.com/mcp" },
+  "credential": { "kind": "managed", "accountId": "owner-query", "revision": "initial" },
+  "access": { "kind": "owner-private" },
+  "tools": { "allow": ["lookup"], "readOnly": ["lookup"] },
+  "replay": "unsafe"
+}
+```
+
+写入配置或替换凭据后，宿主生成新的授权版本；需要群使用时，在「权限与运维」重新确认。更换服务地址时，原地址的登录态会被清除，可以在同次操作中明确提供新凭据。正常 OAuth 自动续期保留现有授权。
 
 ## API 与存储
 
@@ -40,7 +66,7 @@ Token 不通过聊天或模型工具参数接收，不回显。凭据使用现�
 | `POST /admin/mcp/manage` | 传入 `action` 和对应参数，执行与 agent 相同的管理流程 |
 | `PUT /admin/mcp/servers/:id/credentials` | 传入 `expectedRevision` 和 `headers`，加密保存认证头 |
 
-服务存储复用 RegistryDO。首次启动将 `workers/mcp.json` 导入；公开默认模板的服务目录为空，由管理页或 agent 完成接入。升级已有实例保留 Registry 中的 Notion OAuth 凭据、Workshop secret 引用及工具策略。此后以 Registry 数据为准；部署、DO 重启和静态配置变更不会覆盖运行时修改，也不会重新添加已移除的服务。原文件仍提供初始数据和全局 MCP 限额。
+服务目录复用 RegistryDO 的 SQLite。升级时，已有服务配置、可解密的 Token 和当前 OAuth 登录态迁入对应文件，管理台保留原有工具选择。旧 `secretHeaders` 引用在部署绑定可用时首次导入，随后连接直接读取目录；缺少旧绑定时可在管理台重新配置。部署密钥 `OAUTH_STORE_KEY` 继续保护静态凭据。新实例从 `workers/mcp.json` 初始化一次，后续部署保留运行时修改。
 
 接纳新输入时同步配置；agent 启用服务后立即刷新目录。调用前核对当前配置，停用、删除或更换服务后，旧会话及已派发子任务不能继续使用旧连接执行新的调用。已经发出的远端操作无法通过停用撤回。无需新增 DO 类型、容器、Cloudflare API 权限或定时任务。
 

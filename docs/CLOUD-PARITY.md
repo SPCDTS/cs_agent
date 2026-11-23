@@ -63,6 +63,14 @@ BridgeDO 是 QQ 唯一发送事实源，RegistryDO 保存授权、人设、技�
 - **owner 跨群只读**：Code Mode 的 `read` 支持可选 `workspace: "group:群号"`，仅在 owner 原始任务授权有效时直读目标 `SandboxDO.readBlob`（不启动容器、不写快照）。
 - **工作区技能发布**：`skill_inspect` 与 `skill_publish` 仅作为 Code Mode 嵌套工具在 owner 私聊/网页开放（子 agent 不继承），先固定一次 `workspaceRevision` 与 Registry `expectedRevision` 再双版本 CAS 发布，不向模型暴露 `ADMIN_TOKEN`。
 
+### 共享目录 `/shared`
+
+主人可以把技能安装到 `/shared/skills/<名称>/`。把 `SKILL.md`、脚本和资源放进目录后，启用的技能会出现在会话的技能目录中。通过管理台、导入脚本或 `skill_publish` 发布的正文与附件也位于同一路径。已有技能在升级时保留启用状态和附件。
+
+例如，主人将查询脚本和它的 `cookies.txt` 放入 `/shared/skills/query/`。主人私聊和群聊都可以执行 `cd /shared/skills/query && python3 query.py`，程序通过相对路径打开 Cookie。群视图只读，首次登录、续期写回、安装和更新由主人消息回合执行。结果写到各自的 `/work/out/`。停用技能后，其目录从群视图移除。受委派的编码子任务使用只读视图。
+
+每条沙箱操作开始时检查已提交的共享版本。主人执行期间若其他操作先提交了共享变更，本次有共享改动的提交会返回冲突。共享文件由 Registry SQLite 分块保存，不消耗会话的 R2 配额，也不会随工作区克隆。共享目录总量 50 MiB，单文件 10 MiB，一次提交的变更文件合计最多 16 MiB。文件与目录共最多 20,000 项，路径合计最多 4 MiB。MCP 连接文件位于主人视图的 `/shared/mcp/`。[MCP 目录格式](MCP-SETUP.md#共享目录)
+
 ### 3.3 Code Mode 输出文件环境
 
 主会话与有编码权限的子 agent 通过 `Harness.open({ env })` 获得基于 `/work` 持久工作区的 `ExecutionEnv`：

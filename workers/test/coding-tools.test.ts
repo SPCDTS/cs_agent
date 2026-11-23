@@ -45,7 +45,7 @@ describe("coding tools", () => {
     const write = vi.spyOn(SandboxDO.prototype, "writeFile").mockResolvedValue({ bytes: 50000 });
     const seen = scriptedModel([{ name: "codemode", args: { code: 'text("完整文本".repeat(12500));' } }]);
     await env.THREAD.getByName("owner").submit(nextInput("生成完整输出", 10000001));
-    expect(write).toHaveBeenCalledWith("/work/.codemode/full-text/output.txt", "完整文本".repeat(12500));
+    expect(write).toHaveBeenCalledWith("/work/.codemode/full-text/output.txt", "完整文本".repeat(12500), undefined, "owner");
     expect(seen.outputs.join("\n")).toContain("Full output: /work/.codemode/full-text/output.txt");
   });
   it.each(["persistence", "owner", "generation"] as const)("自动保存遇到 %s 失败时报告原因，不宣称已保存", async failure => {
@@ -84,6 +84,13 @@ describe("coding tools", () => {
     expect(Object.values(seen.requests[1]!.sections)).toContain(`<sandbox>\n${CLOUDFLARE_INSTRUCTIONS}\n</sandbox>`);
     for (const name of CODING_TOOLS) expect(seen.requests[1]!.tools).not.toContain(name);
     for (const request of seen.requests) expect(request.tools).toEqual(expect.arrayContaining(["codemode", "web_page", "generate_image"]));
+  });
+
+  it("群中的主人也只得到共享目录的群只读视图",async()=>{
+    const exec=vi.spyOn(SandboxDO.prototype,"exec").mockResolvedValue({stdout:"ok",stderr:"",code:0,timedOut:false,truncated:false});
+    scriptedModel([{name:"codemode",args:{code:'text(await tools.bash({command:"ls /shared"}));'}}]);
+    await env.THREAD.getByName("group:200000001").submit(nextInput("查看共享目录",10000001,200000001,true));
+    expect(exec).toHaveBeenCalledWith("ls /shared",expect.objectContaining({sharedAccess:"reader"}));
   });
 
   it("runs nested sandbox calls with MCP disabled and gives each call its own task ID", async () => {
@@ -175,7 +182,7 @@ describe("coding tools", () => {
     const exec = vi.spyOn(SandboxDO.prototype, "exec").mockResolvedValue({ stdout: "built\n", stderr: "warning: x\n", code: 2, timedOut: false, truncated: false });
     const seen = scriptedModel([{ name: "codemode", args: { code: 'text(await tools.bash({command:"make",timeout:90}));' } }, { name: "", args: {} }]);
     expect(await env.THREAD.getByName("owner").submit(nextInput("编译", 10000001))).toEqual({ status: "done" });
-    expect(exec).toHaveBeenCalledWith("make", { cwd: "/work", timeoutMs: 90_000, operationId: expect.stringMatching(/^task:/) });
+    expect(exec).toHaveBeenCalledWith("make", { cwd: "/work", timeoutMs: 90_000, sharedAccess:"owner", operationId: expect.stringMatching(/^task:/) });
     expect(seen.outputs[0]).toContain("built\n\n[stderr]\nwarning: x\n\nCommand exited with code 2");
     expect(await auditRows("coding_exec")).toEqual([{ result: "ok", commandLength: 4, code: 2, ms: expect.any(Number) }]);
   });
@@ -190,7 +197,7 @@ describe("coding tools", () => {
     ]);
     expect(await env.THREAD.getByName("owner").submit(nextInput("改一下", 10000001))).toEqual({ status: "done" });
     expect(seen.outputs[0]).toContain("a\nb\n\n[Showing lines 1-2 of 5. Use offset=3 to continue.]");
-    expect(edit).toHaveBeenCalledWith("main.py", [{ oldText: "a", newText: "A" }], expect.stringMatching(/^task:/));
+    expect(edit).toHaveBeenCalledWith("main.py", [{ oldText: "a", newText: "A" }], expect.stringMatching(/^task:/),"owner");
     expect(seen.outputs[1]).toContain("Successfully replaced 1 block(s) in main.py.");
   });
 });

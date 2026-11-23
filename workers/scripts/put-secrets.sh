@@ -61,14 +61,6 @@ if [ -z "$GMAIL_CLIENT_ID" ] || [ -z "$GMAIL_CLIENT_SECRET" ] || [ -z "$GMAIL_RE
   GMAIL_CLIENT_ID=""; GMAIL_CLIENT_SECRET=""; GMAIL_REFRESH_TOKEN=""
 fi
 
-# Workshop MCP 使用完整 Authorization 头；只有本机配置存在时才上传。
-CS2_WORKSHOP_AUTHORIZATION=""
-workshop_token_file="$root/secrets/workshop/mcp-token.txt"
-if [ -f "$workshop_token_file" ]; then
-  workshop_token=$(node -e 'process.stdout.write(require("node:fs").readFileSync(process.argv[1],"utf8").trim())' "$workshop_token_file")
-  [ -z "$workshop_token" ] || CS2_WORKSHOP_AUTHORIZATION="Bearer $workshop_token"
-fi
-
 for name in NAPCAT_TOKEN QQ_OWNER ADMIN_TOKEN OAUTH_STORE_KEY; do
   [ -n "${!name}" ] || { echo "$name 为空" >&2; exit 1; }
 done
@@ -84,7 +76,7 @@ cd "$workers_dir"
 {
   printf '{'
   first=1
-  for name in NAPCAT_TOKEN QQ_OWNER QQ_ALLOW_USERS QQ_ALLOW_GROUPS DEEPSEEK_API_KEY GEMINI_API_KEY ADMIN_TOKEN OAUTH_STORE_KEY GMAIL_CLIENT_ID GMAIL_CLIENT_SECRET GMAIL_REFRESH_TOKEN CS2_WORKSHOP_AUTHORIZATION; do
+  for name in NAPCAT_TOKEN QQ_OWNER QQ_ALLOW_USERS QQ_ALLOW_GROUPS DEEPSEEK_API_KEY GEMINI_API_KEY ADMIN_TOKEN OAUTH_STORE_KEY GMAIL_CLIENT_ID GMAIL_CLIENT_SECRET GMAIL_REFRESH_TOKEN; do
     [ -n "${!name}" ] || continue
     [ $first -eq 1 ] || printf ','
     first=0

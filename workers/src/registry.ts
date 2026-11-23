@@ -1,9 +1,12 @@
+import { CapabilityFiles, sharedSnapshot, type SharedAccess, type SharedChange } from "./shared/capability-files";
+import { CapabilitySkills } from "./shared/capability-skills";
+import { relativeWorkPath } from "./sandbox/workspace";
 import { DurableObject } from "cloudflare:workers";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import type { Credential } from "@earendil-works/pi-ai";
 import type { Env } from "./env";
-import { MCP_CONFIG, isOAuthServer, publicOrigin, referencedSecret, type OAuthServer } from "./mcp/config";
+import { MCP_CONFIG, isOAuthServer, publicOrigin, type OAuthServer } from "./mcp/config";
 import { TokenVault, randomSecret, sha256 } from "./mcp/crypto";
 import { DiscoverySchema, discover, exchange, TokenRejected, type OAuthTokens } from "./mcp/oauth";
 import { OAuthFailure } from "./mcp/oauth-fetch";
@@ -23,6 +26,7 @@ import type { Static } from 'typebox';
 import { connectionDigest } from "./mcp/names";
 
 type TokenRow = { server_id: string; account_id: string; revision: string; issuer: string; access_token: string; refresh_token: string | null; scope: string | null; expires_at: number | null; updated_at: number };
+const OAuthFile=Type.Object({issuer:Type.String({minLength:1}),access_token:Type.String({minLength:1}),refresh_token:Type.Union([Type.Null(),Type.String()]),scope:Type.Union([Type.Null(),Type.String()]),expires_at:Type.Union([Type.Null(),Type.Integer()])},{additionalProperties:false});
 type LoginRow = { state: string; server_id: string; verifier: string; nonce_hash: string; created_at: number; expires_at: number };
 export type McpStatus = { server: string; enabled: boolean; credential: "none" | "static" | "oauth"; login: "ok" | "needed" | "error" | "unconfigured" };
 const Pending = Type.Object({ verifier: Type.String(), config: Type.String(), discovery: DiscoverySchema }, { additionalProperties: false });
@@ -36,7 +40,9 @@ export class RegistryDO extends DurableObject<Env> {
   private readonly alertStore = new AlertStore(this.ctx.storage);
   private alertDrain?: Promise<void>;
   private readonly vault = new TokenVault(this.env.OAUTH_STORE_KEY);
-  private readonly mcpServers = new McpServerStore(this.ctx.storage.sql, this.vault, this.env.PUBLIC_ORIGIN);
+  private readonly directory = new CapabilityFiles(this.ctx.storage.sql, this.env.OAUTH_STORE_KEY);
+  private readonly installedSkills = new CapabilitySkills(this.ctx.storage.sql,this.directory);
+  private readonly mcpServers = new McpServerStore(this.ctx.storage, this.vault, this.env.PUBLIC_ORIGIN,this.directory);
   private readonly cloudflare = new CloudflareGrant(this.ctx.storage.sql, this.vault, this.env);
   private readonly cloudManager = new CloudflareManagement(this.ctx.storage.sql, scope => this.lock('cf:grant', async () => {
     if (!this.cloudflare.status().domain) throw new Error('device_cloudflare_denied');
@@ -69,7 +75,7 @@ export class RegistryDO extends DurableObject<Env> {
       ${CHATGPT_SCHEMA}
       ${SKILLS_SCHEMA};
     `);
-    ctx.storage.transactionSync(() => { this.mcpServers.initialize(); this.devices.initialize(); this.cloudflare.initialize(); this.cloudManager.initialize(); });
+    ctx.storage.transactionSync(() => { this.mcpServers.initialize(env); this.installedSkills.migrate(); this.migrateLogins(); this.devices.initialize(); this.cloudflare.initialize(); this.cloudManager.initialize(); });
   }
 
   cloudflareStart() { return this.cloudflare.start(); }
@@ -107,38 +113,127 @@ export class RegistryDO extends DurableObject<Env> {
   mcpCredentialPut(id: string, expected: string, headers: unknown) { return this.mcpServers.credentialPut(id, expected, headers); }
   mcpCredentialHeaders(id: string, digest: string) { return this.mcpServers.credentialHeaders(id, digest); }
 
-  // 技能目录只经面板写入；Thread 读目录与正文。
+  private sharedEntries(access: SharedAccess) {
+    if (access === "owner") return this.directory.entries();
+    const disabled = new Set(
+      this.ctx.storage.sql
+        .exec<{ name: string }>("SELECT name FROM skills WHERE enabled=0")
+        .toArray()
+        .map((row) => row.name)
+    );
+    return this.directory
+      .entries()
+      .filter(
+        ({ path }) => path !== "mcp" && !path.startsWith("mcp/") && !(path.startsWith("skills/") && disabled.has(path.split("/")[1]!))
+      );
+  }
+  sharedVersion(access: SharedAccess) {
+    return this.directory.version(access);
+  }
+  sharedManifest(access: SharedAccess) {
+    const entries = this.sharedEntries(access);
+    return { revision: this.directory.version(access), snapshot: sharedSnapshot(entries, access) };
+  }
+  sharedRead(access: SharedAccess, path: string, hash?: string) {
+    relativeWorkPath(path);
+    const [root, name] = path.split("/");
+    if (
+      access !== "owner" &&
+      (root === "mcp" ||
+        (root === "skills" &&
+          this.ctx.storage.sql.exec("SELECT 1 FROM skills WHERE name=? AND enabled=0", name ?? "").toArray().length))
+    )
+      throw new Error("permission_denied");
+    if (hash !== undefined && this.directory.stat(path)?.hash !== hash) throw new Error("workspace_conflict");
+    return this.directory.read(path);
+  }
+  sharedResolve(workspace: string, epoch: number) {
+    return this.ctx.storage.transactionSync(() => {
+      const last = this.directory.receipt(workspace);
+      if (last && last.epoch >= epoch) return last.epoch === epoch && !!last.applied;
+      this.directory.record(workspace, epoch, false);
+      return false;
+    });
+  }
+  sharedApply(workspace: string, epoch: number, expected: string, changes: SharedChange[]) {
+    return this.ctx.storage.transactionSync(() => {
+      const last = this.directory.receipt(workspace);
+      if (last && last.epoch >= epoch) {
+        if (last.epoch === epoch && last.applied) return;
+        throw new Error("workspace_conflict");
+      }
+      if (expected !== this.directory.version("owner")) throw new Error("workspace_conflict");
+      const skills = new Set<string>(),
+        servers = new Map<string, Set<string>>(),
+        previous = changes.some((change) => change.path.startsWith("mcp/")) ? this.mcpServers.config().servers : [];
+      for (const change of changes) {
+        const path = relativeWorkPath(change.path),
+          [root, name, ...rest] = path.split("/");
+        if (path !== change.path || path === "mcp" || path === "skills") throw new Error("path_denied");
+        if (root === "skills" && name) {
+          if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) throw new Error("invalid_name");
+          skills.add(name);
+        }
+        if (root === "mcp" && name) {
+          if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name)) throw new Error("invalid_request");
+          const names = servers.get(name) ?? new Set<string>();
+          names.add(rest.join("/"));
+          servers.set(name, names);
+        }
+        if (change.bytes !== undefined) this.directory.put(path, change.bytes, change.mode);
+        else if (change.mode !== undefined) this.directory.mkdir(path);
+        else this.directory.remove(path);
+      }
+      for (const name of skills) {
+        this.installedSkills.refresh(name);
+        this.bumpSkillRevision(name);
+      }
+      for (const [id, changed] of servers) {
+        const config = this.mcpServers.applyDirectory(
+          id,
+          previous.find((server) => server.id === id),
+          changed
+        );
+        if ((changed.has("oauth.json") || changed.has("server.json")) && config && this.directory.stat("mcp/" + id + "/oauth.json")) {
+          if (!isOAuthServer(config) || !this.row(config)) throw new Error("invalid_request");
+        }
+        if (changed.has("server.json") || changed.has("oauth.json"))
+          this.ctx.storage.sql.exec("DELETE FROM mcp_oauth_logins WHERE server_id=?", id);
+      }
+      if (servers.size && this.ctx.storage.sql.exec<{ n: number }>("SELECT count(*) AS n FROM mcp_servers").one().n > 64)
+        throw new Error("workspace_quota");
+      this.directory.checkQuota();
+      this.directory.record(workspace, epoch, true);
+    });
+  }
   skillsList(): SkillSummary[] {
-    return this.ctx.storage.sql.exec<{ name: string; description: string; files_json: string; enabled: number; updated_at: number }>(
-      "SELECT name, description, files_json, enabled, updated_at FROM skills ORDER BY name").toArray()
-      .map(row => ({ name: row.name, description: row.description, enabled: row.enabled === 1, updatedAt: row.updated_at, files: Object.keys(JSON.parse(row.files_json)) }));
+    return this.installedSkills.list();
   }
-
   skillGet(name: string): Skill | undefined {
-    const row = this.ctx.storage.sql.exec<{ name: string; description: string; body: string; files_json: string; enabled: number; updated_at: number }>(
-      "SELECT * FROM skills WHERE name = ?", name).toArray()[0];
-    return row && { name: row.name, description: row.description, body: row.body, files: JSON.parse(row.files_json), enabled: row.enabled === 1, updatedAt: row.updated_at };
+    return this.installedSkills.get(name);
   }
-
-  /** 覆盖写入保留启用状态；files 省略时保留已有附件。 */
   skillPut(skill: SkillInput): SkillSummary {
-    const files = skill.files === undefined ? null : JSON.stringify(skill.files), now = Date.now();
-    this.ctx.storage.sql.exec(`INSERT INTO skills (name, description, body, files_json, updated_at) VALUES (?, ?, ?, COALESCE(?, '{}'), ?)
-      ON CONFLICT(name) DO UPDATE SET description = excluded.description, body = excluded.body, files_json = COALESCE(?, files_json), updated_at = excluded.updated_at`,
-    skill.name, skill.description, skill.body, files, now, files);
-    this.bumpSkillRevision(skill.name);
-    return this.skillsList().find(summary => summary.name === skill.name)!;
+    return this.ctx.storage.transactionSync(() => {
+      this.installedSkills.put(skill);
+      this.directory.checkQuota();
+      this.bumpSkillRevision(skill.name);
+      return this.skillsList().find((summary) => summary.name === skill.name)!;
+    });
   }
-
   skillDelete(name: string): boolean {
-    const removed = this.ctx.storage.sql.exec("DELETE FROM skills WHERE name = ? RETURNING name", name).toArray().length > 0;
-    if (removed) this.bumpSkillRevision(name);
-    return removed;
+    return this.ctx.storage.transactionSync(() => {
+      const removed = this.ctx.storage.sql.exec("DELETE FROM skills WHERE name=? RETURNING name", name).toArray().length > 0;
+      if (removed) {
+        this.directory.removeTree("skills/" + name);
+        this.bumpSkillRevision(name);
+      }
+      return removed;
+    });
   }
 
   skillSetEnabled(name: string, enabled: boolean): boolean {
     const changed = this.ctx.storage.sql.exec("UPDATE skills SET enabled = ?, updated_at = ? WHERE name = ? RETURNING name", enabled ? 1 : 0, Date.now(), name).toArray().length > 0;
-    if (changed) this.bumpSkillRevision(name);
+    if (changed) { this.directory.visibilityChanged(); this.bumpSkillRevision(name); }
     return changed;
   }
 
@@ -367,20 +462,77 @@ export class RegistryDO extends DurableObject<Env> {
     void run.then(release, release);
     return run;
   }
-  private row(server: OAuthServer): TokenRow | undefined {
-    return this.ctx.storage.sql.exec<TokenRow>("SELECT * FROM mcp_oauth_tokens WHERE server_id=? AND account_id=? AND revision=?",
-      server.id, server.credential.accountId, server.credential.revision).toArray()[0];
+  private migrateLogins() {
+    if (!this.vault.configured) return;
+    for (const server of this.mcpServers.config().servers.filter(isOAuthServer)) {
+      const old = this.ctx.storage.sql
+        .exec<TokenRow>(
+          "SELECT * FROM mcp_oauth_tokens WHERE server_id=? AND account_id=? AND revision=?",
+          server.id,
+          server.credential.accountId,
+          server.credential.revision
+        )
+        .toArray()[0];
+      if (!old) continue;
+      let access: string, refresh: string | null;
+      try {
+        access = this.vault.legacyValue(old.access_token, identity(server, "access"));
+        refresh = old.refresh_token ? this.vault.legacyValue(old.refresh_token, identity(server, "refresh")) : null;
+      } catch {
+        continue;
+      }
+      this.directory.put(
+        this.loginPath(server),
+        JSON.stringify({
+          issuer: old.issuer,
+          access_token: access,
+          refresh_token: refresh,
+          scope: old.scope,
+          expires_at: old.expires_at
+        })
+      );
+      this.ctx.storage.sql.exec(
+        "DELETE FROM mcp_oauth_tokens WHERE server_id=? AND account_id=? AND revision=?",
+        server.id,
+        server.credential.accountId,
+        server.credential.revision
+      );
+    }
+  }
+  private loginPath(server: OAuthServer) {
+    return "mcp/" + server.id + "/oauth.json";
+  }
+  private row(server: OAuthServer) {
+    const path = this.loginPath(server);
+    if (!this.directory.stat(path)) return;
+    const value: unknown = this.directory.json(path);
+    if (!Check(OAuthFile, value)) throw new OAuthFailure("oauth_token");
+    return value;
   }
   private deleteToken(server: OAuthServer): void {
-    this.ctx.storage.sql.exec("DELETE FROM mcp_oauth_tokens WHERE server_id=? AND account_id=? AND revision=?", server.id, server.credential.accountId, server.credential.revision);
+    this.directory.remove(this.loginPath(server));
+    this.ctx.storage.sql.exec("DELETE FROM mcp_oauth_tokens WHERE server_id=?", server.id);
   }
-  private async save(server: OAuthServer, issuer: string, tokens: OAuthTokens, previous?: { refresh?: string; scope: string | null }): Promise<string> {
-    const refresh = tokens.refresh_token ?? previous?.refresh;
-    const access = await this.vault.encrypt(tokens.access_token, identity(server, "access"));
-    const encryptedRefresh = refresh ? await this.vault.encrypt(refresh, identity(server, "refresh")) : null;
-    this.ctx.storage.sql.exec("INSERT OR REPLACE INTO mcp_oauth_tokens VALUES (?,?,?,?,?,?,?,?,?)", server.id, server.credential.accountId,
-      server.credential.revision, issuer, access, encryptedRefresh, tokens.scope ?? previous?.scope ?? null,
-      tokens.expires_in === undefined ? null : Date.now() + tokens.expires_in * 1000, Date.now());
+  private async save(
+    server: OAuthServer,
+    issuer: string,
+    tokens: OAuthTokens,
+    previous?: { refresh?: string; scope: string | null }
+  ): Promise<string> {
+    if (connectionDigest(this.server(server.id)) !== connectionDigest(server)) throw new OAuthFailure("server_unavailable");
+    this.ctx.storage.transactionSync(() => {
+      this.directory.put(
+        this.loginPath(server),
+        JSON.stringify({
+          issuer,
+          access_token: tokens.access_token,
+          refresh_token: tokens.refresh_token ?? previous?.refresh ?? null,
+          scope: tokens.scope ?? previous?.scope ?? null,
+          expires_at: tokens.expires_in === undefined ? null : Date.now() + tokens.expires_in * 1000
+        })
+      );
+      this.directory.checkQuota();
+    });
     await this.ctx.storage.delete(`oauth_error:${server.id}`);
     return tokens.access_token;
   }
@@ -396,7 +548,7 @@ export class RegistryDO extends DurableObject<Env> {
     const run = this.lock(serverId, async () => {
       const row = this.row(server);
       if (!row) throw new OAuthFailure("auth_required");
-      const token = await this.vault.decrypt(row.access_token, identity(server, "access"));
+      const token = row.access_token;
       if (rejectedToken !== undefined && token !== rejectedToken) return token;
       if (rejectedToken === undefined && (row.expires_at === null || row.expires_at > Date.now() + 60_000)) return token;
       if (!row.refresh_token) {
@@ -404,12 +556,12 @@ export class RegistryDO extends DurableObject<Env> {
         throw new OAuthFailure("auth_required");
       }
       try {
-        const refresh = await this.vault.decrypt(row.refresh_token, identity(server, "refresh"));
+        const refresh = row.refresh_token;
         const discovery = await discover(server, row.issuer);
         const tokens = await exchange(server, discovery, { grant_type: "refresh_token", refresh_token: refresh });
         return await this.save(server, row.issuer, tokens, { refresh, scope: row.scope });
       } catch (error) {
-        if (error instanceof TokenRejected) {
+        if (error instanceof TokenRejected && connectionDigest(this.server(serverId))===connectionDigest(server)) {
           this.deleteToken(server); await this.ctx.storage.put(`oauth_error:${serverId}`, "refresh_failed");
           throw new OAuthFailure("auth_required");
         }
@@ -496,12 +648,10 @@ export class RegistryDO extends DurableObject<Env> {
       if (isOAuthServer(server)) {
         if (!this.vault.configured) login = "unconfigured";
         else {
-          const row = this.row(server);
-          login = await this.ctx.storage.get(`oauth_error:${server.id}`) ? "error" : !row || (row.expires_at !== null && row.expires_at <= Date.now() && !row.refresh_token) ? "needed" : "ok";
-          if (row) try { await this.vault.decrypt(row.access_token, identity(server, "access")); } catch { login = "error"; }
+          try { const row = this.row(server); login = !row && await this.ctx.storage.get(`oauth_error:${server.id}`) ? "error" : !row || (row.expires_at !== null && row.expires_at <= Date.now() && !row.refresh_token) ? "needed" : "ok"; } catch { login = "error"; }
         }
       } else if (server.credential.kind === "managed") login = this.mcpServers.get(server.id).credentialSet ? "ok" : "needed";
-      else if (server.credential.kind === "external-account" && Object.values(server.transport.secretHeaders).some(ref => !referencedSecret(this.env, ref))) login = "unconfigured";
+      else if (server.credential.kind === "external-account" && Object.keys(server.transport.secretHeaders).length) login = "unconfigured";
       return { server: server.id, enabled: MCP_CONFIG.enabled && server.enabled,
         credential: server.credential.kind === "external-account" || server.credential.kind === "managed" ? "static" : server.credential.kind, login };
     }));

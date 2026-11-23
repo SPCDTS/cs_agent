@@ -3,7 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { CallToolResultSchema, ListToolsResultSchema, ListResourcesResultSchema, ListResourceTemplatesResultSchema, ReadResourceResultSchema, type Resource, type ResourceTemplate, ToolListChangedNotificationSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Env } from "../env";
-import { referencedSecret, type McpLimits, type McpServerConfig } from "./config";
+import { type McpLimits, type McpServerConfig } from "./config";
 import { boundedFetch, McpConnectionError } from "./transport-http";
 import { connectionDigest } from "./names";
 
@@ -14,11 +14,7 @@ export class McpConnection {
   private closing?: Promise<void>;
   private constructor(server: McpServerConfig, env: Env, private readonly limits: McpLimits, onChanged: () => void, managedHeaders: Record<string, string>) {
     const headers = new Headers({ ...server.transport.headers, ...managedHeaders });
-    for (const [name, ref] of Object.entries(server.transport.secretHeaders)) {
-      const value = referencedSecret(env, ref);
-      if (!value) throw new McpConnectionError("missing_secret", "missing_secret");
-      try { headers.set(name, value); } catch { throw new McpConnectionError("auth_failed", "auth_failed"); }
-    }
+    if (Object.keys(server.transport.secretHeaders).length) throw new McpConnectionError("missing_secret","missing_secret");
     const token = async (rejected?: string) => {
       try {
         const value = await env.REGISTRY.getByName("main").accessToken(server.id, rejected, connectionDigest(server));

@@ -20,18 +20,20 @@ export type FileEdit = { oldText: string; newText: string };
 export type DirEntry = { name: string; type: "file" | "dir" | "link" | "other"; size: number };
 
 /** 模型路径按 /work 解析；词法上出了 /work 就不发给容器，固定本地助手再核验 realpath。 */
-export function workPath(raw: string): string {
+export function workPath(raw: string, root = WORK_ROOT): string {
   if (raw.includes("\0")) throw new Error("invalid_request");
   const parts: string[] = [];
-  for (const part of (raw.startsWith("/") ? raw : `${WORK_ROOT}/${raw}`).split("/")) {
+  for (const part of (raw.startsWith("/") ? raw : `${root}/${raw}`).split("/")) {
     if (part === "" || part === ".") continue;
     if (part === "..") { if (!parts.pop()) throw new Error("path_denied"); continue; }
     parts.push(part);
   }
   const path = "/" + parts.join("/");
-  if (path !== WORK_ROOT && !path.startsWith(WORK_ROOT + "/")) throw new Error("path_denied");
+  if (path !== root && !path.startsWith(root + "/")) throw new Error("path_denied");
   return path;
 }
+
+export function sandboxPath(raw: string) { return workPath(raw, raw === "/shared" || raw.startsWith("/shared/") ? "/shared" : WORK_ROOT); }
 
 /** 新建 .git、node_modules、.wrangler 只留在当前容器；旧清单已追踪的缓存继续保存。 */
 export interface SandboxClient {

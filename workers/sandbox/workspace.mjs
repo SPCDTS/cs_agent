@@ -16,7 +16,7 @@ export function detectImage(bytes) {
   if (/^GIF8[79]a/.test(bytes.subarray(0,6).toString("latin1"))) return "image/gif";
   if (bytes.subarray(0,4).toString("latin1") === "RIFF" && bytes.subarray(8,12).toString("latin1") === "WEBP") return "image/webp";
 }
-export function workspaceControl({ root, own }) {
+export function workspaceControl({ root, own, includeCaches = false }) {
   let restore;
   async function scan(retainedPaths = []) {
     const files = [], directories = [], issues = [];
@@ -32,7 +32,7 @@ export function workspaceControl({ root, own }) {
       for (const entry of entries.sort((a,b) => a.name.localeCompare(b.name))) {
         const relative = prefix + entry.name, absolute = path.join(dir, entry.name);
         // 新缓存不进 R2；旧 manifest 已追踪的条目继续保存，避免升级后静默丢失。
-        if (cache(relative) && !retained.has(relative) && !traversed.has(relative)) continue;
+        if (!includeCaches && cache(relative) && !retained.has(relative) && !traversed.has(relative)) continue;
         const stat = await fs.lstat(absolute);
         if (stat.isSymbolicLink() || !stat.isDirectory() && !stat.isFile()) { issues.push({ path: relative, code: "unsupported_link_or_special" }); continue; }
         try { relativePath(relative); } catch { issues.push({ path: relative, code: "path_denied" }); continue; }
@@ -75,23 +75,33 @@ export function workspaceControl({ root, own }) {
     const absolute = path.join(state.stage, relative);
     await fs.mkdir(path.dirname(absolute), { recursive: true });
     await fs.writeFile(absolute, bytes, { mode: file.mode });
+    await fs.chmod(absolute, file.mode);
     state.received.add(relative);
     return { bytes: bytes.length };
   }
-  async function commit(id) {
+  async function commit(id, permissions = own) {
     const state = current(id);
     if (state.received.size !== state.manifest.files.length) fail("restore_incomplete");
     // 先完成所有校验与写入，再替换临时物化视图。中断后由 DO 从同一已提交 manifest 重试恢复。
-    for (const entry of await fs.readdir(root)) await fs.rm(path.join(root, entry), { recursive: true, force: true });
-    for (const entry of await fs.readdir(state.stage)) await fs.rename(path.join(state.stage, entry), path.join(root, entry));
-    async function ownership(dir) {
-      await own(dir);
+    async function ownership(dir, includeRoot = true) {
+      if (includeRoot) await permissions(dir,true);
       for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
         const absolute = path.join(dir, entry.name);
-        if (entry.isDirectory()) await ownership(absolute); else await own(absolute);
+        if (entry.isDirectory()) await ownership(absolute); else await permissions(absolute,false);
       }
     }
-    await ownership(root);
+    // 在私有暂存目录内设置最终属主与权限，再把条目放到运行路径。
+    for (const entry of await fs.readdir(state.stage,{withFileTypes:true})) {
+      const absolute=path.join(state.stage,entry.name);
+      if (entry.isDirectory()) await ownership(absolute,false); else await permissions(absolute,false);
+    }
+    for (const entry of await fs.readdir(root)) await fs.rm(path.join(root,entry),{recursive:true,force:true});
+    for (const entry of await fs.readdir(state.stage,{withFileTypes:true})) {
+      const target=path.join(root,entry.name);
+      await fs.rename(path.join(state.stage,entry.name),target);
+      if (entry.isDirectory()) await permissions(target,true);
+    }
+    await permissions(root,true);
     await fs.rm(state.stage, { recursive: true, force: true });
     restore = undefined;
     return { restored: true };

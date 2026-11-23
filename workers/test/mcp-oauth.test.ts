@@ -5,13 +5,11 @@ import worker from "../src/index";
 import { RegistryDO } from "../src/registry";
 import { createOAuthFetch } from "../src/mcp/oauth-fetch";
 import { TokenVault, sha256 } from "../src/mcp/crypto";
-import { ACCESS, REFRESH, TEST_STORE_KEY, issuer, callback, fakeRemote, adminEnv, adminRequest, beginLogin, login } from "./mcp-helpers";
+import { ACCESS, REFRESH, TEST_STORE_KEY, expireMcpLogin, issuer, callback, fakeRemote, adminEnv, adminRequest, beginLogin, login } from "./mcp-helpers";
 
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
 const registry = () => env.REGISTRY.getByName("main");
-async function expire() {
-  await runInDurableObject(registry(), (_instance, state) => { state.storage.sql.exec("UPDATE mcp_oauth_tokens SET expires_at=?", Date.now() - 1); });
-}
+const expire = () => expireMcpLogin("notion");
 
 describe("Registry OAuth CIMD", () => {
   it("serves its own client metadata with the PUBLIC_ORIGIN callback and public cache", async () => {
@@ -57,9 +55,9 @@ describe("Registry OAuth CIMD", () => {
     const verifier = new URLSearchParams(tokenRequest?.body).get("code_verifier");
     expect(verifier).toHaveLength(43);
     expect((await sha256(verifier ?? "")).toString("base64url")).toBe(auth.searchParams.get("code_challenge"));
-    const stored = await runInDurableObject(registry(), (_instance, state) => ({ tokens: state.storage.sql.exec("SELECT * FROM mcp_oauth_tokens").toArray(),
+    const stored = await runInDurableObject(registry(), (_instance, state) => ({ tokens: state.storage.sql.exec<{data:ArrayBuffer}>("SELECT data FROM capability_chunks WHERE path='mcp/notion/oauth.json'").toArray().map(row=>Buffer.from(row.data).toString("latin1")),
       logins: state.storage.sql.exec("SELECT * FROM mcp_oauth_logins").toArray(), clients: state.storage.sql.exec("SELECT * FROM mcp_oauth_client").toArray() }));
-    expect(stored.tokens[0]).toMatchObject({ access_token: expect.stringMatching(/^v1\./), refresh_token: expect.stringMatching(/^v1\./) });
+    expect(stored.tokens).toHaveLength(1);
     for (const secret of [ACCESS, REFRESH, "synthetic-code", verifier ?? "unreachable"]) expect(JSON.stringify(stored)).not.toContain(secret);
     expect(stored.logins).toHaveLength(0);
     expect(remote.requests.every(r => r.redirect === "manual" && !r.headers.has("cookie"))).toBe(true);
@@ -85,7 +83,7 @@ describe("Registry OAuth CIMD", () => {
     await expire(); remote.state.tokenStatus = 400;
     await expect((async () => await registry().accessToken("notion"))()).rejects.toThrow("auth_required");
     expect(remote.requests.filter(r => r.url.endsWith("/token")).at(-1)?.body).toContain(`refresh_token=${REFRESH}`);
-    const rows = await runInDurableObject(registry(), (_instance, state) => state.storage.sql.exec("SELECT * FROM mcp_oauth_tokens").toArray());
+    const rows = await runInDurableObject(registry(), (_instance, state) => state.storage.sql.exec("SELECT path FROM capability_files WHERE path='mcp/notion/oauth.json'").toArray());
     expect(rows).toHaveLength(0); expect((await registry().status())[0].login).toBe("error");
   });
   it("keeps tokens on temporary refresh failures, survives reconstruction and logs out locally", async () => {

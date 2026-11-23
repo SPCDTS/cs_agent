@@ -15,7 +15,7 @@ export type CodingAuditKind = "coding_exec" | "coding_read" | "coding_write" | "
 export type CodingDeps = {
   /** 由宿主验证本回合与工作区范围；每次嵌套调用都重新检查。 */
   allowed(api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, context: Context, kind?: CodingAuditKind): Promise<boolean>;
-  sandbox(id?: string): SandboxApi | Promise<SandboxApi>;
+  sandbox(id: string | undefined, api: ToolExecutionApi, context: Context): SandboxApi | Promise<SandboxApi>;
   resources?: {
     list(): Promise<Static<typeof ResourceListSchema>>;
     create(operationId: string, input: Static<typeof CreateResourceSchema>): Promise<Static<typeof SandboxResourceSchema>>;
@@ -41,7 +41,7 @@ const FAILURES: Record<SandboxFailure, string> = {
   blob_corrupt: "持久文件校验失败，工作区未提交。",
   restore_incomplete: "工作区恢复尚未完成，不能执行命令。",
   sandbox_unavailable: "沙箱容器暂时起不来，请稍后再试；一直不行就告诉主人。",
-  path_denied: `路径只能在 ${WORK_ROOT} 下，也不能经符号链接指到外面。`,
+  path_denied: `路径须位于本次授权的 ${WORK_ROOT} 或 /shared 目录内。`,
   not_found: "文件或目录不存在。",
   is_directory: "这是目录；用 bash 的 ls 查看。",
   not_a_directory: "工作目录不存在或不是目录。",
@@ -78,7 +78,7 @@ function codingTool<P extends TSchema>(deps: CodingDeps, { kind, audit, run, ...
       if (!await deps.allowed(api, context, kind)) return text(NOT_ALLOWED, true);
       const started = Date.now(), before = audit?.(args) ?? {};
       try {
-        const { result, outcome, audit: after } = await run(args, await deps.sandbox("sandboxId" in args && typeof args.sandboxId === "string" ? args.sandboxId : undefined), api, context);
+        const { result, outcome, audit: after } = await run(args, await deps.sandbox("sandboxId" in args && typeof args.sandboxId === "string" ? args.sandboxId : undefined, api, context), api, context);
         await deps.record(kind, { result: outcome ?? "ok", ...before, ...after, ms: Date.now() - started });
         return result;
       } catch (error) {

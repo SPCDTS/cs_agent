@@ -1,3 +1,5 @@
+import type { SharedAccess } from "../shared/capability-files";
+import type { SharedMount } from "./shared-mount";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { WorkspaceGc, type GcOptions } from "./workspace-gc";
@@ -59,18 +61,49 @@ export function parseManifest(value: unknown): WorkspaceManifest {
 }
 
 /** manifest 是事实源；容器仅是可丢弃的物化视图。所有公开操作经同一队列，副作用命令从不自动重放。 */
+type SharedIntent = {
+  epoch: number;
+  key: string;
+  previous: string;
+  record: Extract<OperationRecord, { state: "committed" }>;
+  recent: string[];
+};
+const SHARED_INTENT = "workspace:shared-intent";
+
 export class WorkspaceManager {
+  private access?: SharedAccess;
   private queue: Promise<unknown> = Promise.resolve();
   private hydrated = false;
   private readonly collector: WorkspaceGc;
-  constructor(private readonly deps: { workspace: string; bucket: R2Bucket; storage: WorkspaceStorage; runtime: SandboxClient; resetRuntime(): Promise<unknown>; runtimeReady(): boolean }) {
+  constructor(private readonly deps: { workspace: string; bucket: R2Bucket; storage: WorkspaceStorage; runtime: SandboxClient; shared?: SharedMount; resetRuntime(): Promise<unknown>; runtimeReady(): boolean }) {
     this.collector = new WorkspaceGc({ ...deps, prefix: () => this.prefix(), parse: parseManifest });
   }
   serial<T>(work: () => Promise<T>): Promise<T> {
-    const pending = this.queue.then(work, work);
+    const start = async () => {
+      if (this.deps.shared) {
+        const pending = await this.deps.storage.get<SharedIntent>(SHARED_INTENT);
+        if (pending) await this.finishShared(pending,await this.deps.shared.resolve(pending.epoch));
+      }
+      return work();
+    };
+    const pending = this.queue.then(start, start);
     this.queue = pending.catch(() => undefined);
     return pending;
   }
+  private async finishShared(intent: SharedIntent, applied: boolean) {
+    await this.deps.storage.transaction(async (tx) => {
+      if (applied) await tx.put({ [HEAD]: intent.record.revision, [intent.key]: intent.record, "workspace:recent": intent.recent });
+      else
+        await tx.put(intent.key, {
+          fingerprint: intent.record.fingerprint,
+          state: "failed",
+          revision: intent.previous,
+          error: "persistence_failed"
+        } satisfies OperationRecord);
+      await tx.delete(SHARED_INTENT);
+    });
+  }
+
   private async prefix(): Promise<string> { return `${await scopePrefix(this.deps.workspace)}/workspace`; }
   private empty(): WorkspaceManifest { return { schemaVersion: 1, workspace: this.deps.workspace, revision: "0", parentRevision: null, files: [], directories: [], totalBytes: 0 }; }
   private async manifest(revision?: string): Promise<WorkspaceManifest> {
@@ -151,14 +184,18 @@ export class WorkspaceManager {
     });
   }
 
-  private async ensureRuntime(manifest: WorkspaceManifest): Promise<void> {
-    if (this.hydrated && this.deps.runtimeReady()) return;
+  private async ensureRuntime(manifest: WorkspaceManifest, access?: SharedAccess, refreshShared = true): Promise<void> {
+    const fresh = !this.hydrated || this.access !== access || !this.deps.runtimeReady();
     this.hydrated = false;
-    // DO 重新实例化时先杀旧容器，防止此前失联的命令在恢复后继续写入。
-    await this.deps.resetRuntime();
-    await this.deps.runtime.restore(manifest, file => this.blob(file));
+    if (fresh) {
+      await this.deps.resetRuntime();
+      await this.deps.runtime.restore(manifest, (file) => this.blob(file));
+    }
+    if (access && (fresh || refreshShared)) await this.deps.shared?.prepare(access, fresh);
+    this.access = access;
     this.hydrated = true;
   }
+
   private async commit(snapshot: RuntimeSnapshot, previous: WorkspaceManifest, epoch: number): Promise<WorkspaceManifest> {
     const manifest = parseManifest({ ...snapshot, schemaVersion: 1, workspace: this.deps.workspace, revision: crypto.randomUUID(), parentRevision: previous.revision });
     if (JSON.stringify(snapshot.files) === JSON.stringify(previous.files) && JSON.stringify(snapshot.directories) === JSON.stringify(previous.directories)) return previous;
@@ -187,21 +224,26 @@ export class WorkspaceManager {
       default: { const exhaustive: never = operation; throw new Error(`invalid_operation:${exhaustive}`); }
     }
   }
-  run(input: { operationId: string; operation: WorkspaceOperation }): Promise<WorkspaceRunResult> {
+  run(input: { operationId: string; operation: WorkspaceOperation; sharedAccess?: SharedAccess }): Promise<WorkspaceRunResult> {
     return this.serial(async () => {
       if (!input.operationId || input.operationId.length > 240) throw new Error("invalid_request");
+      if ("path" in input.operation && (input.operation.path==="/shared" || input.operation.path.startsWith("/shared/"))
+        && (!input.sharedAccess || input.operation.kind!=="read" && input.sharedAccess!=="owner")) throw new Error("permission_denied");
+      const usesShared = input.operation.kind==="exec" || input.operation.path==="/shared" || input.operation.path.startsWith("/shared/");
+      const runtimeAccess = usesShared ? input.sharedAccess : this.access;
       if (input.operation.kind === "read") {
         const manifest = await this.manifest();
-        await this.ensureRuntime(manifest);
+        await this.ensureRuntime(manifest,runtimeAccess,usesShared);
         return { status: "committed", persistence: "committed", revision: manifest.revision, result: await this.execute(input.operation) };
       }
       if (input.operation.kind === "writeBytes" && (!(input.operation.data instanceof Uint8Array) || input.operation.data.byteLength > FILE_MAX_BYTES)) throw new Error("too_large");
       const digest = input.operation.kind === "writeBytes" ? await sha256(input.operation.data) : undefined;
-      const fingerprint = await sha256(JSON.stringify(input.operation.kind === "writeBytes"
-        ? { ...input.operation, data: digest } : input.operation)), key = `workspace:op:${await sha256(input.operationId)}`;
+      const encoded = JSON.stringify(input.operation.kind === "writeBytes" ? { ...input.operation, data:digest } : input.operation);
+      const legacyFingerprint = await sha256(encoded);
+      const fingerprint = input.sharedAccess ? await sha256(input.sharedAccess+"|"+encoded) : legacyFingerprint, key = `workspace:op:${await sha256(input.operationId)}`;
       const previous = await this.deps.storage.get<OperationRecord>(key);
       if (previous) {
-        if (previous.fingerprint !== fingerprint) throw new Error("operation_conflict");
+        if (previous.fingerprint !== fingerprint && previous.fingerprint !== legacyFingerprint) throw new Error("operation_conflict");
         switch (previous.state) {
           case "executing": case "unknown":
             this.hydrated = false;
@@ -232,7 +274,7 @@ export class WorkspaceManager {
         }
         if (destination.split("/").some(part => [".git", ".wrangler", "node_modules"].includes(part))) throw new Error("path_denied");
       }
-      await this.ensureRuntime(manifest);
+      await this.ensureRuntime(manifest,runtimeAccess,usesShared);
       const epoch = (await this.deps.storage.get<number>(EPOCH) ?? 0) + 1;
       await this.deps.storage.put(EPOCH, epoch);
       await this.deps.storage.put(key, { fingerprint, state: "executing", revision: manifest.revision } satisfies OperationRecord);
@@ -251,10 +293,24 @@ export class WorkspaceManager {
         const recent = await this.deps.storage.get<string[]>("workspace:recent") ?? [];
         recent.push(key);
         const expiredKey = recent.length > 32 ? recent.shift() : undefined;
-        await this.deps.storage.transaction(async tx => {
-          if (await tx.get<number>(EPOCH) !== epoch) throw new Error("workspace_conflict");
-          await tx.put({ [HEAD]: committed.revision, [key]: { fingerprint, state: "committed", revision: committed.revision, result: storedResult } satisfies OperationRecord, "workspace:recent": recent });
-        });
+        const record={fingerprint,state:"committed",revision:committed.revision,result:storedResult} as const;
+        const shared=usesShared && input.sharedAccess==="owner" ? this.deps.shared : undefined;
+        const batch=await shared?.changes();
+        if (shared && batch) {
+          const intent:SharedIntent={epoch,key,previous:manifest.revision,record,recent};
+          await this.deps.storage.put(SHARED_INTENT,intent);
+          try { await shared.apply(epoch,batch); }
+          catch (error) {
+            const applied=await shared.resolve(epoch);
+            if (!applied) { await this.finishShared(intent,false); throw error; }
+          }
+          await this.finishShared(intent,true);
+        } else {
+          await this.deps.storage.transaction(async tx=>{
+            if (await tx.get<number>(EPOCH)!==epoch) throw new Error("workspace_conflict");
+            await tx.put({[HEAD]:committed.revision,[key]:record,"workspace:recent":recent});
+          });
+        }
         if (expiredKey) {
           try {
             const expired = await this.deps.storage.get<OperationRecord>(expiredKey);
@@ -267,6 +323,7 @@ export class WorkspaceManager {
         return { status: "committed", persistence: "committed", revision: committed.revision, result };
       } catch (error) {
         this.hydrated = false;
+        if (this.deps.shared && await this.deps.storage.get(SHARED_INTENT)) return {status:"unknown",persistence:"unknown",revision:manifest.revision,operationId:input.operationId};
         const code = error instanceof Error ? error.message : "sandbox_error";
         if (!executed && code === "sandbox_unavailable" && input.operation.kind === "exec") {
           await this.deps.storage.put(key, { fingerprint, state: "unknown", revision: manifest.revision } satisfies OperationRecord);
@@ -274,7 +331,7 @@ export class WorkspaceManager {
           await this.deps.resetRuntime();
           return { status: "unknown", persistence: "unknown", revision: manifest.revision, operationId: input.operationId };
         }
-        const failure = { fingerprint, state: "failed", revision: manifest.revision, error: executed && !["workspace_quota", "blob_corrupt", "workspace_conflict"].includes(code) ? "persistence_failed" : code,
+        const failure = { fingerprint, state: "failed", revision: manifest.revision, error: executed && !["workspace_quota", "blob_corrupt", "workspace_conflict", "invalid_request", "path_denied"].includes(code) ? "persistence_failed" : code,
           ...(error instanceof SandboxError && error.issues !== undefined ? { issues: error.issues } : {}) } satisfies OperationRecord;
         await this.deps.storage.put(key, failure);
         // 容器里未提交的文件不可冒充成功，也不能留给下一条命令继续使用。
@@ -284,7 +341,11 @@ export class WorkspaceManager {
     });
   }
   list(path: string): ReturnType<SandboxClient["list"]> {
-    return this.serial(async () => { await this.ensureRuntime(await this.manifest()); return this.deps.runtime.list(path); });
+    return this.serial(async () => {
+      if (path==="/shared" || path.startsWith("/shared/")) throw new Error("permission_denied");
+      await this.ensureRuntime(await this.manifest(),this.access,false);
+      return this.deps.runtime.list(path);
+    });
   }
   resetRuntime(): Promise<{ reset: boolean }> {
     return this.serial(async () => { this.hydrated = false; await this.deps.storage.put(EPOCH, (await this.deps.storage.get<number>(EPOCH) ?? 0) + 1); return { reset: Boolean(await this.deps.resetRuntime()) }; });

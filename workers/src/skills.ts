@@ -64,7 +64,7 @@ const escape = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&l
 export function renderAvailableSkills(skills: readonly Pick<SkillSummary, "name" | "description">[]): string | undefined {
   if (!skills.length) return undefined;
   return "<available_skills>\n"
-    + "任务匹配下列技能时，先用 read_skill 读取 SKILL.md（附件传相对 path）；工作区编写的技能可用 skill_inspect 检查、skill_publish 发布。\n"
+    + "任务匹配下列技能时，先用 read_skill 读取 SKILL.md（附件传相对 path，脚本可在沙箱 /shared/skills/<名称>/ 直接运行）；工作区编写的技能可用 skill_inspect 检查、skill_publish 发布。\n"
     + skills.map(skill => `<skill>\n<name>${escape(skill.name)}</name>\n<description>${escape(skill.description)}</description>\n</skill>`).join("\n")
     + "\n</available_skills>";
 }

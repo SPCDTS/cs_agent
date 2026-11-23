@@ -1,4 +1,5 @@
-import { env } from "cloudflare:test";
+import { CapabilityFiles } from "../src/shared/capability-files";
+import { env, runInDurableObject } from "cloudflare:test";
 import { vi } from "vitest";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
@@ -7,6 +8,12 @@ import worker from "../src/index";
 
 // 全部为合成测试值，不读取开发机或线上凭据。
 export const TEST_STORE_KEY = "01".repeat(32);
+export async function expireMcpLogin(id: string) {
+  await runInDurableObject(env.REGISTRY.getByName("main"),(_instance,state)=>{
+    const files=new CapabilityFiles(state.storage.sql,TEST_STORE_KEY),path="mcp/"+id+"/oauth.json";
+    files.put(path,JSON.stringify({...JSON.parse(files.text(path)),expires_at:Date.now()-1}));
+  });
+}
 export const ACCESS = "synthetic-access-token", REFRESH = "synthetic-refresh-token";
 export const issuer = "https://auth.example.test";
 export const callback = `${env.PUBLIC_ORIGIN}/mcp/oauth/callback`;

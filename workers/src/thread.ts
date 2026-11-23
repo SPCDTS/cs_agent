@@ -4,7 +4,7 @@ import { MemoryAdmin } from "./memory/admin";
 import { McpAdmin } from "./mcp/admin";
 import { openThreadRuntime, applyToolProfile, type Runtime } from "./thread/runtime";
 import { isWeb, isWebAdmin, profileOf, targetOf, type InboundRow, type ToolProfile } from "./thread/model";
-import { workPath } from "./sandbox/client";
+import { workPath, sandboxPath } from "./sandbox/client";
 import { decodeFileRead } from "./sandbox/read";
 import { ProjectionPublisher, observeWrites } from "./requests/projection";
 import { MCP_POLICY_SCHEMA } from "./mcp/policy";
@@ -876,7 +876,7 @@ export class ThreadDO extends DurableObject<Env> {
     const name = access.sandbox?.name ?? subagentName(await this.namespace(), id), sandbox = this.env.SANDBOX.getByName(name);
     // 旧子任务沿用原资源目录；创建 subagent 不触发初始化或克隆。
     const op = operation.kind === "write" ? { kind: "write" as const, path: operation.path, text: operation.content } : operation;
-    const result = await sandbox.run({ operationId: "sub:" + id + ":" + operation.operationId, operation: op });
+    const result = await sandbox.run({ operationId: "sub:" + id + ":" + operation.operationId, operation: op, sharedAccess:"reader" });
     if (result.status === "committed" && "kind" in result.result && result.result.kind === "image")
       return { output: [{ type: "image", data: result.result.data, mimeType: result.result.mimeType }],
         structuredOutput: { kind: "image", image: { type: "image", data: result.result.data, mimeType: result.result.mimeType } } };
@@ -908,8 +908,8 @@ export class ThreadDO extends DurableObject<Env> {
     await (await this.subagentAttachmentWorkspace(id)).retireAgentAttachments(messageId, count);
   }
   async subagentReadBlob(id: string, path: string) {
-    const normalized = workPath(path), access = await this.subagentAccess(id);
-    if (access?.capabilities.coding && access.authority.owner) return (await this.subagentWorkspaceFiles(id)).readBlob(normalized);
+    const normalized = sandboxPath(path), access = await this.subagentAccess(id);
+    if (access?.capabilities.coding && access.authority.owner) return (await this.subagentWorkspaceFiles(id)).readBlob(normalized,undefined,"reader");
     if (!await this.env.SUBAGENT.getByName(subagentName(await this.namespace(), id)).agentFileAllowed(normalized)) throw new Error("delegation_denied");
     return (await this.subagentAttachmentWorkspace(id)).readBlob(normalized);
   }

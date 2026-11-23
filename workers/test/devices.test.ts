@@ -1,3 +1,4 @@
+import { CapabilityFiles } from "../src/shared/capability-files";
 import { env, reset, runInDurableObject } from 'cloudflare:test';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DeviceStore, deviceServerId } from '../src/devices/store';
@@ -37,7 +38,7 @@ function cloud() {
   return { remote, requests };
 }
 function stores(state: DurableObjectState) {
-  const vault = new TokenVault(TEST_STORE_KEY), mcp = new McpServerStore(state.storage.sql, vault, env.PUBLIC_ORIGIN);
+  const vault = new TokenVault(TEST_STORE_KEY), mcp = new McpServerStore(state.storage, vault, env.PUBLIC_ORIGIN,new CapabilityFiles(state.storage.sql,TEST_STORE_KEY));
   mcp.initialize();
   const devices = new DeviceStore(state.storage.sql, vault, mcp, { ...env, ...settings }); devices.initialize();
   return { devices, mcp };

@@ -6,7 +6,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && usermod --login sandbox --home /home/sandbox --move-home --shell /bin/bash node \
  && groupmod --new-name sandbox node \
- && mkdir -p /work/out && chown -R sandbox:sandbox /work
+ && mkdir -p /work/out /shared && chown -R sandbox:sandbox /work
 COPY --chmod=0644 runtime.mjs workspace.mjs /opt/sandbox/
 WORKDIR /work
 CMD ["sleep", "infinity"]

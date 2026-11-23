@@ -2,7 +2,7 @@ import type { Context } from "@earendil-works/chord/context";
 import { ExecutionError, FileError, type ExecutionEnv, type FileErrorCode, type Result } from "@earendil-works/pi-durable/env";
 import type { SandboxDO } from "./do";
 import { FILE_MAX_BYTES } from "../media/model";
-import { workPath } from "./client";
+import { sandboxPath } from "./client";
 
 export type WorkspaceFiles = Pick<SandboxDO, "readBlob" | "writeFile" | "createTempDir">;
 /** Code Mode 输出用的文件环境；每次实际操作重新取得授权，复用已提交的工作区文件。 */
@@ -25,10 +25,10 @@ export function workspaceExecutionEnv(options: {
       return { ok: false, error: new FileError(code, message, undefined, error instanceof Error ? error : undefined) };
     }
   };
-  const path = (value: string) => workPath(value.startsWith("/") ? value : `${environment.cwd}/${value}`);
+  const path = (value: string) => sandboxPath(value.startsWith("/") ? value : `${environment.cwd}/${value}`);
   const decoder = new TextDecoder("utf-8", { ignoreBOM: true, fatal: false });
   const environment: ExecutionEnv = {
-    id: options.id, cwd: workPath(options.cwd ?? "/work"),
+    id: options.id, cwd: sandboxPath(options.cwd ?? "/work"),
     absolutePath: (value, context) => boundary(context, async () => path(value)),
     joinPath: (parts, context) => boundary(context, async () => path(parts.join("/"))),
     readBinaryFile: (value, context) => boundary(context, async files => (await files.readBlob(path(value))).bytes),
