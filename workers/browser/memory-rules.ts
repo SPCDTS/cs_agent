@@ -21,7 +21,7 @@ export async function ruleEditor(host:HTMLElement,row:MemoryEditor&{id:number},m
     const since=el("input",{value:date(row.since),placeholder:"生效时间（北京时间）"});
     const until=el("input",{value:date(row.until),placeholder:"失效时间（北京时间）"});
     const status=el("p",{role:"status"}),preview=el("pre"),buttons=el("div",{className:"row"});
-    host.replaceChildren(el("p",{text:"仅主人私聊回复约定，不授予工具或隐私权限。批准绑定本页显示的精确正文与版本；历史规则不会批量启用。"}),scope,
+    host.replaceChildren(el("p",{text:"适用于主人主线程（私聊、Web 主人会话、定时任务、外部事件与子任务汇报）的行为与回复约定；群聊和独立子 agent 不继承，且不授予工具或隐私权限。批准绑定本页显示的精确正文与版本；历史规则不会批量启用。"}),scope,
       el("label",{},[el("span",{text:"正文"}),text]),el("label",{},[el("span",{text:"生效"}),since]),el("label",{},[el("span",{text:"失效"}),until]),status,preview,buttons);
     let serial=0;
     const load=async()=>{

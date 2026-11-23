@@ -188,6 +188,39 @@ describe("subagents as child Durable Objects", () => {
     expect(JSON.stringify(audit)).not.toMatch(/A 与 B|调研结果/);
   });
 
+  it("agent_send uses the child inbox while busy and child replies use the same communication path", async () => {
+    const first = gate();
+    const { seen, outputs } = twoModels(
+      [spawn("先处理第一项"), { text: "已派出" },
+        out => ({tool:"agent_send",args:{to:"sub:owner:" + idOf(out[0]),text:"第二项"}}), {text:"已入箱"},
+        {text:"收到第一项"}, {text:"收到子会话通信"}, {text:"收到第二项"}],
+      [{text:"第一项完成",after:first.promise},
+        {tool:"agent_send",args:{to:"owner",text:"子会话主动回复"}}, {text:"第二项完成"}]);
+    await thread("owner").submit(input(1,"开始",10000001));
+    const sub = await onlySubagent("owner");
+    await vi.waitFor(async () => expect((await child("owner",sub.id).status())?.inbox.running).toBe(1));
+    await thread("owner").submit(input(2,"给子会话追加",10000001));
+    expect((await child("owner",sub.id).status())?.inbox).toMatchObject({running:1,queued:1});
+    expect(outputs.parent.some(value=>value.includes('"status":"accepted"'))).toBe(true);
+    first.open();
+    await reports("owner",2);
+    await vi.waitFor(async () => expect(await rows("owner","SELECT 1 FROM inbound WHERE kind='agent' AND status='done'")).toHaveLength(1));
+    const peer = await rows<{user_id:string;agent_from:string}>("owner","SELECT user_id,agent_from FROM inbound WHERE kind='agent'");
+    expect(peer[0]).toMatchObject({user_id:"",agent_from:"sub:owner:"+sub.id});
+    expect(seen.child[0]?.tools).toContain("agent_send");
+    expect(await rows("owner","SELECT 1 FROM outgoing_intents")).toHaveLength(0);
+  });
+
+  it("blocks credentials in automatic results without losing the completion notification", async () => {
+    twoModels([spawn("检查"), {text:"已派出"}, {text:"已收到拒传提示"}],
+      [{text:"Authorization: Bearer synthetic-credential-for-test-only"}]);
+    await thread("owner").submit(input(1,"检查",10000001));
+    const [report] = await reports("owner",1);
+    expect(report?.text).toContain("已隐藏");
+    expect(report?.text).toContain("[子 agent 完成]");
+    expect(report?.text).not.toContain("synthetic-credential-for-test-only");
+  });
+
   it("delivers follow-up messages and processes each child request id once", async () => {
     twoModels(
       [spawn("先查 A"), { text: "已派出" }, { text: "收到第一轮" },
@@ -596,4 +629,31 @@ it("管理台可分页查看子会话正文与工具记录，且读取不唤醒�
   await rows("owner","UPDATE subagents SET ended_at=? WHERE id=?",Date.now()-15*86400_000,sub.id);
   await thread("owner").syncAdminView("owner");
   expect((await admin("GET",path)).status).toBe(404);
+});
+
+it.each(["subagent", "agent_send"])("%s rejects a different member while the owner child is actually executing", async mode => {
+  const running = gate(), group = "group:200000001";
+  const { seen, outputs } = twoModels([
+    spawn("owner-authorized-task"), { text: "spawned" },
+    (out): Step => mode === "subagent" ? { tool: "subagent", args: { action: "message", id: idOf(out[0]), text: "FOREIGN-INJECTION" } }
+      : { tool: "agent_send", args: { to: "sub:" + group + ":" + idOf(out[0]), text: "FOREIGN-INJECTION" } },
+    { text: "rejected" }, { text: "owner report received" },
+  ], [{ text: "owner-result", after: running.promise }]);
+  await thread(group).submit(input(1, "start", 10000001, 200000001, true));
+  const sub = await onlySubagent(group);
+  await vi.waitFor(() => expect(seen.child).toHaveLength(1));
+  const before = await child(group, sub.id).status();
+  expect(before?.meta.status).toBe("running");
+  try {
+    await thread(group).submit(input(2, "foreign followup", 10000003, 200000001, true));
+    expect(outputs.parent.join("\n")).toContain("agent_child_identity_denied");
+    expect((await child(group, sub.id).status())?.meta.identity).toEqual(before?.meta.identity);
+    await runInDurableObject(child(group, sub.id), (_i, s) => {
+      expect(s.storage.sql.exec("SELECT text FROM inbox WHERE text LIKE '%FOREIGN-INJECTION%'").toArray()).toHaveLength(0);
+    });
+  } finally { running.open(); }
+  const [report] = await reports(group, 1);
+  expect(report?.user_id).toBe("10000001");
+  expect(report?.text).toContain("owner-result");
+  expect(seen.child.every(turn => !turn.user.includes("FOREIGN-INJECTION"))).toBe(true);
 });

@@ -7,7 +7,7 @@ import { defineExtension, defineTool, section, type Registry, type ToolExecution
 import type { Env } from "../env";
 import { MediaRepository } from "../media/repository";
 import type { Resource, ResourceTemplate } from "@modelcontextprotocol/sdk/types.js";
-import { mcpAuthority, mcpCallerScope, sameMcpOrigin, type McpAuthority, type McpAuthorization, type McpCapabilitySnapshot, type McpToolSelection } from "./access";
+import { McpAuthoritySchema, mcpAuthority, mcpCallerScope, sameMcpOrigin, type McpAuthority, type McpAuthorization, type McpCapabilitySnapshot, type McpToolSelection } from "./access";
 import { allowedResource, resourceInCatalog } from "./resources";
 export type { McpAuthority, McpAuthorization, McpCapabilitySnapshot } from "./access";
 import { MCP_CONFIG, type McpConfig, type McpServerConfig } from "./config";
@@ -282,7 +282,7 @@ export class ThreadMcp {
     }
   }
   async setAccess(scope: string, server: string, input: McpGrantInput, expected: string, reviewer: McpAuthority) {
-    if (!reviewer.owner || reviewer.kind === "event" || reviewer.kind === "subagent" || reviewer.subagentId) throw new McpPolicyError("denied");
+    if (!reviewer.owner || reviewer.kind === "event" || reviewer.kind === "agent" || reviewer.kind === "subagent" || reviewer.subagentId) throw new McpPolicyError("denied");
     const grant = await this.policy.setGrant(scope, server, input, expected);
     await this.refreshVisibility();
     return grant;
@@ -291,19 +291,24 @@ export class ThreadMcp {
     current: (original: McpAuthority) => Promise<McpAuthority | undefined>) {
     const row = await this.policy.decide(scope, id, decision, reviewer);
     if (decision === "reject") return { status: "rejected" as const };
-    const original: unknown = JSON.parse(row.authority_json);
-    const schema = Type.Object({ kind: Type.Union(["message", "schedule", "event", "subagent"].map(v => Type.Literal(v))),
-      scope: Type.String(), actor: Type.String(), owner: Type.Boolean(), generation: Type.Integer({ minimum: 0 }),
-      replyChannel: Type.Union([Type.Literal("web"), Type.Literal("qq")]), subagentId: Type.Optional(Type.String()) });
-    if (!Check(schema, original)) return { status: "denied" as const };
-    const args: unknown = JSON.parse(row.args_json);
-    const authorize = async () => {
-      const authority = await current(original);
-      return authority && authority.scope === original.scope && authority.actor === original.actor && authority.generation === original.generation
-        && authority.replyChannel === original.replyChannel && authority.subagentId === original.subagentId ? authority : undefined;
-    };
-    const result = await this.invoke({ name: row.tool_name, args, operationId: row.operation_id }, authorize);
-    return { status: "reviewed" as const, result };
+    let result = mcpFailure("denied");
+    try {
+      let original: unknown, args: unknown;
+      try { original = JSON.parse(row.authority_json); args = JSON.parse(row.args_json); }
+      catch { return { status: "denied" as const }; }
+      if (!Check(McpAuthoritySchema, original)) return { status: "denied" as const };
+      const authorize = async () => {
+        const authority = await current(original);
+        return authority && Check(McpAuthoritySchema, authority) && authority.kind === original.kind && authority.owner === original.owner
+          && authority.scope === original.scope && authority.actor === original.actor && authority.generation === original.generation
+          && authority.replyChannel === original.replyChannel && authority.subagentId === original.subagentId ? authority : undefined;
+      };
+      result = await this.invoke({ name: row.tool_name, args, operationId: row.operation_id }, authorize);
+      return { status: "reviewed" as const, result };
+    } finally {
+      // 未进入 claim 的失败审批不能留下可执行的 approved；条件更新不覆盖 executing/unknown。
+      await this.policy.rejectUnclaimedApproval(scope, id, result);
+    }
   }
   /** 派出时复用本地目录快照；不会为每个子 agent 再拉取一次远端目录。 */
   async captureCapabilities(authority: McpAuthority, selection?: McpToolSelection): Promise<McpCapabilitySnapshot> {

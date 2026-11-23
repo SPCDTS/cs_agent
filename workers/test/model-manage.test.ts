@@ -418,3 +418,25 @@ describe("owner 非 subagent 自切主模型与子任务模型", () => {
     expect(events.at(-1)).toMatchObject({ kind: "chat", model: "fallback-128k", hasSummary: true });
   });
 });
+
+
+it("message(model) 通过持久通信入箱后立即使用新模型，且保留单条消息证明", async () => {
+  const { calls, outputs } = setupModels([
+    { tool: "subagent", args: { action: "spawn", task: "切换模型夹具", summary: "验证通信与模型切换", model: { provider: "faux", id: "worker" } } },
+    { text: "已派出" }, { text: "收到第一次答复" },
+    outs => ({ tool: "subagent", args: { action: "message", id: idOf(outs[0]!), text: "改用 pro 继续", model: { provider: "faux", id: "pro" } } }),
+    { text: "已交代" }, { text: "收到第二次答复" },
+  ], [{ text: "旧模型答复" }, { text: "新模型答复" }]);
+  const owner = env.THREAD.getByName("owner");
+  expect(await owner.submit(input(1, "派出模型夹具", 10000001))).toEqual({ status: "done" });
+  await expect.poll(() => calls.parent.length).toBeGreaterThanOrEqual(3);
+  expect(calls.child[0]!.model).toBe("worker");
+  expect(await owner.submit(input(2, "改模型并追问", 10000001))).toEqual({ status: "done" });
+  await expect.poll(() => calls.child.length).toBe(2);
+  await expect.poll(() => calls.parent.length).toBeGreaterThanOrEqual(6);
+  expect(calls.child[1]!.model).toBe("pro");
+  expect(outputs.parent[1]).toContain("模型已切换为 faux/pro");
+  await runInDurableObject(env.SUBAGENT.getByName(subagentName("owner", idOf(outputs.parent[0]!))), (_i, s) => {
+    expect(s.storage.sql.exec("SELECT request_id,agent_hash FROM inbox WHERE agent_hash IS NOT NULL").toArray()).toHaveLength(1);
+  });
+});

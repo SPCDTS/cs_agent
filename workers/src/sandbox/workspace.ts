@@ -108,6 +108,49 @@ export class WorkspaceManager {
       return { bytes: await this.blob(file), mime: file.mime, name: file.path.split("/").at(-1) ?? "file" };
     });
   }
+  /** 附件不是容器命令：只提交已校验字节、manifest 与成功回执，失败不留下不可重试的命令状态。 */
+  saveAttachment(path: string, bytes: Uint8Array, operationId: string): Promise<void> {
+    return this.serial(async () => {
+      const relative = relativeWorkPath(path);
+      if (!operationId || operationId.length > 240) throw new Error("invalid_request");
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength > FILE_MAX_BYTES) throw new Error("too_large");
+      if (relative.split("/").some(part => [".git", ".wrangler", "node_modules"].includes(part))) throw new Error("path_denied");
+      const hash = await sha256(bytes), fingerprint = await sha256(JSON.stringify([relative, hash]));
+      const receiptKey = "workspace:attachment:" + await sha256(operationId);
+      const receipt = await this.deps.storage.get<{ fingerprint: string }>(receiptKey);
+      if (receipt) {
+        if (receipt.fingerprint !== fingerprint) throw new Error("operation_conflict");
+        return; // 曾经提交成功；即使现在副本已被编辑或删除，也不触碰它。
+      }
+      const current = await this.manifest(), existing = current.files.find(file => file.path === relative);
+      if (existing && existing.sha256 !== hash || current.directories.includes(relative)
+        || current.files.some(file => relative.startsWith(file.path + "/"))) throw new Error("workspace_conflict");
+      const parts = relative.split("/"), directories = [...new Set([...current.directories,
+        ...parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"))])];
+      const file = { path: relative, sha256: hash, bytes: bytes.byteLength, mime: "application/octet-stream", mode: 420 };
+      const manifest = existing ? current : parseManifest({ ...current, revision: crypto.randomUUID(), parentRevision: current.revision,
+        files: [...current.files, file], directories, totalBytes: current.totalBytes + bytes.byteLength });
+      if (!existing) {
+        await this.deps.bucket.put(`${await this.prefix()}/blobs/${hash}`, bytes);
+        await this.deps.bucket.put(`${await this.prefix()}/manifests/${manifest.revision}`, JSON.stringify(manifest));
+      }
+      // 先使运行时失效：即使事务已提交但调用方丢失响应，后续操作也必须从 head 恢复。
+      this.hydrated = false;
+      await this.deps.storage.transaction(async tx => {
+        if ((await tx.get<string>(HEAD) ?? "0") !== current.revision) throw new Error("workspace_conflict");
+        await tx.put({ [HEAD]: manifest.revision, [EPOCH]: (await tx.get<number>(EPOCH) ?? 0) + 1, [receiptKey]: { fingerprint } });
+      });
+    });
+  }
+
+  /** 仅在接收方已持久入箱后调用；部分导入或 unknown 不得释放附件证明。 */
+  retireAttachments(operationIds: string[]): Promise<void> {
+    return this.serial(async () => {
+      const keys = await Promise.all(operationIds.map(async id => "workspace:attachment:" + await sha256(id)));
+      if (keys.length) await this.deps.storage.delete(keys);
+    });
+  }
+
   private async ensureRuntime(manifest: WorkspaceManifest): Promise<void> {
     if (this.hydrated && this.deps.runtimeReady()) return;
     this.hydrated = false;

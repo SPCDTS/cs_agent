@@ -26,7 +26,7 @@ export type InboundInput = {
   /** 仅可信宿主投递可指定；QQ 归一化不会从外部消息读取此字段。 */
   replyChannel?: "web";
   /** 缺省为 message；schedule 由 ScheduleDO 投递，入站键就是 messageId（run_<fire_key>）；subagent 是子 agent 的汇报，入站键同样是 messageId。 */
-  kind?: "message" | "schedule" | "event" | "subagent";
+  kind?: "message" | "schedule" | "event" | "subagent" | "agent";
   meta?: { fireKey: string };
 };
 export type TurnKind = NonNullable<InboundInput["kind"]>;

@@ -14,13 +14,15 @@ type WorkspaceReadInput = NonNullable<Parameters<SandboxApi["readFile"]>[1]> & {
 export type CodingAuditKind = "coding_exec" | "coding_read" | "coding_write" | "coding_edit";
 export type CodingDeps = {
   /** 由宿主验证本回合与工作区范围；每次嵌套调用都重新检查。 */
-  allowed(api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, context: Context): Promise<boolean>;
+  allowed(api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, context: Context, kind?: CodingAuditKind): Promise<boolean>;
   sandbox(id?: string): SandboxApi | Promise<SandboxApi>;
   resources?: {
     list(): Promise<Static<typeof ResourceListSchema>>;
     create(operationId: string, input: Static<typeof CreateResourceSchema>): Promise<Static<typeof SandboxResourceSchema>>;
     allowed(api: ToolExecutionApi, context: Context): Promise<boolean>;
   };
+  /** 可选的已接收附件只读入口；返回 undefined 才沿用普通沙箱读取。 */
+  readFile?(input: { path: string; workspace?: string; sandboxId?: string; offset?: number; limit?: number }, api: ToolExecutionApi, context: Context): Promise<ReadResult | undefined>;
   /** 可选的跨群只读入口；宿主仍逐次核对 owner 任务授权。 */
   readWorkspace?(input: WorkspaceReadInput, api: ToolExecutionApi, context: Context): Promise<ReadResult>;
   /** 审计只记分类、耗时、命令长度与退出码，不记命令、路径、文件内容与输出。 */
@@ -73,7 +75,7 @@ function codingTool<P extends TSchema>(deps: CodingDeps, { kind, audit, run, ...
   return defineTool({
     ...tool,
     execute: async (args, api, context) => {
-      if (!await deps.allowed(api, context)) return text(NOT_ALLOWED, true);
+      if (!await deps.allowed(api, context, kind)) return text(NOT_ALLOWED, true);
       const started = Date.now(), before = audit?.(args) ?? {};
       try {
         const { result, outcome, audit: after } = await run(args, await deps.sandbox("sandboxId" in args && typeof args.sandboxId === "string" ? args.sandboxId : undefined), api, context);
@@ -128,9 +130,10 @@ export function createCodingExtension(deps: CodingDeps) {
       run: async ({ path, workspace, sandboxId, offset, limit }, sandbox, api, context): Promise<{ result: ToolExecutionResult }> => {
         if (workspace !== undefined && sandboxId !== undefined) throw new Error("invalid_request");
         if (workspace !== undefined && !deps.readWorkspace) throw new Error("permission_denied");
-        const file = workspace !== undefined && deps.readWorkspace
+        const attachment = await deps.readFile?.({ path, workspace, sandboxId, offset, limit }, api, context);
+        const file = attachment ?? (workspace !== undefined && deps.readWorkspace
           ? await deps.readWorkspace({ workspace, path, offset, limit }, api, context)
-          : await sandbox.readFile(path, { offset, limit });
+          : await sandbox.readFile(path, { offset, limit }));
         if ("kind" in file) {
           const image = { type: "image" as const, data: file.data, mimeType: file.mimeType };
           return { result: { output: [image], structuredOutput: { kind: "image", image } } };
