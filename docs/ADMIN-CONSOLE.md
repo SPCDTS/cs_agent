@@ -11,7 +11,7 @@
   - 选择已有 QQ 会话继续同一 Harness root，合并展示最近 100 条 QQ / 网页消息并标明来源；网页发言使用稳定 UUID（断网重试不重复入队），回复留在网页。点击子 agent 在中间同一对话区只读查看，保留父会话草稿。
 - **管理分区**（进入对应视图才按需加载，不增加后台轮询；各分区通过顶部二级 Sub-tabs 切换，低频大表单默认折叠收起）：
   - **模型与接入**：分「模型与账号」「MCP 与设备」「QQ 响应与状态」子标签，涵盖模型切换（CAS）、Codex 原生多账号授权/目录刷新/登出、动态 MCP 服务、设备接入及 QQ 响应设置。
-  - **会话与记忆**：分「长期记忆」「活跃会话」「技能目录」「全局人格」子标签，涵盖长期记忆筛选/编辑/冲突确认/画像复核/整理回滚与主人私聊回复规则管理（详见 [记忆系统](MEMORY-SYSTEM.md)）、会话状态与停止/重置、技能 `SKILL.md` 编辑与全局人格设定。
+  - **会话与记忆**：分「长期记忆」「活跃会话」「技能目录」「全局人格」子标签，涵盖长期记忆筛选/编辑/冲突确认/画像复核/整理回滚与主人主线程行为规则管理（详见 [记忆系统](MEMORY-SYSTEM.md)）、会话状态与停止/重置、技能 `SKILL.md` 编辑与全局人格设定。
   - **任务与事件**：分「定时任务」「事件来源」「审计事件」子标签，涵盖定时任务管理、GitHub App 与 Gmail 事件来源配置、审计事件（每页 10 条）。
   - **权限与运维**：分「跨会话授权」「MCP 群授权与审批」「额度与保留期」「告警与发送账本」子标签，涵盖跨目标发送/定时授权、群 MCP 授权与置顶逐次审批、运维设置 CAS、告警与 QQ 发送账本/核对。
   - **工作区**：双栏展示持久文件列表与鉴权下载、停止容器（保留 R2 快照）、检查与选择合并子任务工作区。
@@ -28,7 +28,7 @@
 | 用量与上下文 | `GET /admin/usage`、`GET /admin/requests`、`GET /admin/requests/:id`、`GET /admin/requests/:id/context[/:part]`、`GET /admin/context-timeline`、`GET /admin/tools/:id[/execution]`、`GET /admin/agent-topology` | 用量趋势、请求分页、上下文分析、工具执行组与拓扑 |
 | 会话与续聊 | `GET/POST /admin/threads/:key/chat`、`GET /admin/threads/:key/history`、`GET /admin/threads/:key/trace`、`POST /admin/threads/:key/{stop,compact,reset}`、`GET /admin/threads/:key/subagents`、`GET /admin/subagents/:id/{history,transcript}`、`POST /admin/subagents/:id/cancel` | 网页续聊（202 入队）、历史分页、执行时间线与子任务控制 |
 | 模型与设置 | `GET/PUT /admin/settings`、`GET/PUT /admin/model`、`POST /admin/model/oauth/codex/{start,select,catalog,logout}`、`POST /admin/send-rules/release` | 运行设置 CAS、主模型与子任务默认模型选择、Codex 多账号管理与解封发送规则 |
-| 记忆与规则 | `GET /admin/memory[/list\|/:id\|/candidates\|/jobs\|/proposals]`、`POST /admin/memory/{entries,consolidate,proposals}`、`PUT/DELETE /admin/memory/:id`、`PUT /admin/memory/profile`、`/admin/memory/rules/*` | 记忆增删改查、冲突/画像/整理/回滚与主人私聊回复规则 |
+| 记忆与规则 | `GET /admin/memory[/list\|/:id\|/candidates\|/jobs\|/proposals]`、`POST /admin/memory/{entries,consolidate,proposals}`、`PUT/DELETE /admin/memory/:id`、`PUT /admin/memory/profile`、`/admin/memory/rules/*` | 记忆增删改查、冲突/画像/整理/回滚与主人主线程行为规则 |
 | 技能、权限与运维 | `GET/PUT/DELETE /admin/skills[/:name]`、`POST /admin/skills/:name/{enable,disable,publish}`、`GET/PUT /admin/persona`、`GET/POST /admin/grants[/revoke]`、`GET/PUT /admin/ops-settings`、`GET /admin/alerts`、`GET /admin/deliveries[/:id]`、`POST /admin/deliveries/:id/reconcile` | 技能、人设、授权、运维设置、告警与发送账本核对 |
 | 定时与事件 | `GET /admin/schedules`、`POST /admin/schedules/:id/{pause,resume,delete,run-now}`、`GET /admin/event-sources`、`POST /admin/event-sources/:source/{pause,resume}`、`PUT /admin/event-sources/:source/settings`、`/admin/github/*` | 定时任务与 GitHub / Gmail 事件来源管理 |
 | MCP 与设备 | `/admin/mcp/servers*`、`POST /admin/mcp/manage`、`POST /admin/mcp/:server/{login-link,logout,refresh}`、`GET/PUT /admin/mcp/access`、`GET /admin/mcp/approvals`、`POST /admin/mcp/approvals/:id/{approve,reject}`、`/admin/devices*` | 动态 MCP 服务、群授权、逐次审批与设备接入 |
