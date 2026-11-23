@@ -216,7 +216,8 @@ describe("subagents as child Durable Objects", () => {
       [{text:"Authorization: Bearer synthetic-credential-for-test-only"}]);
     await thread("owner").submit(input(1,"检查",10000001));
     const [report] = await reports("owner",1);
-    expect(report?.text).toContain("agent_credentials_forbidden");
+    expect(report?.text).toContain("已隐藏");
+    expect(report?.text).toContain("[子 agent 完成]");
     expect(report?.text).not.toContain("synthetic-credential-for-test-only");
   });
 

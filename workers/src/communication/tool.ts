@@ -12,6 +12,12 @@ export function agentSendTool(send: (input: AgentSend, seed: string, api: ToolEx
       files: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 1024 }), { maxItems: 5 })),
     }, { additionalProperties: false }),
     replay: "safe",
-    execute: async (input, api, context) => ({ output: [{ type: "text", text: JSON.stringify(await send(input, String(api.conversationId) + ":" + String(api.taskId), api, context)) }] }),
+    execute: async (input, api, context) => {
+      try { return { output: [{ type: "text", text: JSON.stringify(await send(input, String(api.conversationId) + ":" + String(api.taskId), api, context)) }] }; }
+      catch (error) {
+        const code = error instanceof Error && /^(?:agent_|workspace_|asset_|delegation_)[a-z_]+$/.test(error.message) ? error.message : "agent_delivery_unknown";
+        return { isError: true, output: [{ type: "text", text: code }] };
+      }
+    },
   });
 }

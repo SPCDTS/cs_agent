@@ -66,7 +66,9 @@ describe("agent communication MVP", () => {
       const api = instance as unknown as Internal, row = received[0]!;
       const source = state.storage.sql.exec("SELECT * FROM inbound WHERE message_id=?", row.agent_authority!).one() as unknown as InboundRow;
       const previous = await api.sandboxTaskForInput(source), current = await api.sandboxTaskForInput(row);
-      expect(current?.id).toBe(previous?.id);
+      expect(current?.id).not.toBe(previous?.id);
+      expect(current?.subject).toMatchObject({ actor: "agent:" + group, owner: false });
+      expect(current?.permissions.coding).toBe(true);
       expect(await api.deliver(row, "must not leave", "out")).toEqual({status:"rejected",reason:"agent_reply_requires_agent_send"});
       expect(state.storage.sql.exec("SELECT * FROM outgoing_intents").toArray()).toHaveLength(0);
     });
@@ -123,10 +125,10 @@ describe("agent communication MVP", () => {
     await seed(group,input(2,"member",10000003,200000001));
     const receipt = await send("owner",{to:group,text:"before reset"});
     await runInDurableObject(env.THREAD.getByName("owner"), async (instance,state) => {
-      const sent = await state.storage.get<{message:AgentMessage}>("agent-sent:"+receipt.messageId);
-      expect(await instance.agentProof(receipt.messageId,fingerprint(sent!.message))).toBe(true);
+      const sent = await state.storage.get<{hash:string}>("agent-sent:"+receipt.messageId);
+      expect(await instance.agentProof(receipt.messageId,sent!.hash)).toBe(true);
       state.storage.sql.exec("UPDATE session_state SET generation=1");
-      expect(await instance.agentProof(receipt.messageId,fingerprint(sent!.message))).toBe(false);
+      expect(await instance.agentProof(receipt.messageId,sent!.hash)).toBe(false);
     });
     await expect(send("owner",{to:group,text:"stale input"},"stale")).rejects.toThrow("agent_session_revoked");
   });

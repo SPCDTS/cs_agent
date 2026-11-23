@@ -165,7 +165,11 @@ export class WorkspaceManager {
             await this.deps.storage.put({ [key]: { ...previous, state: "unknown" }, [EPOCH]: (await this.deps.storage.get<number>(EPOCH) ?? 0) + 1 });
             await this.deps.resetRuntime();
             return { status: "unknown", persistence: "unknown", revision: previous.revision, operationId: input.operationId };
-          case "expired": return { status: "failed", persistence: "failed", revision: previous.revision, error: "operation_expired" };
+          case "expired":
+            // 已提交的 createOnly 附件仅需确认写入字节数；结果退休后也不重建/覆盖用户副本。
+            if (input.operation.kind === "writeBytes" && input.operation.createOnly)
+              return { status: "committed", persistence: "committed", revision: previous.revision, result: { bytes: input.operation.data.byteLength } };
+            return { status: "failed", persistence: "failed", revision: previous.revision, error: "operation_expired" };
           case "failed": return { status: "failed", persistence: "failed", revision: previous.revision, error: previous.error, issues: previous.issues };
           case "committed": {
             if (previous.result.kind === "inline") return { status: "committed", persistence: "committed", revision: previous.revision, result: previous.result.value };

@@ -1,7 +1,7 @@
 import type { SubagentReport } from "../subagent/model";
 import type { Env } from "../env";
 import { MediaRepository } from "../media/repository";
-import { FILE_MAX_BYTES } from "../media/model";
+import { cleanFileName, FILE_MAX_BYTES } from "../media/model";
 import { workPath } from "../sandbox/client";
 import { sha256Hex } from "../shared/hash";
 import { assertNoCredentials, childAddress, configuredEdge, fingerprint, messageId, sessionId, validateSend, type AgentMessage, type AgentReceipt, type AgentSend } from "./model";
@@ -22,22 +22,28 @@ export async function allowed(env: Env, from: string, to: string): Promise<boole
     return env.THREAD.getByName(child.parent).agentChildAllowed(child.id);
   return configuredEdge(env.AGENT_COMMUNICATION_EDGES, from, to);
 }
-type Sent = { inputHash: string; message: AgentMessage; generation: number };
+type Sent = { inputHash: string; message?: AgentMessage; generation: number; hash?: string; receipt?: AgentReceipt; report?: Omit<SubagentReport, "text"> };
+// 不丢弃当前代次去重证明：达到上限拒绝新发送，重置会话才回收旧代次。
+export const SENT_LIMIT = 512;
+const reportWithText = (meta: Omit<SubagentReport, "text">, text: string): SubagentReport => ({
+  subagentId: meta.subagentId, requestId: meta.requestId, text, identity: meta.identity, outcome: meta.outcome, state: meta.state,
+});
 const key = (id: string) => "agent-sent:" + id;
 export async function proves(storage: DurableObjectStorage, id: string, hash: string, generation: number): Promise<boolean> {
   const sent = await storage.get<Sent>(key(id));
-  return !!sent && sent.generation === generation && fingerprint(sent.message) === hash;
+  return !!sent && sent.generation === generation && (sent.hash ?? (sent.message ? fingerprint(sent.message) : undefined)) === hash;
 }
 /** 仅发送意图快照，不是平行收件箱。重放冻结原文件，不重新读取已变化的源路径。 */
 export async function sendAgent(host: CommunicationHost, input: AgentSend, seed: string, report?: SubagentReport): Promise<AgentReceipt> {
   validateSend(input);
   const from = sessionId(host.agentSessionId);
   if (!await allowed(host.env, from, input.to)) throw new Error("agent_session_denied");
-  const id = messageId(from, host.generation + ":" + seed), inputHash = sha256Hex(JSON.stringify({ to: input.to, text: input.text ?? "", files: input.files ?? [] }));
+  const id = messageId(from, host.generation + ":" + seed), inputHash = sha256Hex(JSON.stringify({ to: input.to, text: input.text ?? "", files: input.files ?? [], ...(report ? { report: { subagentId: report.subagentId, requestId: report.requestId, text: report.text, outcome: report.outcome } } : {}) }));
   let sent = await host.storage.get<Sent>(key(id));
   if (sent && sent.inputHash !== inputHash) throw new Error("agent_message_conflict");
+  if (sent?.receipt) return { ...sent.receipt, status: "duplicate" };
   if (!sent) {
-    const message: AgentMessage = { id, from, to: input.to, text: input.text ?? "", files: [], ...(report ? { report } : {}) };
+    const message: AgentMessage = { id, from, to: input.to, text: input.text ?? "", files: [], ...(report ? { report: reportWithText(report, report.text) } : {}) };
     const repository = new MediaRepository({ bucket: host.env.ASSETS, scope: from });
     let total = 0;
     for (const path of input.files ?? []) {
@@ -54,12 +60,30 @@ export async function sendAgent(host: CommunicationHost, input: AgentSend, seed:
         if (existing.inputHash !== inputHash) throw new Error("agent_message_conflict");
         return existing;
       }
-      const value = { inputHash, message, generation: host.generation };
+      const history = await tx.list<Sent>({ prefix: "agent-sent:", limit: SENT_LIMIT + 1 });
+      const obsolete = [...history].filter(([, value]) => value.generation !== host.generation).map(([name]) => name);
+      if (obsolete.length) await tx.delete(obsolete);
+      // 返回空值提交旧代次清理；不能抛错回滚后让超限历史永远无法回收。
+      if (history.size > SENT_LIMIT || history.size - obsolete.length >= SENT_LIMIT) return undefined;
+      // 文本/自动报告已有不可变调用输入：只保留哈希，避免把整份报告再复制到 DO KV。
+      const reportMeta = report ? { subagentId: report.subagentId, requestId: report.requestId, identity: report.identity, outcome: report.outcome, state: report.state } : undefined;
+      const value: Sent = { inputHash, hash: fingerprint(message), ...(message.files.length ? { message } : {}),
+        ...(reportMeta ? { report: reportMeta } : {}), generation: host.generation };
       await tx.put(key(id), value);
       return value;
     });
   }
-  try { return await endpoint(host.env, sent.message.to).agentReceive(sent.message); }
+  if (!sent) throw new Error("agent_history_full");
+  if (sent.receipt) return { ...sent.receipt, status: "duplicate" };
+  // 报告正文来自不可变 answer；身份/版本使用首次发送快照，不能随后续心跳改变信封。
+  const message = sent.message ?? { id, from, to: input.to, text: input.text ?? "", files: [],
+    ...(report && sent.report ? { report: reportWithText(sent.report, report.text) } : {}) };
+  if (!sent.message && ((input.files?.length ?? 0) > 0 || fingerprint(message) !== sent.hash)) throw new Error("agent_message_conflict");
+  try {
+    const receipt = await endpoint(host.env, message.to).agentReceive(message);
+    await host.storage.put(key(id), { inputHash, generation: host.generation, hash: fingerprint(message), receipt } satisfies Sent);
+    return receipt;
+  }
   catch (error) {
     if (error instanceof Error && /^(agent_|workspace_|asset_)/.test(error.message)) throw error;
     throw new Error("agent_delivery_unknown");
@@ -72,10 +96,9 @@ export async function verifyMessage(env: Env, to: string, message: AgentMessage)
   if (!await allowed(env, message.from, to)) throw new Error("agent_session_denied");
   if (!await endpoint(env, message.from).agentProof(message.id, fingerprint(message))) throw new Error("agent_source_unverified");
 }
-export async function importFiles(env: Env, message: AgentMessage, save: (path: string, bytes: Uint8Array) => Promise<void>): Promise<string[]> {
+export async function importFiles(env: Env, message: AgentMessage, save: (path: string, bytes: Uint8Array, operationId: string) => Promise<void>): Promise<string[]> {
   const paths: string[] = [];
   const source = new MediaRepository({ bucket: env.ASSETS, scope: message.from });
-  const target = new MediaRepository({ bucket: env.ASSETS, scope: message.to });
   let total = 0;
   for (const [index, ref] of message.files.entries()) {
     if (ref.scope !== message.from) throw new Error("agent_asset_scope_denied");
@@ -84,9 +107,8 @@ export async function importFiles(env: Env, message: AgentMessage, save: (path: 
     total += file.bytes.byteLength;
     if (total > FILE_MAX_BYTES) throw new Error("agent_files_too_large");
     assertNoCredentials(new TextDecoder().decode(file.bytes), ref.name);
-    const copied = await target.put({ ...file, name: ref.name, mime: ref.mime, kind: ref.kind });
-    const path = "/work/agent-files/" + message.id.slice(6) + "/" + index + "-" + copied.name;
-    await save(path, file.bytes);
+    const path = "/work/agent-files/" + message.id.slice(6) + "/" + index + "-" + cleanFileName(ref.name);
+    await save(path, file.bytes, "agent-import:" + message.id + ":" + index);
     paths.push(path);
   }
   return paths;

@@ -1,4 +1,4 @@
-import { assertNoCredentials, fingerprint, type AgentMessage, type AgentReceipt, type AgentSend } from "../communication/model";
+import { redactReport, fingerprint, type AgentMessage, type AgentReceipt, type AgentSend } from "../communication/model";
 import { importFiles, incomingText, proves, sendAgent, verifyMessage } from "../communication/service";
 import { agentSendTool } from "../communication/tool";
 import type { SubagentReport } from "./model";
@@ -171,7 +171,8 @@ export class SubagentDO extends DurableObject<Env> {
       await parent.agentChildWake(meta.id);
       return { messageId: message.id, status: "duplicate", files: JSON.parse(previous.agent_files ?? "[]") as string[] };
     }
-    const paths = await importFiles(this.env, message, (path, bytes) => parent.subagentSaveAttachment(meta.id, path, bytes));
+    if (message.from !== meta.parent) await parent.agentChildNarrow(meta.id);
+    const paths = await importFiles(this.env, message, (path, bytes, operationId) => parent.subagentSaveAttachment(meta.id, path, bytes, operationId));
     const result = await this.message(message.id, incomingText(message, paths), { hash: fingerprint(message), files: paths });
     if (result.result === "ended") throw new Error("agent_session_ended");
     await parent.agentChildWake(meta.id);
@@ -316,12 +317,11 @@ export class SubagentDO extends DurableObject<Env> {
   }
 
   private async report(meta: SubagentMeta, row: InboxRow): Promise<void> {
-    let text = row.answer ?? "", outcome = row.outcome ?? "failed";
-    try { assertNoCredentials(text); }
-    catch { text = "[agent_credentials_forbidden] 结果含凭据，已阻止原文回传。"; outcome = "failed"; }
-    text = text.slice(0, 8000);
+    const outcome = row.outcome ?? "failed";
+    // 自动汇报保留全文与任务状态；疑似凭据值明确脱敏，不丢弃整份报告。
+    const text = redactReport(row.answer ?? "");
     try {
-      await this.sendAgentMessage({ to: meta.parent, text: text || "（没有文字回答）" }, "report:" + row.request_id,
+      await this.sendAgentMessage({ to: meta.parent, text: "子 agent 自动汇报（正文随报告交回）" }, "report:" + row.request_id,
         { subagentId: meta.id, requestId: row.request_id, text, identity: meta.identity, outcome, state: state(meta) });
     } catch (error) {
       // 只有确证永久结束的关系退休；网络未知、临时失败保留 answered 重试。

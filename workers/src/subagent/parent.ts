@@ -41,7 +41,7 @@ type Host = {
   db: DurableObjectSqliteDatabase; env: Env;
   /** 父线程键，也是子 DO 名字的一段。 */
   thread(): Promise<string>;
-  communicate(to: string, text: string, seed: string): Promise<import("../communication/model").AgentReceipt>;
+  communicate(to: string, text: string, seed: string, identity: SubagentIdentity): Promise<import("../communication/model").AgentReceipt>;
   /** 把汇报作为 kind=subagent 的输入入队，入站键幂等。 */
   wake(input: InboundInput): Promise<"accepted" | "duplicate">;
   /** 让父 DO 的 alarm 不晚于 at 触发。 */
@@ -114,15 +114,25 @@ export class ParentSubagents {
     return { text: `已派出子 agent ${id}（${row.timeout_ms ? "限时 " + span(row.timeout_ms) : "不设自动超时"}），完成后结果会作为「[子 agent 完成]」输入交回给你。` };
   }
 
+  async narrow(id: string, next: SubagentIdentity): Promise<void> {
+    await this.host.db.transaction(async tx => {
+      const row = await tx.get<Row>("SELECT * FROM subagents WHERE id=?", id);
+      if (!row) throw new Error("agent_session_revoked");
+      const identity = narrowIdentity(JSON.parse(row.identity_json) as SubagentIdentity, next);
+      await tx.run("UPDATE subagents SET identity_json=? WHERE id=?", JSON.stringify(identity), id);
+    });
+  }
+
   async message(caller: SubagentCaller, id: string, text: string, seed: string): Promise<Reply> {
     const row = await this.row(id);
     if (!row) return { text: `本会话没有子 agent ${id}`, error: true };
     if (row.status === "cancelled" || row.status === "timeout") return { text: `子 agent ${id} ${STATUS_TEXT[row.status]}，不能再发消息；需要的话重新 spawn。`, error: true };
     if ((JSON.parse(row.origin_json) as SubagentOrigin).generation !== caller.origin.generation) return {text:"该子任务属于已归档会话，请重新 spawn。",error:true};
     if ((JSON.parse(row.origin_json) as SubagentOrigin).replyChannel !== caller.origin.replyChannel) return { text: "这个子任务属于另一个回复入口，请在当前入口新建子任务。", error: true };
-    // 通信按会话授权，不根据这次发言人改写子任务已授权限。
+    // 通信地址仍按会话绑定；人类派出的能力只能收敛，不能被别的发言人借用。
+    await this.narrow(id, caller.identity);
     const thread = await this.host.thread();
-    await this.host.communicate(subagentName(thread, id), text, seed);
+    await this.host.communicate(subagentName(thread, id), text, seed, caller.identity);
     const current = await this.child(thread, id).status();
     if (current) await this.apply(id, { status: current.meta.status, version: current.meta.version });
     const deadline = row.timeout_ms ? Date.now() + row.timeout_ms : 0;

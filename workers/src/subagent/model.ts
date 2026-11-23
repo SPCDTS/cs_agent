@@ -48,7 +48,7 @@ export function confirmedIdentity(identity: SubagentIdentity, owners: readonly s
 
 const LABEL = { done: "[子 agent 完成]", failed: "[子 agent 失败]", timeout: "[子 agent 超时]" } as const;
 export function reportText(kind: keyof typeof LABEL, id: string, task: string, text: string): string {
-  return `${LABEL[kind]} id=${id} 任务：${clip(task.replace(/\s+/g, " "), 80)}\n${clip(text, 8000)}`;
+  return `${LABEL[kind]} id=${id} 任务：${clip(task.replace(/\s+/g, " "), 80)}\n${text}`;
 }
 
 /** 由父线程键与派出工具调用的任务 id 求出子 agent id：工具重放得到同一个 id，不会重复派出。 */

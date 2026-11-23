@@ -1,4 +1,4 @@
-import { containsSecret } from "../memory/secrets";
+import { containsSecret, redactSecrets } from "../memory/secrets";
 import { sha256Hex } from "../shared/hash";
 import type { SubagentReport } from "../subagent/model";
 import type { AssetRef } from "../media/repository";
@@ -38,4 +38,12 @@ export function assertNoCredentials(text: string, path = ""): void {
       /-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})|\b(?:authorization\s*[:=]\s*["']?(?:bearer|basic)\s+\S+|(?:access_token|refresh_token|client_secret|password)\s*["']?\s*[:=]\s*["']?[^\s"',}]{8,})/i.test(text)) {
     throw new Error("agent_credentials_forbidden");
   }
+}
+
+/** 自动报告保留非敏感正文；整段处理多行值，不能只删首行而泄露后续密钥。 */
+export function redactReport(text: string): string {
+  return redactSecrets(text
+    .replace(/-----BEGIN ([A-Z ]*PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/gi, "[私钥已隐藏]")
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/gi, "[令牌已隐藏]")
+    .replace(/\bauthorization\s*[:=]\s*["']?(?:bearer|basic)\s+[^\s"'<>]+/gi, "[认证已隐藏]"));
 }

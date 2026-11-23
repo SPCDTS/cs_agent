@@ -282,7 +282,7 @@ export class ThreadMcp {
     }
   }
   async setAccess(scope: string, server: string, input: McpGrantInput, expected: string, reviewer: McpAuthority) {
-    if (!reviewer.owner || reviewer.kind === "event" || reviewer.kind === "subagent" || reviewer.subagentId) throw new McpPolicyError("denied");
+    if (!reviewer.owner || reviewer.kind === "event" || reviewer.kind === "agent" || reviewer.kind === "subagent" || reviewer.subagentId) throw new McpPolicyError("denied");
     const grant = await this.policy.setGrant(scope, server, input, expected);
     await this.refreshVisibility();
     return grant;

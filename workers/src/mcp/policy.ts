@@ -108,26 +108,28 @@ export class McpPolicyStore {
   });
  }
  async allows(authority: McpAuthority, server: McpServerConfig, tool?: string, uri?: string) {
-  if (authority.scope === "owner") return authority.owner && (authority.kind !== "event" || tool !== undefined && server.tools.eventAllow.includes(tool));
+  if (authority.scope === "owner") return authority.kind === "agent"
+    ? tool !== undefined && server.tools.eventAllow.includes(tool)
+    : authority.owner && (authority.kind !== "event" || tool !== undefined && server.tools.eventAllow.includes(tool));
   if (authority.kind === "event" || !authority.scope.startsWith("group:")) return false;
   const grant = await this.grant(authority.scope, server.id);
   return !!grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now()) && actorAllowed(grant, authority)
    && (tool !== undefined ? grant.tools.includes(tool) : uri !== undefined ? grant.resourceAllow.some(prefix => uri.startsWith(prefix)) : grant.resourceAllow.length > 0);
  }
  async environments(authority: McpAuthority, server: McpServerConfig): Promise<EnvironmentAccess> {
-  if (authority.scope === 'owner') return authority.owner ? { kind: 'all' } : noEnvironments();
+  if (authority.scope === 'owner') return authority.owner && authority.kind !== 'agent' ? { kind: 'all' } : noEnvironments();
   const grant = await this.grant(authority.scope, server.id);
   return grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now())
     && actorAllowed(grant, authority)
     ? { kind: 'selected', envIds: grant.environments ?? [] } : noEnvironments();
  }
  async requiresApproval(authority: McpAuthority, server: McpServerConfig, tool: string): Promise<boolean> {
-  if (authority.owner) return false;
+  if (authority.owner && authority.kind !== "agent") return false;
   if (!isEnvironmentTool(tool)) return true;
   return (await this.grant(authority.scope, server.id))?.environmentApproval !== 'none';
  }
  async resourcePrefixes(authority: McpAuthority, server: McpServerConfig): Promise<string[]> {
-  if (authority.scope === "owner") return authority.owner && authority.kind !== "event" ? server.resourceAllow : [];
+  if (authority.scope === "owner") return authority.owner && authority.kind !== "event" && authority.kind !== "agent" ? server.resourceAllow : [];
   if (authority.kind === "event" || !authority.scope.startsWith("group:")) return [];
   const grant = await this.grant(authority.scope, server.id);
   return grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now()) && actorAllowed(grant, authority)
@@ -193,7 +195,7 @@ export class McpPolicyStore {
    receipt(result, this.config.limits), id, scope);
  }
  async decide(scope: string, id: string, decision: "approve" | "reject", reviewer: McpAuthority) {
-  if (!reviewer.owner || reviewer.kind === "event" || reviewer.kind === "subagent" || reviewer.subagentId) throw new McpPolicyError("denied");
+  if (!reviewer.owner || reviewer.kind === "event" || reviewer.kind === "agent" || reviewer.kind === "subagent" || reviewer.subagentId) throw new McpPolicyError("denied");
   await this.initialize();
   return this.db.transaction(async tx => {
    const row = await tx.get<McpApproval>("SELECT * FROM mcp_approvals WHERE id=? AND scope=?", id, scope);
