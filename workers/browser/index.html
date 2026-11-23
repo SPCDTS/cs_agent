@@ -259,6 +259,9 @@
         <div class="field"><label for="s-trigger">群里触发方式</label>
           <select id="s-trigger"><option value="mention_or_reply">@机器人 或 回复它</option><option value="mention_only">只 @机器人</option><option value="off">群里不响应</option></select>
         </div>
+        <div class="field"><label for="s-reply-guard">防漏发回复兜底</label>
+          <select id="s-reply-guard"><option value="on">开启（漏调 send_message 时追问一次）</option><option value="off">关闭</option></select>
+        </div>
         <div class="field"><label for="s-groups">允许的群（逗号分隔）</label><input id="s-groups" type="text" inputmode="numeric"></div>
         <div class="field"><label for="s-users">允许私聊的用户（逗号分隔）</label><input id="s-users" type="text" inputmode="numeric"></div>
         <div class="field"><label for="s-extract">开启回合后记忆抽取的命名空间</label><input id="s-extract" type="text"></div>

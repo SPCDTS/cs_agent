@@ -69,3 +69,15 @@ it("does not let skipping GitHub reorder ordinary input across a web barrier", a
   expect(f.host.applyProfile).not.toHaveBeenCalled();
   expect(f.claim).not.toHaveBeenCalled();
 });
+
+it("defers queued admission until idle when a model switch is pending", async () => {
+  const f = fixture("chat", true);
+  f.host.syncModel.mockResolvedValueOnce("deferred").mockResolvedValue(undefined);
+  f.add("owner-next");
+  await f.pump();
+  expect(f.admitted).toEqual([]);
+  expect(f.runtime.harness.waitForIdle).toHaveBeenCalledTimes(1);
+  f.setBusy(false);
+  await f.pump(true);
+  expect(f.admitted).toEqual(["owner-next"]);
+});

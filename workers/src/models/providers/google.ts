@@ -14,35 +14,74 @@ const GOOGLE_EXTRA_MODELS: readonly { id: string; name: string; maxTokens: numbe
   { id: "gemini-4-neon", name: "Gemini 4 Neon", maxTokens: 65_536 },
 ];
 
+// 跨供应商或跨模型续轮无原生 thoughtSignature 时，按 @google/genai 规范原样填入跳过校验哨兵字面量。
+export const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+
 function geminiModels(): readonly Model<"google-generative-ai">[] {
   // 排除新账号已下线的 2.5 系列及非标准文本工具对话的专用端点。
+  const base = GOOGLE_MODELS["gemini-4-argon"];
   const builtin = Object.values(GOOGLE_MODELS).filter(model =>
     !model.id.startsWith("gemini-2.5-") && !model.id.startsWith("deep-research-")
-    && !model.id.endsWith("-image") && !model.id.includes("-live"));
-  const base = GOOGLE_MODELS["gemini-4-argon"];
+    && !model.id.endsWith("-image") && !model.id.includes("-live"))
+    .map(model => model.id === "gemini-flash-latest" && base ? { ...model, thinkingLevelMap: base.thinkingLevelMap } : model);
   const known = new Set<string>(builtin.map(model => model.id));
   const extra = base ? GOOGLE_EXTRA_MODELS.filter(entry => !known.has(entry.id)).map(entry => ({ ...base, ...entry })) : [];
   return [...builtin, ...extra];
 }
 
-/** Gemini 原生搜索注入 googleSearch 并显式开启服务端工具调用回传，续轮只保留原生 thoughtSignature。 */
+function normalizeGoogleContents(contents: unknown): unknown {
+  if (!Array.isArray(contents)) return contents;
+  let mutated = false;
+  const next = contents.map((entry: unknown) => {
+    if (!isRecord(entry) || entry.role !== "model" || !Array.isArray(entry.parts)) return entry;
+    const hasSignature = entry.parts.some((p: unknown) => isRecord(p) && typeof p.thoughtSignature === "string" && p.thoughtSignature.length > 0);
+    if (hasSignature) return entry;
+    const idx = entry.parts.findIndex((p: unknown) => isRecord(p) && isRecord(p.functionCall));
+    if (idx < 0) return entry;
+    mutated = true;
+    const parts = entry.parts.map((p: unknown, i: number) => i === idx && isRecord(p) ? { ...p, thoughtSignature: SKIP_THOUGHT_SIGNATURE } : p);
+    return { ...entry, parts };
+  });
+  return mutated ? next : contents;
+}
+
+function normalizeGooglePayload(payload: unknown, model: Model<Api>, enableSearch: boolean): unknown {
+  if (!isRecord(payload)) return payload;
+  const contents = normalizeGoogleContents(payload.contents);
+  const rawConfig = isRecord(payload.config) ? payload.config : undefined;
+  const dropZeroBudget = isRecord(rawConfig?.thinkingConfig) && rawConfig.thinkingConfig.thinkingBudget === 0 && model.id.includes("-pro");
+  if (!enableSearch && contents === payload.contents && !dropZeroBudget) return payload;
+  const config = { ...(rawConfig ?? {}) };
+  if (dropZeroBudget) delete config.thinkingConfig;
+  if (enableSearch) {
+    const tools = Array.isArray(config.tools) ? config.tools.filter(t => !isRecord(t) || !("googleSearch" in t)) : [];
+    const toolConfig = isRecord(config.toolConfig) ? config.toolConfig : {};
+    config.tools = [...tools, { googleSearch: {} }];
+    config.toolConfig = { ...toolConfig, includeServerSideToolInvocations: true };
+  }
+  return {
+    ...payload,
+    ...(contents !== payload.contents ? { contents } : {}),
+    ...(enableSearch || dropZeroBudget || rawConfig ? { config } : {}),
+  };
+}
+
+/** Gemini 原生搜索注入 googleSearch 并显式开启服务端工具调用回传；异源无签名工具调用自动补齐官方跳过哨兵。 */
 export function withGoogleSearch(regular: ProviderStreams): ProviderStreams {
   function send(method: "stream" | "streamSimple", model: Model<Api>, context: TranscriptContext, options?: SearchOptions) {
-    if (!options?.agentWebSearch) return regular[method](model, context, options);
+    const cleanContext = stripLegacySearchContext(context);
+    if (!options?.agentWebSearch) {
+      return regular[method](model, cleanContext, {
+        ...options,
+        onPayload: async (original, m) => normalizeGooglePayload(await options?.onPayload?.(original, m) ?? original, m, false),
+      });
+    }
     const steps = new Map<string, { item: SearchItem; startedAt: number; endedAt?: number; position: number }>();
     let fallbackQueries: string[] = [];
     let sources: { url: string; title?: string }[] = [];
     let firstAt = Date.now(), lastAt = firstAt;
-    const stream = regular[method](model, stripLegacySearchContext(context), { ...options,
-      onPayload: async (original, m) => {
-        const payload = await options?.onPayload?.(original, m) ?? original;
-        if (!isRecord(payload)) return payload;
-        const config = isRecord(payload.config) ? payload.config : {};
-        const tools = Array.isArray(config.tools) ? config.tools.filter(t => !isRecord(t) || !("googleSearch" in t)) : [];
-        const toolConfig = isRecord(config.toolConfig) ? config.toolConfig : {};
-        return { ...payload, config: { ...config, tools: [...tools, { googleSearch: {} }],
-          toolConfig: { ...toolConfig, includeServerSideToolInvocations: true } } };
-      },
+    const stream = regular[method](model, cleanContext, { ...options,
+      onPayload: async (original, m) => normalizeGooglePayload(await options?.onPayload?.(original, m) ?? original, m, true),
       onProviderStreamEvent: async (event, m) => {
         const candidate = isRecord(event) && Array.isArray(event.candidates) && isRecord(event.candidates[0]) ? event.candidates[0] : undefined;
         if (candidate) {

@@ -145,6 +145,7 @@ const tags = {
   "mcp-link-url": "input",
   "mcp-link-copy": "button",
   "s-trigger": "select",
+  "s-reply-guard": "select",
   "s-groups": "input",
   "s-users": "input",
   "s-extract": "input",

@@ -264,24 +264,28 @@ export class RegistryDO extends DurableObject<Env> {
     });
   }
 
-  /** Agent 主人工具原子修改自身或子任务默认模型，串行锁避免与并发设置修改竞态丢失其他字段。 */
-  updateModels(patch: { model?: ModelSelection; subagentModel?: ModelSelection | null }): Promise<{ ok: true; current: SettingsSnapshot } | { ok: false; error: "invalid_model"; reason: string }> {
+  /** Agent 主人工具原子修改自身/子任务默认模型或防漏发开关，串行锁避免与并发设置修改竞态丢失其他字段。 */
+  updateModels(patch: { model?: ModelSelection; subagentModel?: ModelSelection | null; replyGuard?: boolean }): Promise<{ ok: true; current: SettingsSnapshot } | { ok: false; error: "invalid_model"; reason: string }> {
     return this.lock("settings:model", async () => {
-      const providers = await this.providers();
-      if (patch.model) {
-        const reason = await this.checkModelSelection(providers, patch.model);
-        if (reason) return { ok: false, error: "invalid_model" as const, reason: `${patch.model.provider}/${patch.model.id}: ${reason}` };
+      if (patch.model || patch.subagentModel) {
+        const providers = await this.providers();
+        if (patch.model) {
+          const reason = await this.checkModelSelection(providers, patch.model);
+          if (reason) return { ok: false, error: "invalid_model" as const, reason: `${patch.model.provider}/${patch.model.id}: ${reason}` };
+        }
+        if (patch.subagentModel) {
+          const reason = await this.checkModelSelection(providers, patch.subagentModel);
+          if (reason) return { ok: false, error: "invalid_model" as const, reason: `${patch.subagentModel.provider}/${patch.subagentModel.id}: ${reason}` };
+        }
       }
-      if (patch.subagentModel) {
-        const reason = await this.checkModelSelection(providers, patch.subagentModel);
-        if (reason) return { ok: false, error: "invalid_model" as const, reason: `${patch.subagentModel.provider}/${patch.subagentModel.id}: ${reason}` };
-      }
-      const { subagentModel: existingSub, ...rest } = this.settings().value;
+      const { subagentModel: existingSub, replyGuard: existingGuard, ...rest } = this.settings().value;
       const nextSub = patch.subagentModel === undefined ? existingSub : patch.subagentModel ?? undefined;
+      const nextGuard = patch.replyGuard === undefined ? existingGuard : patch.replyGuard;
       const next: Settings = {
         ...rest,
         model: patch.model ?? rest.model,
         ...(nextSub ? { subagentModel: nextSub } : {}),
+        ...(nextGuard !== undefined ? { replyGuard: nextGuard } : {}),
       };
       this.ctx.storage.sql.exec(`INSERT INTO settings (key, value, revision, updated_at) VALUES ('runtime', ?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET value=excluded.value, revision=excluded.revision, updated_at=excluded.updated_at`,

@@ -1,7 +1,7 @@
 import type { Api, Context, Model, AssistantMessageEventStream, StreamOptions } from "@earendil-works/pi-ai";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import type { Env } from "../env";
-import { agentSearchOption, hostedSearchSteps, withAlarmWaitObserver } from "../models";
+import { agentSearchOption, clampCompactionContext, hostedSearchSteps, withAlarmWaitObserver } from "../models";
 import { argumentPreview } from "./tool-snapshot";
 import { snapshot, responseSnapshot, errorSummary, boundedText } from "./snapshot";
 import type { RequestBinding, RequestDetail, RequestScope } from "./types";
@@ -86,7 +86,10 @@ export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableOb
   const stream: MutableModels["stream"] = (m, c, o) => observe(m, c, (notice, response) => base.stream<Api>(m, c, { ...o, ...search, ...events(notice, response, o) }));
   const streamSimple: MutableModels["streamSimple"] = (m, c, o) => observe(m, c, (notice, response) => base.streamSimple(m, c, { ...o, ...search, ...events(notice, response, o) }));
   const complete: MutableModels["complete"] = (m, c, o) => stream(m, c, o).result();
-  const completeSimple: MutableModels["completeSimple"] = (m, c, o) => observe(m, c, (notice, response) => base.streamSimple(m, c, { ...o, ...events(notice, response, o) }), "compaction").result();
+  const completeSimple: MutableModels["completeSimple"] = (m, c, o) => {
+    const clamped = clampCompactionContext(m, c, o);
+    return observe(m, clamped, (notice, response) => base.streamSimple(m, clamped, { ...o, ...events(notice, response, o) }), "compaction").result();
+  };
   const overrides = { stream, streamSimple, complete, completeSimple };
   return new Proxy(base, { get(target, key) {
     if (Object.hasOwn(overrides, key)) return Reflect.get(overrides, key);

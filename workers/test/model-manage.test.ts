@@ -96,7 +96,7 @@ const idOf = (text: string) => {
 };
 
 describe("owner 非 subagent 自切主模型与子任务模型", () => {
-  it("支持查看目录（含模型级推理标记）、立即切换自身模型、设置子任务默认模型、按实例覆盖/切换子任务模型并在管理台子任务列表透出", async () => {
+  it("支持查看目录（含模型级推理标记）、自下一回合空闲边界切换自身模型、设置子任务默认模型、按实例覆盖/切换子任务模型并在管理台透出", async () => {
     const { calls, outputs } = setupModels(
       [
         // 第 1 轮：查看目录 -> 非法模型被拒 -> 切换自身为 fast -> 设子任务默认为 worker -> 派默认子任务 A -> 派覆盖模型 pro 的子任务 B
@@ -131,9 +131,15 @@ describe("owner 非 subagent 自切主模型与子任务模型", () => {
     await expect.poll(() => calls.child.length).toBe(2);
     await expect.poll(() => calls.parent.length).toBeGreaterThanOrEqual(9);
 
-    // 验证第 1 轮内切换 self=fast 后，紧接着的下一次生成请求即生效为 fast
-    expect(calls.parent[0]!.model).toBe("test");
-    expect(calls.parent[3]!.model).toBe("fast");
+    // 验证第 1 轮调用 model_manage(self=fast) 后，当前回合全程保持原模型 test 完整收尾，下一回合（含子任务汇报回合与第 2 轮）切换为 fast
+    expect(calls.parent.slice(0, 7).map(c => c.model)).toEqual(["test", "test", "test", "test", "test", "test", "test"]);
+    expect(calls.parent.slice(7).every(c => c.model === "fast")).toBe(true);
+    expect(JSON.parse(outputs.parent[2]!)).toMatchObject({
+      status: "updated",
+      target: "self",
+      effectiveFrom: "next_turn",
+      self: { provider: "faux", id: "fast" },
+    });
 
     // 验证 list 返回模型级 reasoning 标记与非法型号拦截
     const listOut = JSON.parse(outputs.parent[0]!) as {
@@ -327,6 +333,289 @@ describe("owner 非 subagent 自切主模型与子任务模型", () => {
     expect(await owner.submit(input(3, "测试过期子任务改模", 10000001))).toEqual({ status: "done" });
     expect(outputs.parent[2]).toContain("已过期清理");
   });
+
+  it("跨模型切换前先用原大窗口模型压缩历史以节省新模型冷启动，原模型压缩失败时自动回退由新模型压缩", async () => {
+    const events: { kind: "chat" | "compact"; model: string; hasSummary: boolean; chars: number }[] = [];
+    let failCompactFor: string | undefined;
+    const longChunkA = "A".repeat(9_000);
+    const longChunkB = "B".repeat(9_000);
+
+    const faux = fauxProvider({
+      models: [
+        { id: "test", contextWindow: 1_000_000 },
+        { id: "small-256k", contextWindow: 256_000 },
+        { id: "fallback-128k", contextWindow: 128_000 },
+      ],
+      tokensPerSecond: Infinity,
+    });
+    let activeModel = "unknown";
+    let stepIndex = 0;
+    const chatSteps: Step[] = [
+      { text: "第一轮长回复：" + longChunkA },
+      { tool: "model_manage", args: { action: "set", target: "self", model: { provider: "faux", id: "small-256k" } } },
+      { text: "第二轮收尾（仍在原 1M 模型）：" + longChunkB },
+      { text: "第三轮已在 256K 新模型轻装运行：" + "C".repeat(9_000) },
+      { tool: "model_manage", args: { action: "set", target: "self", model: { provider: "faux", id: "fallback-128k" } } },
+      { text: "第四轮收尾：" + "D".repeat(9_000) },
+      { text: "第五轮回退压缩后运行成功" },
+    ];
+
+    const respond: FauxResponseFactory = async transcript => {
+      faux.setResponses([respond]);
+      if (transcript.messages.some(m => m.role === "user" && typeof m.content === "string" && m.content.startsWith(MEMORY_EXTRACT_PROMPT))) {
+        return fauxAssistantMessage("[]");
+      }
+      const isCompact = transcript.messages.some(
+        m => m.role === "system" && typeof m.content === "string" && m.content.includes("context summarization assistant"),
+      );
+      const raw = JSON.stringify(transcript.messages);
+      const hasSummary = raw.includes("<summary>");
+      if (isCompact) {
+        events.push({ kind: "compact", model: activeModel, hasSummary, chars: raw.length });
+        if (failCompactFor === activeModel) {
+          return { ...fauxAssistantMessage(""), stopReason: "error", errorMessage: "upstream_quota_exceeded" };
+        }
+        return fauxAssistantMessage(`## Goal\n延续任务（由 ${activeModel} 压缩）\n\n## Progress\n### Done\n- [x] 已压缩历史`);
+      }
+      events.push({ kind: "chat", model: activeModel, hasSummary, chars: raw.length });
+      const next = chatSteps[stepIndex++];
+      if (!next || typeof next === "function") return fauxAssistantMessage("完");
+      if ("tool" in next) return fauxAssistantMessage([fauxToolCall(next.tool, next.args)], { stopReason: "toolUse" });
+      return fauxAssistantMessage(next.text);
+    };
+    faux.setResponses([respond]);
+
+    const wrapped = {
+      ...faux.provider,
+      stream: ((m, c, o) => { activeModel = m.id; return faux.provider.stream(m, c, o); }) as typeof faux.provider.stream,
+      streamSimple: ((m, c, o) => { activeModel = m.id; return faux.provider.streamSimple(m, c, o); }) as typeof faux.provider.streamSimple,
+    };
+    vi.spyOn(models, "openModels").mockImplementation(() => {
+      const m = createModels();
+      m.setProvider(wrapped);
+      return m;
+    });
+
+    const owner = env.THREAD.getByName("owner");
+    expect(await owner.submit(input(1, "先写入大段上下文", 10000001))).toEqual({ status: "done" });
+    expect(await owner.submit(input(2, "切换到 256K 模型", 10000001))).toEqual({ status: "done" });
+    expect(await owner.submit(input(3, "验证新模型冷启动已压缩", 10000001))).toEqual({ status: "done" });
+
+    // 第 1、2 轮全部在原模型 test 运行；第 3 轮开始前先由原模型 test 执行 compact，随后 small-256k 直接读取摘要
+    const firstCompactIdx = events.findIndex(e => e.kind === "compact");
+    expect(firstCompactIdx).toBe(3);
+    expect(events[firstCompactIdx]).toMatchObject({ kind: "compact", model: "test" });
+    const turn3Chat = events[firstCompactIdx + 1]!;
+    expect(turn3Chat).toMatchObject({ kind: "chat", model: "small-256k", hasSummary: true });
+
+    // 模拟原模型配额耗尽导致切前压缩失败：切换不卡死，自动回退由新模型 fallback-128k 压缩后再跑第 5 轮
+    failCompactFor = "small-256k";
+    expect(await owner.submit(input(4, "继续累积并切换到 128K 模型", 10000001))).toEqual({ status: "done" });
+    expect(await owner.submit(input(5, "验证原模型失效回退压缩", 10000001))).toEqual({ status: "done" });
+
+    const laterCompacts = events.slice(firstCompactIdx + 1).filter(e => e.kind === "compact");
+    expect(laterCompacts.map(e => e.model)).toEqual(["small-256k", "fallback-128k"]);
+    expect(events.at(-1)).toMatchObject({ kind: "chat", model: "fallback-128k", hasSummary: true });
+  });
+
+  it("失败回合在 InboxDoc 保留待决排队项时，切换模型后新消息不死锁且由新模型统一承接", async () => {
+    const seen: { model: string; texts: string[] }[] = [];
+    let firstStarted = false;
+    let releaseFirst = false;
+    let failMode = true;
+
+    const faux = fauxProvider({
+      models: [{ id: "test" }, { id: "fast" }],
+      tokensPerSecond: Infinity,
+    });
+    let activeModel = "unknown";
+    const respond: FauxResponseFactory = async transcript => {
+      faux.setResponses([respond]);
+      if (transcript.messages.some(m => m.role === "user" && typeof m.content === "string" && m.content.startsWith(MEMORY_EXTRACT_PROMPT))) {
+        return fauxAssistantMessage("[]");
+      }
+      if (failMode) {
+        firstStarted = true;
+        while (!releaseFirst) await new Promise(r => setTimeout(r, 10));
+        if (seen.length === 0) {
+          seen.push({ model: activeModel, texts: ["first"] });
+        }
+        return { ...fauxAssistantMessage(""), stopReason: "error", errorMessage: "400 invalid_request_error" };
+      }
+      const userTexts = transcript.messages
+        .filter(m => m.role === "user")
+        .map(m => typeof m.content === "string" ? m.content : m.content.filter(b => b.type === "text").map(b => b.text).join(""));
+      seen.push({ model: activeModel, texts: userTexts });
+      return fauxAssistantMessage("恢复成功");
+    };
+    faux.setResponses([respond]);
+    const wrapped = {
+      ...faux.provider,
+      stream: ((m, c, o) => { activeModel = m.id; return faux.provider.stream(m, c, o); }) as typeof faux.provider.stream,
+      streamSimple: ((m, c, o) => { activeModel = m.id; return faux.provider.streamSimple(m, c, o); }) as typeof faux.provider.streamSimple,
+    };
+    vi.spyOn(models, "openModels").mockImplementation(() => {
+      const m = createModels();
+      m.setProvider(wrapped);
+      return m;
+    });
+
+    const owner = env.THREAD.getByName("owner");
+    const firstSubmit = owner.submit(input(1, "首条运行将失败", 10000001));
+    await expect.poll(() => firstStarted).toBe(true);
+    // 跨用户消息走 followUp 进入 InboxDoc 排队，待第 1 轮失败后按 afterFailedRun='keep' 留在 InboxDoc
+    const secondSubmit = owner.submit(input(2, "排队待决消息", 10000002));
+    await expect.poll(async () => runInDurableObject(owner, (_i, s) =>
+      s.storage.sql.exec<{ when_busy: string | null }>("SELECT when_busy FROM inbound WHERE platform_message_id = '2'").toArray()[0]?.when_busy,
+    )).toBe("followUp");
+    releaseFirst = true;
+    expect(await firstSubmit).toEqual({ status: "failed" });
+    failMode = false;
+
+    // 切换主模型至 fast，再发第 3 条消息：syncModel 不得把滞留 InboxDoc 误判为忙碌死锁，且第 2+3 条全部由新模型 fast 执行
+    const rev = (await env.REGISTRY.getByName("main").settings()).revision;
+    const putRes = await worker.fetch(new Request("https://test/admin/model", {
+      method: "PUT",
+      headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: { provider: "faux", id: "fast" }, expectedRevision: rev }),
+    }), { ...env, ADMIN_TOKEN: TOKEN });
+    expect(putRes.status).toBe(200);
+
+    const thirdSubmit = owner.submit(input(3, "触发恢复的新消息", 10000001));
+    expect(await Promise.all([secondSubmit, thirdSubmit])).toEqual([{ status: "done" }, { status: "done" }]);
+    expect(seen.map(s => s.model)).toEqual(["test", "fast", "fast"]);
+    expect(seen[1]!.texts.some(t => t.includes("排队待决消息"))).toBe(true);
+    expect(seen[2]!.texts.some(t => t.includes("触发恢复的新消息"))).toBe(true);
+    await owner.syncAdminView("owner");
+  });
+
+  it("子任务原动态目录模型凭据损坏时，仍可冷启动并平滑切换到健康模型继续执行", async () => {
+    let spawnedId = "";
+    const { calls, outputs } = setupModels(
+      [
+        { tool: "subagent", args: { action: "spawn", task: "先跑首轮", summary: "动态目录逃生", model: { provider: "faux", id: "worker" } } },
+        { text: "已派出" },
+        { text: "收到首轮汇报" },
+        () => ({ tool: "subagent", args: { action: "message", id: spawnedId, text: "切到健康模型 pro 继续", model: { provider: "faux", id: "pro" } } }),
+        { text: "已切模追问" },
+        { text: "收到逃生汇报" },
+      ],
+      [
+        { text: "首轮长结果：" + "X".repeat(6_000) },
+        { text: "逃生后成功回答" },
+      ],
+    );
+
+    const owner = env.THREAD.getByName("owner");
+    expect(await owner.submit(input(1, "启动子任务", 10000001))).toEqual({ status: "done" });
+    spawnedId = idOf(outputs.parent[0]!);
+    await expect.poll(() => calls.parent.length).toBeGreaterThanOrEqual(3);
+
+    // 模拟该子任务此前持久化的 AgentDoc 与 meta 绑定在 openai-codex，随后 Registry 中 Codex 密文损坏并触发冷启动重开
+    const subStub = env.SUBAGENT.getByName(subagentName("owner", spawnedId));
+    await runInDurableObject(subStub, async (inst, state) => {
+      const rt = await (inst as unknown as { open(): Promise<{ root: { configure(p: unknown, c: unknown): Promise<void> } }> }).open();
+      await rt.root.configure(models.modelChange({ provider: "openai-codex", id: "gpt-6-astra" }), { signal: new AbortController().signal });
+      const metaRow = state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'subagent'").toArray()[0]!;
+      const meta = { ...JSON.parse(metaRow.value), model: { provider: "openai-codex", id: "gpt-6-astra" } };
+      state.storage.sql.exec("UPDATE meta SET value = ? WHERE key = 'subagent'", JSON.stringify(meta));
+      // 清空内存 runtime 迫使下次走完整 openRuntime() + switchModel()
+      (inst as unknown as { runtime?: undefined }).runtime = undefined;
+    });
+
+    const registry = env.REGISTRY.getByName("main");
+    await runInDurableObject(registry, async (_inst, state) => {
+      state.storage.sql.exec(
+        "INSERT OR REPLACE INTO model_credentials (provider_id, credential_enc, updated_at, meta_json) VALUES ('openai-codex', 'v1.corrupted.ciphertext', ?, '{}')",
+        Date.now(),
+      );
+    });
+    await expect(registry.codexCatalog()).rejects.toThrow();
+
+    expect(await owner.submit(input(2, "从损坏的 Codex 切到健康模型", 10000001))).toEqual({ status: "done" });
+    await expect.poll(() => calls.child.length).toBe(2);
+    await expect.poll(() => calls.parent.length).toBeGreaterThanOrEqual(6);
+    expect(calls.child[1]!.model).toBe("pro");
+    await subStub.syncAdminView();
+    await owner.syncAdminView("owner");
+  });
+
+  it("防漏发回复开关启用时对漏调 send_message 的纯文本回答最多追问一次，派子任务或关闭开关时不追问", async () => {
+    const { calls, outputs } = setupModels(
+      [
+        // 第 1 轮：开启 replyGuard 并正常调 send_message 收尾
+        { tool: "model_manage", args: { action: "set", replyGuard: true } },
+        { tool: "send_message", args: { text: "已开启防漏发开关" } },
+        { text: "" },
+        // 第 2 轮：模拟模型漏调 send_message 直接输出正文 -> 被追问一次后补调 send_message
+        { text: "这是一段被吞掉的直接回复" },
+        { tool: "send_message", args: { text: "补发给用户的正式回复" } },
+        { text: "" },
+        // 第 3 轮：模拟模型顽固连续两次只输出纯文本 -> 最多追问一次即停机，绝不死循环
+        { text: "顽固纯文本第一次" },
+        { text: "顽固纯文本第二次" },
+        // 第 4 轮：派出子任务后输出纯文本让出回合 -> 属正常委托，不追问
+        { tool: "subagent", args: { action: "spawn", task: "后台调研", summary: "后台调研" } },
+        { text: "已派出子任务等待回报" },
+        // 子任务回报回合（kind=subagent）也不误触用户消息追问
+        { text: "子任务结果已阅" },
+        // 第 5 轮：关闭 replyGuard 后输出纯文本 -> 不再追问
+        { tool: "model_manage", args: { action: "set", replyGuard: false } },
+        { text: "关闭开关后的纯文本" },
+        { text: "第六轮纯文本直接结束" },
+      ],
+      [{ text: "调研完成" }],
+    );
+
+    const owner = env.THREAD.getByName("owner");
+    // 第 1 轮：开启开关（Bridge 未连接时 send_message 会抛错，因此单测里在需要实测 send_message 时连接模拟 Bridge）
+    const { connect, action, reply } = await import("./helpers");
+    const sockets: WebSocket[] = [];
+    try {
+      const { socket, frames } = await connect(sockets);
+      const p1 = owner.submit(input(1, "打开防漏发开关", 10000001));
+      reply(socket, (await action(frames, 0, "send_private_msg")).echo, 910001);
+      expect(await p1).toEqual({ status: "done" });
+      expect(JSON.parse(outputs.parent[0]!)).toMatchObject({ status: "updated", replyGuard: true });
+
+      // 第 2 轮：漏调 send_message 后自动追问一次并成功补发
+      const beforeTurn2 = calls.parent.length;
+      const p2 = owner.submit(input(2, "在吗？", 10000001));
+      reply(socket, (await action(frames, 1, "send_private_msg")).echo, 910002);
+      expect(await p2).toEqual({ status: "done" });
+      expect(calls.parent.slice(beforeTurn2)).toHaveLength(3); // 首次纯文本 -> 追问后调 send_message -> 工具结果收尾
+      expect(calls.parent[beforeTurn2]!.identity).toContain("直接输出文字对方不可见");
+      const intents = await runInDurableObject(owner, (_i, s) =>
+        s.storage.sql.exec<{ text: string }>("SELECT text FROM outgoing_intents ORDER BY rowid").toArray(),
+      );
+      expect(intents.some(r => r.text === "补发给用户的正式回复")).toBe(true);
+      const guardEvents = await runInDurableObject(owner, (_i, s) =>
+        s.storage.sql.exec<{ kind: string }>("SELECT kind FROM events WHERE kind = 'reply_guard'").toArray(),
+      );
+      expect(guardEvents).toHaveLength(1);
+
+      // 第 3 轮：连续纯文本仅追问 1 次（共 2 次模型请求即终止）
+      const beforeTurn3 = calls.parent.length;
+      expect(await owner.submit(input(3, "测试单次上限", 10000001))).toEqual({ status: "done" });
+      expect(calls.parent.slice(beforeTurn3)).toHaveLength(2);
+
+      // 第 4 轮：派子任务不追问（spawn 1 次 + 纯文本收尾 1 次 = 2 次，随后等子任务汇报完）
+      const beforeTurn4 = calls.parent.length;
+      expect(await owner.submit(input(4, "派个后台调研", 10000001))).toEqual({ status: "done" });
+      expect(calls.parent.slice(beforeTurn4)).toHaveLength(2);
+      await expect.poll(() => calls.parent.length).toBe(beforeTurn4 + 3);
+
+      // 第 5 & 6 轮：关闭 replyGuard 后纯文本不再追问
+      expect(await owner.submit(input(5, "关掉防漏发开关", 10000001))).toEqual({ status: "done" });
+      const beforeTurn6 = calls.parent.length;
+      expect(await owner.submit(input(6, "验证关闭后行为", 10000001))).toEqual({ status: "done" });
+      expect(calls.parent.slice(beforeTurn6)).toHaveLength(1);
+      expect(calls.parent[beforeTurn6]!.identity).not.toContain("直接输出文字对方不可见");
+      await owner.syncAdminView("owner");
+    } finally {
+      for (const s of sockets) s.close();
+    }
+  });
 });
 
 
@@ -346,7 +635,10 @@ it("message(model) 通过持久通信入箱后立即使用新模型，且保留�
   await expect.poll(() => calls.parent.length).toBeGreaterThanOrEqual(6);
   expect(calls.child[1]!.model).toBe("pro");
   expect(outputs.parent[1]).toContain("模型已切换为 faux/pro");
-  await runInDurableObject(env.SUBAGENT.getByName(subagentName("owner", idOf(outputs.parent[0]!))), (_i, s) => {
+  const sub = env.SUBAGENT.getByName(subagentName("owner", idOf(outputs.parent[0]!)));
+  await runInDurableObject(sub, (_i, s) => {
     expect(s.storage.sql.exec("SELECT request_id,agent_hash FROM inbox WHERE agent_hash IS NOT NULL").toArray()).toHaveLength(1);
   });
+  await sub.syncAdminView();
+  await owner.syncAdminView("owner");
 });
