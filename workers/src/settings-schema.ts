@@ -16,6 +16,7 @@ export const SettingsSchema = Type.Object({
   allowUsers: Type.Array(Type.String({ pattern: `^${QQ_ID}$` }), { maxItems: 500 }),
   extractNamespaces: Type.Array(Type.String({ pattern: `^(owner|group:${QQ_ID}|private:${QQ_ID})$` }), { maxItems: 100 }),
   model: ModelSelectionSchema,
+  subagentModel: Type.Optional(ModelSelectionSchema),
 }, { additionalProperties: false });
 export type Settings = Static<typeof SettingsSchema>;
 export type GroupTrigger = Settings["groupTrigger"];

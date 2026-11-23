@@ -234,10 +234,12 @@ export function renderSubagents(key: string, list: C.Subagents | null) {
   if (!list.length) return el("span", { className: "muted", text: "这个会话没有派出过子 agent" });
   const rows = list.map(sub => {
     const status = SUBAGENT_STATUS[sub.status] || [sub.status, "neutral"];
+    const modelText = sub.model ? sub.model.provider + "/" + sub.model.id + (sub.model.reasoningEffort ? " · " + sub.model.reasoningEffort : "") : "-";
     return el("tr", {}, [
       el("td", { className: "mono", text: sub.id.slice(0, 8) }),
       el("td", { text: sub.task }),
       el("td", {}, [pill(status[0], status[1])]),
+      el("td", { className: "mono small", text: modelText }),
       el("td", { className: "mono", text: time(sub.createdAt) }),
       el("td", { className: "mono", text: sub.status === "running" ? (sub.deadline ? "限时至 " + time(sub.deadline) : "不设自动超时") : time(sub.endedAt) }),
       el("td", { className: "mono", text: time(sub.lastActiveAt) }),
@@ -245,11 +247,12 @@ export function renderSubagents(key: string, list: C.Subagents | null) {
       el("td", {}, [el("button", { className: "btn compact", type: "button", text: "查看会话", onclick: () => chooseSubagent(key,sub.id,sub.summary) }), sub.status === "running" ? el("button", { className: "btn compact danger", type: "button", text: "取消", onclick: () => cancelSubagent(key, sub.id) }) : null]),
     ]);
   });
+  const tbody = el("tbody", {}, rows);
   const table=el("table", { className: "wide" }, [
-    el("thead", {}, [el("tr", {}, ["id", "任务", "状态", "派出", "结束", "最近活动", "派出者", ""].map(text => el("th", { text })))]),
-    el("tbody", {}, rows),
+    el("thead", {}, [el("tr", {}, ["id", "任务", "状态", "模型", "派出", "结束", "最近活动", "派出者", ""].map(text => el("th", { text })))]),
+    tbody,
   ]);
-  const box=el("div",{},[table]);paginateChildren(table.tBodies[0],{key:"subagents:"+key});return box;
+  const box=el("div",{},[table]);paginateChildren(tbody,{key:"subagents:"+key});return box;
 }
 export async function loadSubagents(key: string) {
   const list = await readApi(C.Subagents, "GET", "/admin/threads/" + encodeURIComponent(key) + "/subagents");
@@ -516,8 +519,12 @@ export function renderSettings(snapshot: C.Settings) {
 export async function saveSettings() {
   if (!state.settings) return;
   // 模型由模型卡片切换，这里原样带回当前值；两张卡片共用一个 revision。
-  const value = { groupTrigger: $("s-trigger").value, allowGroups: parseList($("s-groups").value),
-    allowUsers: parseList($("s-users").value), extractNamespaces: parseList($("s-extract").value), model: state.settings.value.model };
+  const value = {
+    groupTrigger: $("s-trigger").value, allowGroups: parseList($("s-groups").value),
+    allowUsers: parseList($("s-users").value), extractNamespaces: parseList($("s-extract").value),
+    model: state.settings.value.model,
+    ...(state.settings.value.subagentModel ? { subagentModel: state.settings.value.subagentModel } : {}),
+  };
   try {
     const saved = await readApi(C.Settings, "PUT", "/admin/settings", { value, expectedRevision: state.settings.revision });
     renderSettings(saved);
@@ -536,21 +543,31 @@ export async function loadModel() {
 export function renderModel(view: C.ModelView) {
   state.model = view;
   const current = view.current, key = current.provider + "/" + current.id;
-  $("m-current").textContent = key + (current.reasoningEffort ? " · 推理 " + current.reasoningEffort : "");
-  const select = $("m-model");
-  clear(select);
+  const sub = view.subagent, subKey = sub ? sub.provider + "/" + sub.id : "";
+  $("m-current").textContent = key + (current.reasoningEffort ? " · 推理 " + current.reasoningEffort : "")
+    + (sub ? `（子任务默认：${subKey}${sub.reasoningEffort ? " · " + sub.reasoningEffort : ""}）` : "（子任务跟随主模型）");
+  const select = $("m-model"), subSelect = $("m-sub-model");
+  clear(select); clear(subSelect);
+  subSelect.append(el("option", { value: "", text: "跟随主模型" }));
   for (const provider of view.providers) {
-    const group = el("optgroup", { label: provider.name + (provider.available ? "" : "（" + (MODEL_REASONS[provider.reason || ""] || provider.reason) + "）") });
+    const label = provider.name + (provider.available ? "" : "（" + (MODEL_REASONS[provider.reason || ""] || provider.reason) + "）");
+    const group = el("optgroup", { label }), subGroup = el("optgroup", { label });
     for (const model of provider.models) {
-      const value = provider.id + "/" + model.id;
-      group.append(el("option", { value, text: model.name + " · " + model.id, disabled: !provider.available && value !== key }));
+      const value = provider.id + "/" + model.id, text = model.name + " · " + model.id;
+      group.append(el("option", { value, text, disabled: !provider.available && value !== key }));
+      subGroup.append(el("option", { value, text, disabled: !provider.available && value !== subKey }));
     }
     select.append(group);
+    subSelect.append(subGroup);
   }
-  select.value = key;
-  $("m-effort").value = current.reasoningEffort || "";
   if (!Array.from(select.options).some(option => option.value === key)) select.append(el("option", { value: key, text: key + "（当前不可用）" }));
   select.value = key;
+  $("m-effort").value = current.reasoningEffort || "";
+  if (subKey && !Array.from(subSelect.options).some(option => option.value === subKey)) subSelect.append(el("option", { value: subKey, text: subKey + "（当前不可用）" }));
+  subSelect.value = subKey;
+  $("m-sub-effort").value = sub?.reasoningEffort || "";
+  $("m-sub-effort").disabled = !subKey;
+  $("m-sub-reset").hidden = !sub;
   const codex = view.codex, status = $("codex-status");
   status.textContent = CODEX_STATUS[codex.status] || "状态未知";
   status.className = "pill " + (codex.loggedIn ? "ok" : codex.status === "refresh_failed" || codex.needsReauth ? "bad" : "neutral");
@@ -568,14 +585,32 @@ export function renderModel(view: C.ModelView) {
   accounts.value = codex.activeId || "";
   $("codex-logout").hidden = !codex.hasCredential;
 }
+function parseSelection(value: string, effort: string): Static<typeof C.ModelSelection> {
+  const slash = value.indexOf("/");
+  const selection: Static<typeof C.ModelSelection> = { provider: value.slice(0, slash), id: value.slice(slash + 1) };
+  if (effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh") selection.reasoningEffort = effort;
+  return selection;
+}
 export async function saveModel() {
   if (!state.model) return;
-  const value = $("m-model").value, slash = value.indexOf("/"), effort = $("m-effort").value;
-  const model: Static<typeof C.ModelSelection> = { provider: value.slice(0, slash), id: value.slice(slash + 1) };
-  if (effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh") model.reasoningEffort = effort;
+  const model = parseSelection($("m-model").value, $("m-effort").value);
+  const subValue = $("m-sub-model").value;
+  const subagentModel = subValue ? parseSelection(subValue, $("m-sub-effort").value) : null;
   try {
-    renderModel(await readApi(C.ModelView, "PUT", "/admin/model", { model, expectedRevision: state.model.revision }));
-    notice("模型已切换，各会话下一回合生效");
+    renderModel(await readApi(C.ModelView, "PUT", "/admin/model", { model, subagentModel, expectedRevision: state.model.revision }));
+    notice("模型已保存，各会话下一回合生效");
+    loadSettings().catch(fail);
+    refresh();
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) loadModel().catch(fail);
+    fail(error);
+  }
+}
+export async function resetSubagentModel() {
+  if (!state.model) return;
+  try {
+    renderModel(await readApi(C.ModelView, "PUT", "/admin/model", { model: state.model.current, subagentModel: null, expectedRevision: state.model.revision }));
+    notice("子任务已恢复跟随主模型");
     loadSettings().catch(fail);
     refresh();
   } catch (error) {
@@ -743,6 +778,8 @@ export function initApp() {
   });
   $("s-save").addEventListener("click", saveSettings);
   $("m-save").addEventListener("click", saveModel);
+  $("m-sub-reset").addEventListener("click", resetSubagentModel);
+  $("m-sub-model").addEventListener("change", () => { $("m-sub-effort").disabled = !$("m-sub-model").value; });
   $("codex-start").addEventListener("click", codexStart);
   $("codex-refresh").addEventListener("click", codexRefresh);
   $("codex-select").addEventListener("click", codexSelect);

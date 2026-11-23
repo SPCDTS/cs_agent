@@ -6,7 +6,8 @@ import type { SqliteExecutor } from "@earendil-works/chord/sqlite";
 import { createRegistry, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, section, type Conversation, type EntryId } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { Env } from "../env";
-import { ModelAlarm, loadProviderCatalogs, modelChange, openModels, remoteCredentials, usesDynamicCatalog, type ProviderCatalogs } from "../models";
+import { ModelAlarm, loadProviderCatalogs, modelChange, openModels, remoteCredentials, sameSelection, usesDynamicCatalog, type ProviderCatalogs } from "../models";
+import type { ModelSelection } from "../settings";
 import { captureModels } from "../requests/capture";
 import { requestTrace } from "../requests/trace";
 import { contextSource } from "../requests/context-source";
@@ -29,7 +30,7 @@ const SUBAGENT_RULE = "你是主 agent 派出的子 agent，只负责完成交�
 /** queued → running → answered（回答已落库）→ reported（父线程已收下）；cancelled 是取消时还没回答的项。 */
 type InboxStatus = "queued" | "running" | "answered" | "reported" | "cancelled";
 type InboxRow = { request_id: string; text: string; received_at: number; status: InboxStatus; answer: string | null; outcome: "done" | "failed" | null };
-type Runtime = { harness: Harness; root: Conversation };
+type Runtime = { harness: Harness; root: Conversation; selection: ModelSelection };
 
 const state = (meta: SubagentMeta): SubagentState => ({ status: meta.status, version: meta.version });
 
@@ -116,21 +117,57 @@ export class SubagentDO extends DurableObject<Env> {
   }
 
   /** 同一 requestId 只收一次；已取消的不再接受，已结束的重新进入运行并保留之前的上下文。 */
-  async message(requestId: string, text: string): Promise<{ result: "accepted" | "duplicate" | "ended"; state: SubagentState }> {
+  async message(requestId: string, text: string, nextModel?: ModelSelection): Promise<{ result: "accepted" | "duplicate" | "ended"; state: SubagentState }> {
     await this.initialize();
+    const catalogRefreshed = Boolean(nextModel && this.runtime && usesDynamicCatalog(nextModel.provider));
+    if (catalogRefreshed) await this.refreshCatalogs();
     let result = "duplicate" as "accepted" | "duplicate" | "ended";
     const meta = await this.update(async (meta, tx) => {
       if (meta.status === "cancelled") { result = "ended"; return false; }
       if (await tx.get("SELECT 1 FROM inbox WHERE request_id = ?", requestId)) return false;
       await tx.run("INSERT INTO inbox (request_id, text, received_at, status) VALUES (?, ?, ?, 'queued')", requestId, text, Date.now());
       result = "accepted";
+      if (nextModel) meta.model = nextModel;
       meta.status = "running";
       delete meta.progress;
       delete meta.endedAt;
       await this.wakeBy(Date.now());
       return true;
     });
+    if (result === "accepted" && nextModel && this.runtime) await this.syncRuntimeModel(nextModel, catalogRefreshed);
     return { result, state: state(meta) };
+  }
+
+  /** 切换已有子 agent 的模型（不追加消息）；先预刷动态目录避免瞬时故障卡死 lastModelOp，运行时配置失败则由下次 answer() 自动补齐。 */
+  async setModel(requestId: string, nextModel: ModelSelection): Promise<{ result: "updated" | "duplicate" | "ended"; state: SubagentState }> {
+    await this.initialize();
+    const catalogRefreshed = Boolean(this.runtime && usesDynamicCatalog(nextModel.provider));
+    if (catalogRefreshed) await this.refreshCatalogs();
+    let result = "duplicate" as "updated" | "duplicate" | "ended";
+    const meta = await this.update(async meta => {
+      if (meta.status === "cancelled") { result = "ended"; return false; }
+      if (meta.lastModelOp === requestId) { result = "duplicate"; return false; }
+      meta.lastModelOp = requestId;
+      meta.model = nextModel;
+      result = "updated";
+      return true;
+    });
+    if (result === "updated" && this.runtime) await this.syncRuntimeModel(nextModel, catalogRefreshed);
+    return { result, state: state(meta) };
+  }
+
+  private async syncRuntimeModel(selection: ModelSelection, catalogRefreshed = false): Promise<void> {
+    const runtime = await this.runtime?.catch(() => undefined);
+    if (!runtime || sameSelection(selection, runtime.selection)) return;
+    try {
+      if (!catalogRefreshed && usesDynamicCatalog(selection.provider)) await this.refreshCatalogs();
+      await runtime.root.configure(modelChange(selection), context);
+      runtime.selection = selection;
+    } catch (error) {
+      // meta.model 已落库且 runtime.selection 未推进，下次 answer() / openRuntime() 会按 !sameSelection 自动重配。
+      const meta = await this.meta().catch(() => undefined);
+      logDiag(this.env, this.ctx, { level: "warn", event: "subagent_model_sync_deferred", thread: meta?.parent, actor: meta?.id, error });
+    }
   }
 
   /** 只取消运行中的；已回答未送达的汇报也不再补送。 */
@@ -183,9 +220,11 @@ export class SubagentDO extends DurableObject<Env> {
     // 结束满 14 天（或从未启动）：整个对象连同 Pi 存储一起删除。
     const runtime = await this.runtime?.catch(() => undefined);
     await runtime?.harness.close(context).catch(() => {});
+    this.runtime = undefined;
     await this.ctx.storage.deleteAlarm();
     this.projection.reset();
     await this.ctx.storage.deleteAll();
+    this.initialized = undefined;
     this.initialized = this.runtime = undefined;
   }
 
@@ -239,7 +278,14 @@ export class SubagentDO extends DurableObject<Env> {
       return true;
     });
     await this.database.run("UPDATE inbox SET status = 'running' WHERE request_id = ? AND status = 'queued'", row.request_id);
-    const { harness, root } = await this.open();
+    const runtime = await this.open();
+    const currentMeta = await this.meta();
+    if (currentMeta && !sameSelection(currentMeta.model, runtime.selection)) {
+      if (usesDynamicCatalog(currentMeta.model.provider)) await this.refreshCatalogs();
+      await runtime.root.configure(modelChange(currentMeta.model), context);
+      runtime.selection = currentMeta.model;
+    }
+    const { harness, root } = runtime;
     // requestId 让驱逐后的重交找回同一提交，不会把同一条输入跑两遍。
     const settled = await (await root.submit({ type: "input", content: row.text, requestId: row.request_id, whenBusy: "followUp" }, context)).wait(context);
     const answer = settled.status === "done" && settled.type === "input" ? await this.answerText(harness, settled.answer) : undefined;
@@ -356,8 +402,10 @@ export class SubagentDO extends DurableObject<Env> {
       },
     }, context);
     const root = await harness.root(context, { agent: modelChange(meta.model) });
+    // 已存在的持久化 root 不会因 harness.root 的初始参数覆盖旧模型，显式对齐 meta.model。
+    await root.configure(modelChange(meta.model), context);
     // 读取子会话只打开存储；执行由 alarm → drain → answer 的 submit 启动。
     void harness.closed.then(() => { this.runtime = undefined; void delegated.close(); });
-    return { harness, root };
+    return { harness, root, selection: meta.model };
   }
 }

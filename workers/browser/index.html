@@ -176,7 +176,11 @@
         <div class="field"><label for="m-effort">推理强度</label>
           <select id="m-effort"><option value="">模型默认</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select>
         </div>
-        <div class="row"><button id="m-save" class="btn primary" type="button">切换</button><span id="m-meta" class="muted small"></span></div>
+        <div class="field"><label for="m-sub-model">子任务默认模型</label><select id="m-sub-model"></select></div>
+        <div class="field"><label for="m-sub-effort">子任务推理强度</label>
+          <select id="m-sub-effort"><option value="">模型默认</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select>
+        </div>
+        <div class="row"><button id="m-save" class="btn primary" type="button">切换</button><button id="m-sub-reset" class="btn" type="button" hidden>恢复跟随主模型</button><span id="m-meta" class="muted small"></span></div>
       </div>
       <div class="stack">
         <div class="row"><strong>Codex 原生登录</strong><span id="codex-status" class="pill neutral">-</span></div>

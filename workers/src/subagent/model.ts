@@ -16,7 +16,7 @@ export type SubagentState = { status: SubagentStatus; version: number };
 export type SubagentCapabilities = { sandboxId?: string; sandboxTask?: string; mcp?: McpCapabilitySnapshot; coding?: boolean };
 export type SubagentMeta = {
   parent: string; id: string; task: string; createdAt: number; identity: SubagentIdentity; model: ModelSelection;
-  summary?: string; progress?: AgentDescription; activityAt?: number;
+  lastModelOp?: string; summary?: string; progress?: AgentDescription; activityAt?: number;
   capabilities?: SubagentCapabilities; status: SubagentStatus; endedAt?: number; reportCount: number; version: number;
 };
 export type SubagentStart = Pick<SubagentMeta, "parent" | "id" | "task" | "summary" | "identity" | "model" | "capabilities">;
