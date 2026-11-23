@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { CandidateInputSchema, type MemoryCandidate, type MemoryEditor } from "./editor";
 import type { SqliteExecutor, SqliteValue } from "@earendil-works/chord/sqlite";

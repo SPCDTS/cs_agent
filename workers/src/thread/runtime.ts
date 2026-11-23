@@ -1,7 +1,7 @@
 import { agentSendTool, durableAgentTicket } from "../communication/tool";
 import type { AgentReceipt, AgentSend } from "../communication/model";
 import { BACKGROUND_CONTEXT, type Context } from '@earendil-works/chord/context';
-import { Type } from '@earendil-works/pi-ai';
+import { Type } from 'typebox';
 import { createRegistry, defineExtension, defineTool, GenerationTask, hook, Harness, section, type Conversation, type Registry, type ToolExecutionApi } from '@earendil-works/pi-durable';
 import { openDurableObjectSqliteStorage, type DurableObjectSqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite/cloudflare';
 import type { MutableModels } from '@earendil-works/pi-ai/models';
@@ -391,10 +391,6 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
   const codemode = installCodemode(registry, {
     allowed: async (api, callContext) => await codingAllowed(api, callContext) || await agentFileAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext)
       || (memory.ns === "owner" && await ownerMayManage(api, callContext)),
-    namespaces: () => [
-      ...(memory.ns === "owner" ? [{ name: "runtime-ops", prefix: "ops_", description: "实例运行状态、用量费用、请求轨迹与诊断日志只读查询（仅主人会话）" }] : []),
-      ...mcp.namespaces(),
-    ],
   });
   if (memory.ns === "owner" || memory.ns.startsWith("group:")) {
     registry.install(createScheduleExtension(host.env, memory.ns as ScheduleConversation, async (api, callContext) =>

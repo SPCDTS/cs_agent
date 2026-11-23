@@ -1,6 +1,6 @@
-import { copyJson } from "@earendil-works/chord";
+import { copyJson } from "@earendil-works/chord/json";
 import type { Context } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { Env } from "../env";
 import { healthReport } from "../admin/health";
@@ -280,6 +280,7 @@ export function createOpsExtension(deps: OpsExtensionDeps) {
 
   return defineExtension({
     name: "cs.ops",
+    namespace: { name: "runtime-ops", description: "实例运行状态、用量费用、请求轨迹与诊断日志只读查询（仅主人会话）" },
     tools: [healthTool, ...codemodeTools],
   });
 }

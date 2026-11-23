@@ -1,6 +1,6 @@
-import { copyJson } from "@earendil-works/chord";
+import { copyJson } from "@earendil-works/chord/json";
 import type { Context } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import { parseSkill, SKILL_LIMITS, type SkillInput } from "../skills";
 import { relativeWorkPath, type WorkspaceManifest } from "../sandbox/workspace";
@@ -69,5 +69,7 @@ export function createWorkspaceAdminExtension(deps:WorkspaceAdminToolDeps) {
       return text({error:"workspace_skill_error",errorId,stage,errorName},true);
     }
   }
-  return defineExtension({name:"cs.workspace-admin",tools:[defineTool({name:"skill_inspect",replay:"safe",description:"Inspect a skill directory in this workspace and return its fixed workspaceRevision and Registry expectedRevision. Inspect before skill_publish.",parameters:Type.Object(pathParams,{additionalProperties:false}),structuredOutputSchema:Type.Object({name:Type.String(),description:Type.String(),workspaceRevision:Type.String(),expectedRevision:Type.String(),files:Type.Array(Type.Object({path:Type.String(),bytes:Type.Number(),sha256:Type.String()}))}),execute:(args,api,context)=>boundary("inspect",api,context,(sandbox,registry)=>inspectWorkspaceSkill(sandbox,registry,args))}),defineTool({name:"skill_publish",replay:"unsafe",description:"Publish the inspected skill from the exact workspaceRevision using Registry compare-and-swap. Requires expectedRevision from skill_inspect.",parameters:Type.Object({...pathParams,workspaceRevision:Type.String({minLength:1,maxLength:64}),expectedRevision:Type.String({minLength:1,maxLength:100})},{additionalProperties:false}),execute:(args,api,context)=>boundary("publish",api,context,(sandbox,registry)=>publishWorkspaceSkill(sandbox,registry,args))})].map(tool=>({...tool,callers:["tools"] as const}))});
+  return defineExtension({name:"cs.workspace-admin",
+    namespace:{name:"workspace-skills",description:"Cloudflare 工作区技能检查与发布"},
+    tools:[defineTool({name:"skill_inspect",replay:"safe",description:"Inspect a skill directory in this workspace and return its fixed workspaceRevision and Registry expectedRevision. Inspect before skill_publish.",parameters:Type.Object(pathParams,{additionalProperties:false}),structuredOutputSchema:Type.Object({name:Type.String(),description:Type.String(),workspaceRevision:Type.String(),expectedRevision:Type.String(),files:Type.Array(Type.Object({path:Type.String(),bytes:Type.Number(),sha256:Type.String()}))}),execute:(args,api,context)=>boundary("inspect",api,context,(sandbox,registry)=>inspectWorkspaceSkill(sandbox,registry,args))}),defineTool({name:"skill_publish",replay:"unsafe",description:"Publish the inspected skill from the exact workspaceRevision using Registry compare-and-swap. Requires expectedRevision from skill_inspect.",parameters:Type.Object({...pathParams,workspaceRevision:Type.String({minLength:1,maxLength:64}),expectedRevision:Type.String({minLength:1,maxLength:100})},{additionalProperties:false}),execute:(args,api,context)=>boundary("publish",api,context,(sandbox,registry)=>publishWorkspaceSkill(sandbox,registry,args))})].map(tool=>({...tool,callers:["tools"] as const}))});
 }

@@ -1,5 +1,5 @@
 import type { Context } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, defineTool, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { Env } from "../env";
 import { ModelSelectionSchema, replyGuardEnabled, type ModelSelection } from "../settings";

@@ -103,7 +103,7 @@ describe("per-thread message context", () => {
       entries: state.storage.sql.exec("SELECT * FROM pi_entries").toArray(),
       sent: state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM messages WHERE is_self = 1").one().n,
     }));
-    expect(JSON.stringify(result.entries)).toContain("text: must not have more than 4000 characters");
+    expect(JSON.stringify(result.entries)).toContain("text: expected at most 4000 characters");
     expect(JSON.stringify(result.entries)).toContain("发送过快");
     expect(result.sent).toBe(0);
     expect(await runInDurableObject(thread, (_instance, state) => state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM outbox").one().n)).toBe(0);

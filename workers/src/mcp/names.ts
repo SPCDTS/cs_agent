@@ -1,4 +1,4 @@
-import { copyJson, type JsonValue } from "@earendil-works/chord";
+import { copyJson, type JsonValue } from "@earendil-works/chord/json";
 import { sha256Hex } from "../shared/hash";
 import type { McpServerConfig } from "./config";
 import type { CatalogTool } from "./catalog";

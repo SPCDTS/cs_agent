@@ -15,7 +15,7 @@ import { makeCatalog, restoreCatalog, saveCatalog, type Catalog, type CatalogToo
 import { McpConnection, safeError } from "./connection";
 import { compileMcpSchema, boundedJson } from "./schema";
 import { McpPolicyError, McpPolicyStore, type McpGrantInput } from "./policy";
-import { digest, jsonBytes, slug, toolNames, serverDigest } from "./names";
+import { digest, jsonBytes, toolNames, serverDigest } from "./names";
 import { convertMcpResult, mcpFailure } from "./result";
 import { mcpCodemodeResult, mcpCodemodeSchema, MCP_RESULT_INSTRUCTIONS } from "./codemode-result";
 
@@ -51,9 +51,6 @@ export class ThreadMcp {
           const results = await this.refreshAll(owner, context.abortSignal);
           return { output: [{ type: "text", text: JSON.stringify(results) }] };
         } }), ...this.resourceTools()] }));
-  }
-  namespaces() {
-    return [...this.entries.values()].map(({ server }) => ({ name: server.id, prefix: `mcp_${slug(server.id, 16)}_` }));
   }
   async canUseCodemode(api: ToolExecutionApi, context: Context): Promise<boolean> {
     const authority = mcpAuthority(await this.authorize(api, context));
@@ -174,8 +171,10 @@ export class ThreadMcp {
   }
   private install(entry: Entry, revision: Catalog): void {
     // 每服务一份当前 extension；Pi 仍保存旧任务定义，旧名称不会再成为新调用入口。
+    const visibleTools = revision.tools.filter(tool => !entry.visible || entry.visible.has(tool.name));
     this.registry.install(defineExtension({ name: `cs.mcp.server.${entry.server.id}`,
-      tools: revision.tools.filter(tool => !entry.visible || entry.visible.has(tool.name)).map(tool => {
+      ...(visibleTools.length ? { namespace: { name: entry.server.id, description: "" } } : {}),
+      tools: visibleTools.map(tool => {
         const input = compileMcpSchema(tool.inputSchema, this.config.limits);
         const output = tool.outputSchema ? compileMcpSchema(tool.outputSchema, this.config.limits) : undefined;
         const name = toolNames(revision, tool).nativeName;

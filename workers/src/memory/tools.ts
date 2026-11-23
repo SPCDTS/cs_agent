@@ -1,5 +1,5 @@
 import type { Context } from "@earendil-works/chord/context";
-import type { Static } from "@earendil-works/pi-ai";
+import type { Static } from "typebox";
 import { defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { memoryParameters, memoryDescriptions, type MemoryTool } from "./contracts";
 import { MemoryStore } from "./store";
