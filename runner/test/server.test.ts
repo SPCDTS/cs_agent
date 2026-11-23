@@ -25,7 +25,7 @@ test('真实官方 SDK HTTP：工具发现、结构化回执、断线续查、�
   };
   const config: ServerConfig = { stateDir: dir, host: '127.0.0.1', port: 7791, principals: [{ id: 'worker', tokenEnv: 'TEST_TOKEN' }], targets: [
     { kind: 'hyperv', id: 'dev', vmId: randomUUID(), credentialPath: 'C:\\credential.xml', guestWorkdir: 'C:\\Work' },
-    { kind: 'hyperv', id: 'group852', vmId: randomUUID(), credentialPath: 'C:\\group-credential.xml', guestWorkdir: 'C:\\GroupWork' },
+    { kind: 'hyperv', id: 'group852', vmId: randomUUID(), credentialPath: 'C:\\group-credential.xml', guestWorkdir: 'C:\\GroupWork', drainOnly: true },
     { kind: 'wsb', id: 'temp', memoryMb: 2048, idleTimeoutMs: 60000, maxLifetimeMs: 3600000 },
   ] };
   const backends = { hyperv: backend, wsb: backend }, jobs = new Jobs(dir, backends);
@@ -50,7 +50,12 @@ test('真实官方 SDK HTTP：工具发现、结构化回执、断线续查、�
   assert.match(catalog.tools.find(tool => tool.name === 'env_submit')!.description!, /都不持久/);
   assert.ok(!catalog.tools.some(tool => /^(vm_|wsb_)|acquire|register/.test(tool.name)));
   const directList = await call(client, { name:'env_list', arguments:{} });
-  assert.equal(Array.isArray(directList.structuredContent?.environments) && directList.structuredContent.environments.length, 3);
+  const environments = directList.structuredContent?.environments;
+  assert.ok(Array.isArray(environments));
+  assert.deepEqual(environments.map(target => [target.envId, target.drainOnly]), [['dev', undefined], ['group852', true], ['temp', undefined]]);
+  const draining = await call(client, { name: 'env_submit', arguments: { envId: 'group852', requestId: randomUUID(), script: 'Get-Date' } });
+  assert.equal(draining.isError, true);
+  assert.deepEqual(draining.content, [{ type: 'text', text: 'hyperv_target_draining' }]);
   assert.equal((await call(client, {name:'env_close',arguments:{envId:'dev',sessionId:randomUUID()}})).isError,true);
   const id = randomUUID(), meta = { [CALLER_META_KEY]: { scope: 'a'.repeat(64), environments: { kind: 'selected', envIds: ['temp'] } } };
   const listed = await call(client, { name: 'env_list', arguments: {}, _meta: meta });
@@ -102,5 +107,7 @@ test('配置只允许明确的持久 VM/临时 WSB，拒绝旧连接器配置与
   assert.throws(() => parseConfig({ ...valid, targets: [...valid.targets, ...valid.targets] }), /duplicate_id/);
   const vm = { kind: 'hyperv', id: 'dev', vmId: randomUUID(), credentialPath: path.resolve('secret.xml'), guestWorkdir: 'C:\\AgentWork' };
   assert.equal(parseConfig({ ...valid, targets: [vm] }).targets[0]?.kind, 'hyperv');
+  assert.deepEqual(parseConfig({ ...valid, targets: [{ ...vm, drainOnly: true }] }).targets, [{ ...vm, drainOnly: true }]);
+  assert.throws(() => parseConfig({ ...valid, targets: [{ ...valid.targets[0], drainOnly: true }] }), /invalid_windows_mcp_config/);
   assert.throws(() => parseConfig({ ...valid, targets: [{ ...vm, desktopMcp: true }] }), /invalid_windows_mcp_config/);
 });

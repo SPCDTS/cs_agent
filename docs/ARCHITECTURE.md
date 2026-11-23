@@ -1,6 +1,6 @@
 # cs-agent 架构与运行设计
 
-应用统一运行在 Cloudflare Workers，入口、依赖和构建配置集中在 `workers/`（入口 `workers/src/index.ts`）。`runner/` 提供可选的跨平台设备命令行 MCP、独立桌面 MCP 与 Windows Hyper-V/WSB 管理服务。
+应用统一运行在 Cloudflare Workers，入口、依赖和构建配置集中在 `workers/`（入口 `workers/src/index.ts`）。`runner/` 提供可选的跨平台设备命令行 MCP、独立桌面 MCP 与 Windows 宿主机上的临时 WSB 服务。持久 Hyper-V VM 直接配对设备客户端。
 
 ## 1. 请求入口与消息执行
 
@@ -70,7 +70,7 @@ QQ、网页、定时任务和事件输入先持久化入队，在同一事务里
 
 ## 6. 外部服务与构建边界
 
-- **外部连接**：模型和 Gmail 由 Worker 直接请求；MCP 连接远程 HTTPS 服务；CS2 Workshop 与 NapCat 独立运行。原生 coding 工具使用 Cloudflare 容器（`workers/sandbox/Dockerfile`），其他远程环境通过标准 MCP 接入（Windows Hyper-V 持久工作区与临时 WSB 见 [Windows MCP](WINDOWS-MCP.md)，跨平台设备见 [设备 MCP](DEVICE-MCP.md)）。
+- **外部连接**：模型和 Gmail 由 Worker 直接请求；MCP 连接远程 HTTPS 服务；CS2 Workshop 与 NapCat 独立运行。原生 coding 工具使用 Cloudflare 容器（`workers/sandbox/Dockerfile`），其他远程环境通过标准 MCP 接入。持久 VM 与个人电脑使用[设备 MCP](DEVICE-MCP.md)，临时 WSB 使用[宿主机 MCP](WINDOWS-MCP.md)。
 - **管理台构建**：浏览器逻辑位于 `workers/browser/`（通过 `tsconfig.browser.json` 严格检查，接口响应经 TypeBox schema 校验），静态页面模板与样式位于 `workers/browser/index.html` 与 `workers/browser/admin.css`。`node workers/scripts/build-admin.mjs` 使用 esbuild 生成 `workers/src/admin/app.generated.ts`（导出 `ADMIN_PAGE_HTML` 与 `ADMIN_APP_JS`）及 `workers/src/devices/client.generated.ts`，生成文件不提交 Git。
 - **迁移历史**：`workers/wrangler.jsonc` 的 DO migrations 属于线上 schema 历史，即使旧类已删除也必须完整保留。
 

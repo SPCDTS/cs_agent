@@ -10,7 +10,7 @@ const ConfigSchema = Type.Object({
   port: Type.Integer({ minimum: 1, maximum: 65535 }),
   principals: Type.Array(Type.Object({ id, tokenEnv: Type.String({ pattern: '^[A-Z][A-Z0-9_]{0,99}$' }) }, { additionalProperties: false }), { minItems: 1, maxItems: 16 }),
   targets: Type.Array(Type.Union([
-    Type.Object({ kind: Type.Literal('hyperv'), id, vmId: Type.String({ pattern: '^[a-fA-F0-9-]{36}$' }), credentialPath: Type.String({ minLength: 1 }), guestWorkdir: Type.String({ pattern: '^[A-Za-z]:[\\\\/]' }), instructions: optional(Type.String({ maxLength: 8000 })) }, { additionalProperties: false }),
+    Type.Object({ kind: Type.Literal('hyperv'), id, vmId: Type.String({ pattern: '^[a-fA-F0-9-]{36}$' }), credentialPath: Type.String({ minLength: 1 }), drainOnly: optional(Type.Boolean()), guestWorkdir: Type.String({ pattern: '^[A-Za-z]:[\\\\/]' }), instructions: optional(Type.String({ maxLength: 8000 })) }, { additionalProperties: false }),
     Type.Object({ kind: Type.Literal('wsb'), id, memoryMb: Type.Integer({ minimum: 2048, maximum: 65536 }), idleTimeoutMs: Type.Integer({ minimum: 60000, maximum: 3600000 }), maxLifetimeMs: Type.Integer({ minimum: 60000, maximum: 86400000 }), instructions: optional(Type.String({ maxLength: 8000 })) }, { additionalProperties: false }),
   ]), { minItems: 1, maxItems: 16 }),
 }, { additionalProperties: false });
