@@ -96,7 +96,7 @@ const idOf = (text: string) => {
 };
 
 describe("owner 非 subagent 自切主模型与子任务模型", () => {
-  it("支持查看目录（含模型级推理标记）、立即切换自身模型、设置子任务默认模型、按实例覆盖/切换子任务模型并在管理台子任务列表透出", async () => {
+  it("支持查看目录（含模型级推理标记）、自下一回合空闲边界切换自身模型、设置子任务默认模型、按实例覆盖/切换子任务模型并在管理台透出", async () => {
     const { calls, outputs } = setupModels(
       [
         // 第 1 轮：查看目录 -> 非法模型被拒 -> 切换自身为 fast -> 设子任务默认为 worker -> 派默认子任务 A -> 派覆盖模型 pro 的子任务 B
@@ -131,9 +131,15 @@ describe("owner 非 subagent 自切主模型与子任务模型", () => {
     await expect.poll(() => calls.child.length).toBe(2);
     await expect.poll(() => calls.parent.length).toBeGreaterThanOrEqual(9);
 
-    // 验证第 1 轮内切换 self=fast 后，紧接着的下一次生成请求即生效为 fast
-    expect(calls.parent[0]!.model).toBe("test");
-    expect(calls.parent[3]!.model).toBe("fast");
+    // 验证第 1 轮调用 model_manage(self=fast) 后，当前回合全程保持原模型 test 完整收尾，下一回合（含子任务汇报回合与第 2 轮）切换为 fast
+    expect(calls.parent.slice(0, 7).map(c => c.model)).toEqual(["test", "test", "test", "test", "test", "test", "test"]);
+    expect(calls.parent.slice(7).every(c => c.model === "fast")).toBe(true);
+    expect(JSON.parse(outputs.parent[2]!)).toMatchObject({
+      status: "updated",
+      target: "self",
+      effectiveFrom: "next_turn",
+      self: { provider: "faux", id: "fast" },
+    });
 
     // 验证 list 返回模型级 reasoning 标记与非法型号拦截
     const listOut = JSON.parse(outputs.parent[0]!) as {

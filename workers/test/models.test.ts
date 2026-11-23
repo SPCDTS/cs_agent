@@ -606,4 +606,65 @@ describe("Gemini provider 与原生搜索适配", () => {
     const replayedSystem = seenContext?.messages.find(m => m.role === "system");
     expect(replayedSystem && "toolsAdded" in replayedSystem ? replayedSystem.toolsAdded : []).toEqual([]);
   });
+
+  it("跨供应商无签名 functionCall 自动补齐跳过校验哨兵，保留原生签名并修正 -latest 推理配置", async () => {
+    const active = models.openModels({ ...env, GEMINI_API_KEY: "test-gemini-key" }, store());
+    const flashLatest = active.getModel("google", "gemini-flash-latest")!;
+    const proLatest = active.getModel("google", "gemini-pro-latest")!;
+    expect(flashLatest.thinkingLevelMap).toMatchObject({ off: null, minimal: null, low: "low" });
+
+    let capturedSearchPayload: Record<string, unknown> | undefined;
+    let capturedPlainPayload: Record<string, unknown> | undefined;
+    const skipSentinel = btoa("skip_thought_signature_validator");
+    const nativeSig = btoa("native_gemini_sig_bytes!");
+
+    const wrapped = withGoogleSearch({
+      stream: () => { throw new Error("unused"); },
+      streamSimple: (m, _ctx, opts) => lazyStream(m, async () => (async function* () {
+        const syntheticWire = {
+          model: m.id,
+          contents: [
+            // 1) 来自 Codex/DeepSeek 的并行工具调用（无 thoughtSignature）：仅首个 functionCall 注入跳过哨兵
+            {
+              role: "model",
+              parts: [
+                { text: "先查一下" },
+                { functionCall: { id: "call_codex_1", name: "model_manage", args: { action: "list" } } },
+                { functionCall: { id: "call_codex_2", name: "qq_context", args: {} } },
+              ],
+            },
+            // 2) 同模型原生 Gemini 并行工具调用（首项已有原生签名）：整轮原样保留，不覆写也不给次项塞假签名
+            {
+              role: "model",
+              parts: [
+                { functionCall: { id: "gemini_1", name: "send_message", args: { text: "ok" } }, thoughtSignature: nativeSig },
+                { functionCall: { id: "gemini_2", name: "qq_context", args: {} } },
+              ],
+            },
+          ],
+          config: { thinkingConfig: { thinkingBudget: 0 } },
+        };
+        const out = await opts?.onPayload?.(syntheticWire, m) as Record<string, unknown>;
+        if (opts && "agentWebSearch" in opts && opts.agentWebSearch) capturedSearchPayload = out;
+        else capturedPlainPayload = out;
+        const msg = { ...fauxAssistantMessage("ok"), provider: "google", api: "google-generative-ai" as const, model: m.id };
+        yield { type: "done" as const, reason: "stop" as const, message: msg };
+      })()),
+    });
+
+    const ctx = normalizeContext({ messages: [{ role: "user", content: "继续", timestamp: 1 }] });
+    await wrapped.streamSimple(proLatest, ctx, { ...agentSearchOption, apiKey: "test" }).result();
+    await wrapped.streamSimple(proLatest, ctx, { apiKey: "test" }).result();
+
+    for (const payload of [capturedSearchPayload, capturedPlainPayload]) {
+      const contents = payload?.contents as { parts: Record<string, unknown>[] }[];
+      expect(contents[0]!.parts[1]!.thoughtSignature).toBe(skipSentinel);
+      expect(contents[0]!.parts[2]!.thoughtSignature).toBeUndefined();
+      expect(contents[1]!.parts[0]!.thoughtSignature).toBe(nativeSig);
+      expect(contents[1]!.parts[1]!.thoughtSignature).toBeUndefined();
+      const cfg = payload?.config as Record<string, unknown>;
+      expect(cfg.thinkingConfig).toBeUndefined();
+    }
+    expect((capturedPlainPayload?.config as { tools?: unknown })?.tools).toBeUndefined();
+  });
 });

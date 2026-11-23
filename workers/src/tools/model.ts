@@ -10,7 +10,7 @@ export type ModelManagementDeps = {
   env: Env;
   /** 仅限主人会话（owner）内确证 owner 的非 subagent 用户消息回合（排除 SubagentDO、kind=subagent 汇报回合、event、schedule 与群聊）。 */
   allowed(api: ToolExecutionApi, context: Context): Promise<boolean>;
-  /** 刷新本线程模型目录缓存并立即将最新主模型同步到当前会话 root。 */
+  /** 刷新本线程模型设置与动态目录缓存；主模型切换在下一回合空闲边界生效，确保当前回合用原模型完整收尾。 */
   syncSelfModel(): Promise<void>;
   /** 查询指定模型是否声明支持推理强度设置。 */
   modelReasoning(provider: string, id: string): boolean;
@@ -48,7 +48,7 @@ export function createModelManagementExtension(deps: ModelManagementDeps) {
     tools: [{
       ...defineTool({
         name: "model_manage",
-        description: "查看可用模型目录或切换主 agent / 子 agent 模型（仅限 owner 权限的非 subagent 交互回合；子 agent 自身不可用）。切换前可先调 action='list' 确认可用 provider 与 model id；target 支持 self（主模型）、subagent（子任务默认模型，或传 subagentId 改单个子任务，或传 inheritSelf=true 恢复跟随主模型）、both（主模型与子任务默认同步切换）。",
+        description: "查看可用模型目录或切换主 agent / 子 agent 模型（仅限 owner 权限的非 subagent 交互回合；子 agent 自身不可用）。切换前可先调 action='list' 确认可用 provider 与 model id；target 支持 self（主模型，当前回合继续用原模型收尾回复、自下一回合起生效）、subagent（子任务默认模型立即用于后续新派发任务，或传 subagentId 改单个子任务的下一条输入，或传 inheritSelf=true 恢复跟随主模型）、both（主模型下一回合生效，子任务默认立即跟随）。",
         parameters: PARAMETERS,
         replay: "unsafe",
         execute: async (args, api, context) => {
@@ -148,11 +148,16 @@ export function createModelManagementExtension(deps: ModelManagementDeps) {
             catch (err) { synced = false; syncError = classifyError(err).code ?? "sync_failed"; }
             await deps.audit({ target: args.target, model: label, result: synced ? "ok" : "sync_failed" }).catch(() => {});
             const current = saved.current.value;
+            const changesSelf = args.target === "self" || args.target === "both";
             return jsonOut({
               status: "updated",
               synced,
-              ...(syncError ? { syncError, warning: "已写入全局设置，但本回合运行时同步失败，将在下一回合生效。" } : {}),
+              ...(syncError ? { syncError } : {}),
               target: args.target,
+              ...(changesSelf ? {
+                effectiveFrom: "next_turn",
+                note: "主模型配置已保存；当前回合仍由原模型完成收尾回复，自下一回合起切换至新模型。",
+              } : {}),
               self: current.model,
               subagentDefault: current.subagentModel ?? null,
               effectiveSubagentDefault: current.subagentModel ?? current.model,

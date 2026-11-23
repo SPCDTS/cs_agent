@@ -187,7 +187,7 @@ export class ParentSubagents {
     if (result === "updated") {
       await this.host.audit("model_change", { target: "subagent_instance", subagentId: id, model: `${nextModel.provider}/${nextModel.id}`, result: "ok" });
     }
-    return { text: `已将子 agent ${id} 的模型切换为 ${nextModel.provider}/${nextModel.id}${nextModel.reasoningEffort ? `（推理 ${nextModel.reasoningEffort}）` : ""}，自下一次模型请求起生效。` };
+    return { text: `已将子 agent ${id} 的模型切换为 ${nextModel.provider}/${nextModel.id}${nextModel.reasoningEffort ? `（推理 ${nextModel.reasoningEffort}）` : ""}，自下一条子任务输入起生效。` };
   }
 
   /** 只取消运行中的；子 DO 已经答完的保持它的结果，汇报照常送达。 */

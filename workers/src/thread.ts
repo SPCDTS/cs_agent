@@ -202,12 +202,8 @@ export class ThreadDO extends DurableObject<Env> {
       subagentCaller: (input, selection) => this.subagentCaller(input, selection), scheduleAccess: input => this.scheduleAccess(input),
       mcpAuthority: input => this.mcpAuthority(input), deliver: (input, text, outputId, options) => this.deliver(input, text, outputId, options),
       syncSelfModel: async () => {
-        const settings = await this.loadSettings(true);
-        const current = await this.runtime;
-        if (current && !sameSelection(settings.model, current.selection)) {
-          await current.root.configure(modelChange(settings.model), context);
-          current.selection = settings.model;
-        }
+        // 仅刷新本线程设置与动态目录缓存；运行中的回合继续用原模型收尾，新模型在 pump() 的空闲边界生效。
+        await this.loadSettings(true);
       },
       audit: (kind, detail) => this.audit(kind, detail), runtimeWake: wake => this.runtimeWake(wake),
       closed: () => { this.runtime = undefined; this.runtimeStarted = false; },
@@ -310,10 +306,11 @@ export class ThreadDO extends DurableObject<Env> {
     return applyToolProfile(runtime, profile, this.ctx.storage);
   }
 
-  // 面板改了模型后，从下一批接纳的输入起生效；取不到设置时沿用当前模型。
-  private async syncModel(runtime: Runtime): Promise<void> {
+  // 改了模型后等当前运行空闲再切换，避免半途换模打断工具续轮；取不到设置时沿用当前模型。
+  private async syncModel(runtime: Runtime): Promise<"deferred" | undefined> {
     const selection = await this.loadSettings(true).then(settings => settings.model, () => runtime.selection);
     if (sameSelection(selection, runtime.selection)) return;
+    if (!await this.idle(runtime)) return "deferred";
     await runtime.root.configure(modelChange(selection), context);
     runtime.selection = selection;
   }
@@ -392,7 +389,10 @@ export class ThreadDO extends DurableObject<Env> {
         }
         const barrier = rows.findIndex(row => profileOf(row) !== runtime.profile);
         const admissible = rows.slice(0, barrier < 0 ? rows.length : barrier);
-        if (admissible.length) await this.syncModel(runtime);
+        if (admissible.length && await this.syncModel(runtime) === "deferred") {
+          waitForIdle();
+          return;
+        }
         for (const row of admissible) {
           if (row.kind === "event" && row.message_id.startsWith("evt_github_")) {
             // Do not put GitHub work into Harness's busy queue: authorize only at an idle admission boundary.
@@ -996,7 +996,9 @@ export class ThreadDO extends DurableObject<Env> {
     return this.onAlarm(() => this.serial(async () => {
       await this.initialize();
       await this.bindNamespace(thread);
-      const { root, harness } = await this.open();
+      const runtime = await this.open();
+      await this.syncModel(runtime);
+      const { root, harness } = runtime;
       const live = await harness.snapshot(LiveDoc, root.id, context);
       if (live?.compactions?.length) return { error: "busy" as const };
       const task = await root.compact(instructions, context);
