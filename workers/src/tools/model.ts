@@ -2,7 +2,7 @@ import type { Context } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { Env } from "../env";
-import { ModelSelectionSchema, type ModelSelection } from "../settings";
+import { ModelSelectionSchema, replyGuardEnabled, type ModelSelection } from "../settings";
 import { SUBAGENT_ID } from "../subagent/model";
 import { classifyError } from "../shared/diagnostics";
 
@@ -33,6 +33,7 @@ const PARAMETERS = Type.Object({
   }, { additionalProperties: false, description: "目标模型 { provider, id, reasoningEffort? }；必须来自 list 返回的 available=true 供应商模型列表。" })),
   inheritSelf: Type.Optional(Type.Boolean({ description: "仅当 target='subagent' 且未指定 subagentId 时可用：传 true 清除子任务独立默认模型，恢复跟随主模型。" })),
   subagentId: Type.Optional(Type.String({ pattern: `^${SUBAGENT_ID}$`, description: "可选（配合 target='subagent' 与 model）：仅切换本会话指定子 agent 实例的模型，不改全局默认。" })),
+  replyGuard: Type.Optional(Type.Boolean({ description: "可选：开关主会话防漏发回复兜底（默认开启：用户消息回合若直接输出文字却漏调 send_message 时自动追问一次）。可单独传或与模型切换同传。" })),
 }, { additionalProperties: false });
 
 function jsonOut(value: unknown, isError = false): ToolExecutionResult {
@@ -61,11 +62,12 @@ export function createModelManagementExtension(deps: ModelManagementDeps) {
 
           if (args.action === "list") {
             await deps.syncSelfModel().catch(() => {});
-            const view = await registry.modelView();
+            const [view, settings] = await Promise.all([registry.modelView(), registry.settings()]);
             return jsonOut({
               self: view.current,
               subagentDefault: view.subagent ?? null,
               effectiveSubagentDefault: view.subagent ?? view.current,
+              replyGuard: replyGuardEnabled(settings.value, deps.env),
               reasoningEfforts: REASONING_EFFORTS,
               codexStatus: view.codex.status,
               providers: view.providers.map(provider => ({
@@ -78,8 +80,32 @@ export function createModelManagementExtension(deps: ModelManagementDeps) {
             });
           }
 
+          if (!args.target && args.replyGuard !== undefined && !args.model && !args.inheritSelf && !args.subagentId) {
+            try {
+              const saved = await registry.updateModels({ replyGuard: args.replyGuard });
+              if (!saved.ok) return jsonOut({ error: saved.error, reason: saved.reason }, true);
+              let synced = true, syncError: string | undefined;
+              try { await deps.syncSelfModel(); }
+              catch (err) { synced = false; syncError = classifyError(err).code ?? "sync_failed"; }
+              await deps.audit({ target: "reply_guard", model: String(args.replyGuard), result: synced ? "ok" : "sync_failed" }).catch(() => {});
+              const current = saved.current.value;
+              return jsonOut({
+                status: "updated",
+                synced,
+                ...(syncError ? { syncError } : {}),
+                replyGuard: replyGuardEnabled(current, deps.env),
+                self: current.model,
+                subagentDefault: current.subagentModel ?? null,
+              });
+            } catch (error) {
+              const code = classifyError(error).code ?? "update_failed";
+              await deps.audit({ target: "reply_guard", result: code }).catch(() => {});
+              return jsonOut(`model_error：${code}`, true);
+            }
+          }
+
           if (!args.target) {
-            return jsonOut("invalid_arguments：action='set' 必须指定 target（'self' | 'subagent' | 'both'）。", true);
+            return jsonOut("invalid_arguments：action='set' 必须指定 target（'self' | 'subagent' | 'both'）或单独提供 replyGuard。", true);
           }
 
           if (args.subagentId) {
@@ -133,11 +159,12 @@ export function createModelManagementExtension(deps: ModelManagementDeps) {
 
           const label = `${args.model.provider}/${args.model.id}`;
           try {
-            const patch = args.target === "self"
+            const basePatch = args.target === "self"
               ? { model: args.model }
               : args.target === "subagent"
                 ? { subagentModel: args.model }
                 : { model: args.model, subagentModel: null };
+            const patch = args.replyGuard !== undefined ? { ...basePatch, replyGuard: args.replyGuard } : basePatch;
             const saved = await registry.updateModels(patch);
             if (!saved.ok) {
               await deps.audit({ target: args.target, model: label, result: "invalid_model" }).catch(() => {});
@@ -161,6 +188,7 @@ export function createModelManagementExtension(deps: ModelManagementDeps) {
               self: current.model,
               subagentDefault: current.subagentModel ?? null,
               effectiveSubagentDefault: current.subagentModel ?? current.model,
+              replyGuard: replyGuardEnabled(current, deps.env),
             });
           } catch (error) {
             const code = classifyError(error).code ?? "update_failed";

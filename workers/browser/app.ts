@@ -14,7 +14,7 @@ export { loadMemory } from "./memory";
 import { ADMIN_PAGE_SIZE } from "../src/admin/pagination";
 
 export const EVENT_KINDS = ["", "mcp_call", "mcp_catalog", "mcp_management", "memory_extract", "memory_write"];
-export const MORE_KINDS = ["cloudflare_management", "web_search", "generate_image", "coding_exec", "coding_read", "coding_write", "coding_edit"];
+export const MORE_KINDS = ["cloudflare_management", "web_search", "generate_image", "reply_guard", "coding_exec", "coding_read", "coding_write", "coding_edit"];
 export const LOGIN: Record<string, [string, string]> = { ok: ["已登录", "ok"], needed: ["需要登录", "warn"], error: ["凭据错误", "bad"], unconfigured: ["未配置", "neutral"] };
 export const CREDENTIAL: Record<string, string> = { oauth: "OAuth（CIMD）", static: "静态凭据", none: "无凭据" };
 export const ERRORS: Record<string, string> = {
@@ -508,13 +508,14 @@ export function renderSettings(snapshot: C.Settings) {
   state.settings = snapshot;
   const value = snapshot.value;
   $("s-trigger").value = value.groupTrigger;
+  $("s-reply-guard").value = value.replyGuard === false ? "off" : "on";
   $("s-groups").value = listText(value.allowGroups);
   $("s-users").value = listText(value.allowUsers);
   $("s-extract").value = listText(value.extractNamespaces);
   $("s-meta").textContent = snapshot.overrides ? "上次保存 " + time(snapshot.updatedAt) : "当前沿用 secrets/vars 默认值";
   const d = snapshot.defaults;
   $("s-defaults").textContent = "默认值：群 " + (listText(d.allowGroups) || "无") + "；私聊 " + (listText(d.allowUsers) || "无") + "；抽取 " + (listText(d.extractNamespaces) || "关闭")
-    + "；模型 " + d.model.provider + "/" + d.model.id;
+    + "；防漏发 " + (d.replyGuard === false ? "关闭" : "开启") + "；模型 " + d.model.provider + "/" + d.model.id;
 }
 export async function saveSettings() {
   if (!state.settings) return;
@@ -522,6 +523,7 @@ export async function saveSettings() {
   const value = {
     groupTrigger: $("s-trigger").value, allowGroups: parseList($("s-groups").value),
     allowUsers: parseList($("s-users").value), extractNamespaces: parseList($("s-extract").value),
+    replyGuard: $("s-reply-guard").value !== "off",
     model: state.settings.value.model,
     ...(state.settings.value.subagentModel ? { subagentModel: state.settings.value.subagentModel } : {}),
   };

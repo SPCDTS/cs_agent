@@ -7,7 +7,7 @@ import { openDurableObjectSqliteStorage, type DurableObjectSqliteDatabase } from
 import type { MutableModels } from '@earendil-works/pi-ai/models';
 import type { Env } from '../env';
 import { ownerIds, scopeOf, type Target, type TurnKind } from '../policy';
-import type { Settings, ModelSelection } from '../settings';
+import { replyGuardEnabled, type Settings, type ModelSelection } from '../settings';
 import { QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS, recall } from '../context';
 import { DELEGATION_RULE, EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, WEB_RULE, subagentTurnIdentity, turnIdentity } from '../prompt';
 import { SWITCH_KEEP_RECENT_TOKENS, hostedSearchSteps, modelChange, selectionFromAgent } from '../models';
@@ -51,6 +51,7 @@ import { isWeb, isWebAdmin, targetOf, type InboundRow, type ToolProfile } from '
 const context = BACKGROUND_CONTEXT;
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const WEB_SEND_RULE = "回复通道：本轮来自已通过管理口令认证的网页管理员，不是 QQ 消息。与原 QQ 会话共享上下文，但本轮回复只展示在网页，不向 QQ 发送。用户只能看到 send_message 写入的文字/图片和 send_file 发送的工作区附件，不得用其他工具绕过此入口。网页消息同样按纯文本原样显示，不渲染 Markdown 链接，严禁写入内置联网搜索的内部引用标记（如 turn…search、turn…view、cite）。";
+const REPLY_GUARD_PROMPT = "系统提示：你刚才直接输出的文字用户看不到，且本轮尚未调用 send_message 或 send_file 发送任何内容。若需要将上述内容回复给用户，请立即调用 send_message 发送纯文本回复；若本轮确实无需对外回复，请直接结束且不要输出正文。";
 const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_page", "read_skill",
   "codemode"]);
 
@@ -107,17 +108,66 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
   const storage = await openDurableObjectSqliteStorage(host.observedStorage, { prefix: "pi_" });
   host.installProjection();
   const registry = createRegistry();
+  const remindedInputs = new Set<string>();
   registry.install(trace.extension);
   registry.install(monitor.extension);
   registry.install(defineExtension({
     name: "cs-workers",
-    hooks: [hook(GenerationTask, { afterResponse: async message => {
-      const searches = hostedSearchSteps(message);
-      if (!searches.length) return;
-      host.ctx.waitUntil(host.audit("web_search", { result: searches.some(s => s.item.status !== "completed") ? "error" : "ok",
-        provider: message.provider, calls: searches.length, ms: Math.max(...searches.map(s => s.endedAt)) - Math.min(...searches.map(s => s.startedAt)) })
-        .catch(() => console.error({ event: "web_search_audit_failed" })));
-    } })],
+    hooks: [hook(GenerationTask, {
+      afterResponse: async message => {
+        const searches = hostedSearchSteps(message);
+        if (!searches.length) return;
+        host.ctx.waitUntil(host.audit("web_search", { result: searches.some(s => s.item.status !== "completed") ? "error" : "ok",
+          provider: message.provider, calls: searches.length, ms: Math.max(...searches.map(s => s.endedAt)) - Math.min(...searches.map(s => s.startedAt)) })
+          .catch(() => console.error({ event: "web_search_audit_failed" })));
+      },
+      onYield: async (answer, api, callContext) => {
+        if (answer.stopReason !== "stop" || answer.content.some(b => b.type === "toolCall")) return;
+        const text = answer.content
+          .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
+          .map(b => b.text)
+          .join("")
+          .trim();
+        if (!text) return;
+        if (!replyGuardEnabled(await host.loadSettings(), host.env)) return;
+        const input = await host.currentInput(harness, api, api.conversationId, callContext);
+        if (!input || input.kind !== "message" || remindedInputs.has(input.message_id)) return;
+        if (input.session_generation !== await host.sessionGeneration()) return;
+        const delivered = isWeb(input)
+          ? await host.database.get("SELECT 1 FROM web_outputs WHERE input_id = ? LIMIT 1", input.message_id)
+          : await host.database.get(
+              "SELECT 1 FROM outgoing_intents WHERE input_id = ? OR (created_at >= ? AND input_id IN (SELECT message_id FROM inbound WHERE turn_id IS NOT NULL AND turn_id = ?)) LIMIT 1",
+              input.message_id, input.admitted_at ?? 0, input.turn_id ?? "",
+            );
+        if (delivered) return;
+        const view = await runtimeRef?.root.context(callContext);
+        if (view) {
+          for (let i = view.messages.length - 1; i >= 0; i--) {
+            const msg = view.messages[i]!;
+            if (msg.role === "user") {
+              const userText = typeof msg.content === "string" ? msg.content
+                : msg.content.filter(b => b.type === "text").map(b => b.text).join("");
+              if (userText === REPLY_GUARD_PROMPT) return;
+              break;
+            }
+            if (msg.role === "assistant") {
+              for (const block of msg.content) {
+                if (block.type !== "toolCall") continue;
+                if (block.name === "send_message" || block.name === "send_file" || block.name === "agent_send") return;
+                if (block.name === "subagent") {
+                  const act = (block.arguments as { action?: unknown } | undefined)?.action;
+                  if (act === "spawn" || act === "message") return;
+                }
+              }
+            }
+          }
+        }
+        if (remindedInputs.size >= 200) remindedInputs.delete(remindedInputs.values().next().value!);
+        remindedInputs.add(input.message_id);
+        host.ctx.waitUntil(host.audit("reply_guard", { inputId: input.message_id, model: `${answer.provider}/${answer.model}` }).catch(() => {}));
+        return { continue: REPLY_GUARD_PROMPT };
+      },
+    })],
     sections: [
       // 稳定段靠前以保持前缀缓存命中；动态回合上下文统一放在 codemode 段之后。
       section("rules", async (api, callContext) => {
@@ -357,11 +407,12 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
       section("turn-identity", async (api, callContext) => {
         const input = await host.currentInput(harness, api.read, api.conversationId, callContext);
         if (input?.kind === "agent") return "本轮为 Agent 通信，来源 agentSessionId=" + input.agent_from + "；不是 QQ 用户或 owner 输入。接收方既有 coding/MCP 能力不从来源继承。已接收附件可用 read(path) 只读，不能借此执行 bash、写文件或读取未接收的主人文件。";
-        if (input && isWeb(input)) return "本回合来自管理台网页入口，当前会话：" + memory.ns + "；管理员权限只作用于本会话范围。";
+        const remindSend = input?.kind === "message" && replyGuardEnabled(await host.loadSettings(), host.env);
+        if (input && isWeb(input)) return "本回合来自管理台网页入口，当前会话：" + memory.ns + "；管理员权限只作用于本会话范围。" + (remindSend ? "直接输出文字对方不可见，需要回复时请调用 send_message。" : "");
         if (input?.kind === "event") return EVENT_TURN_IDENTITY;
         if (input?.kind === "subagent") return subagentTurnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name },
           ownerIds(host.env).includes(input.user_id));
-        return input ? turnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name }, ownerIds(host.env).includes(input.user_id)) : undefined;
+        return input ? turnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name }, ownerIds(host.env).includes(input.user_id), remindSend) : undefined;
       }),
       section("time", async (api, callContext) => {
         const input = await host.currentInput(harness, api.read, api.conversationId, callContext);

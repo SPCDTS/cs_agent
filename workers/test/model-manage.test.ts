@@ -540,6 +540,82 @@ describe("owner 非 subagent 自切主模型与子任务模型", () => {
     await owner.syncAdminView("owner");
   });
 
+  it("防漏发回复开关启用时对漏调 send_message 的纯文本回答最多追问一次，派子任务或关闭开关时不追问", async () => {
+    const { calls, outputs } = setupModels(
+      [
+        // 第 1 轮：开启 replyGuard 并正常调 send_message 收尾
+        { tool: "model_manage", args: { action: "set", replyGuard: true } },
+        { tool: "send_message", args: { text: "已开启防漏发开关" } },
+        { text: "" },
+        // 第 2 轮：模拟模型漏调 send_message 直接输出正文 -> 被追问一次后补调 send_message
+        { text: "这是一段被吞掉的直接回复" },
+        { tool: "send_message", args: { text: "补发给用户的正式回复" } },
+        { text: "" },
+        // 第 3 轮：模拟模型顽固连续两次只输出纯文本 -> 最多追问一次即停机，绝不死循环
+        { text: "顽固纯文本第一次" },
+        { text: "顽固纯文本第二次" },
+        // 第 4 轮：派出子任务后输出纯文本让出回合 -> 属正常委托，不追问
+        { tool: "subagent", args: { action: "spawn", task: "后台调研", summary: "后台调研" } },
+        { text: "已派出子任务等待回报" },
+        // 子任务回报回合（kind=subagent）也不误触用户消息追问
+        { text: "子任务结果已阅" },
+        // 第 5 轮：关闭 replyGuard 后输出纯文本 -> 不再追问
+        { tool: "model_manage", args: { action: "set", replyGuard: false } },
+        { text: "关闭开关后的纯文本" },
+        { text: "第六轮纯文本直接结束" },
+      ],
+      [{ text: "调研完成" }],
+    );
+
+    const owner = env.THREAD.getByName("owner");
+    // 第 1 轮：开启开关（Bridge 未连接时 send_message 会抛错，因此单测里在需要实测 send_message 时连接模拟 Bridge）
+    const { connect, action, reply } = await import("./helpers");
+    const sockets: WebSocket[] = [];
+    try {
+      const { socket, frames } = await connect(sockets);
+      const p1 = owner.submit(input(1, "打开防漏发开关", 10000001));
+      reply(socket, (await action(frames, 0, "send_private_msg")).echo, 910001);
+      expect(await p1).toEqual({ status: "done" });
+      expect(JSON.parse(outputs.parent[0]!)).toMatchObject({ status: "updated", replyGuard: true });
+
+      // 第 2 轮：漏调 send_message 后自动追问一次并成功补发
+      const beforeTurn2 = calls.parent.length;
+      const p2 = owner.submit(input(2, "在吗？", 10000001));
+      reply(socket, (await action(frames, 1, "send_private_msg")).echo, 910002);
+      expect(await p2).toEqual({ status: "done" });
+      expect(calls.parent.slice(beforeTurn2)).toHaveLength(3); // 首次纯文本 -> 追问后调 send_message -> 工具结果收尾
+      expect(calls.parent[beforeTurn2]!.identity).toContain("直接输出文字对方不可见");
+      const intents = await runInDurableObject(owner, (_i, s) =>
+        s.storage.sql.exec<{ text: string }>("SELECT text FROM outgoing_intents ORDER BY rowid").toArray(),
+      );
+      expect(intents.some(r => r.text === "补发给用户的正式回复")).toBe(true);
+      const guardEvents = await runInDurableObject(owner, (_i, s) =>
+        s.storage.sql.exec<{ kind: string }>("SELECT kind FROM events WHERE kind = 'reply_guard'").toArray(),
+      );
+      expect(guardEvents).toHaveLength(1);
+
+      // 第 3 轮：连续纯文本仅追问 1 次（共 2 次模型请求即终止）
+      const beforeTurn3 = calls.parent.length;
+      expect(await owner.submit(input(3, "测试单次上限", 10000001))).toEqual({ status: "done" });
+      expect(calls.parent.slice(beforeTurn3)).toHaveLength(2);
+
+      // 第 4 轮：派子任务不追问（spawn 1 次 + 纯文本收尾 1 次 = 2 次，随后等子任务汇报完）
+      const beforeTurn4 = calls.parent.length;
+      expect(await owner.submit(input(4, "派个后台调研", 10000001))).toEqual({ status: "done" });
+      expect(calls.parent.slice(beforeTurn4)).toHaveLength(2);
+      await expect.poll(() => calls.parent.length).toBe(beforeTurn4 + 3);
+
+      // 第 5 & 6 轮：关闭 replyGuard 后纯文本不再追问
+      expect(await owner.submit(input(5, "关掉防漏发开关", 10000001))).toEqual({ status: "done" });
+      const beforeTurn6 = calls.parent.length;
+      expect(await owner.submit(input(6, "验证关闭后行为", 10000001))).toEqual({ status: "done" });
+      expect(calls.parent.slice(beforeTurn6)).toHaveLength(1);
+      expect(calls.parent[beforeTurn6]!.identity).not.toContain("直接输出文字对方不可见");
+      await owner.syncAdminView("owner");
+    } finally {
+      for (const s of sockets) s.close();
+    }
+  });
 });
 
 

@@ -25,6 +25,16 @@ test("管理台模型卡片支持选择与一键清除子任务默认模型，�
         codex: { status: "reauth_required", loggedIn: false, needsReauth: true, hasCredential: true, accounts: [] },
       };
     }
+    if (method === "PUT" && path === "/admin/settings") {
+      puts.push(body);
+      return {
+        revision: "abcdef0123456789",
+        value: body.value,
+        defaults: { groupTrigger: "mention_or_reply", allowGroups: [], allowUsers: [], extractNamespaces: [], model: { provider: "deepseek", id: "deepseek-chat" } },
+        overrides: body.value,
+        applied: true,
+      };
+    }
     if (path === "/admin/settings") {
       return {
         revision: "0123456789abcdef",
@@ -36,8 +46,8 @@ test("管理台模型卡片支持选择与一键清除子任务默认模型，�
     throw new Error("unexpected api call: " + method + " " + path);
   };
 
-  const { renderModel, saveModel, resetSubagentModel, renderSubagents } = await bundleModule({
-    contents: 'export { renderModel, saveModel, resetSubagentModel, renderSubagents } from "./browser/app.ts";',
+  const { renderModel, saveModel, resetSubagentModel, renderSubagents, renderSettings, saveSettings } = await bundleModule({
+    contents: 'export { renderModel, saveModel, resetSubagentModel, renderSubagents, renderSettings, saveSettings } from "./browser/app.ts";',
   }, {
     "./api": 'export class ApiError extends Error {} export const readApi = (...args) => globalThis.__modelReadApi(...args), api = (...args) => globalThis.__modelReadApi(null, ...args), readToken = () => "t", writeToken = () => {};',
     "./console": consoleMock,
@@ -98,4 +108,18 @@ test("管理台模型卡片支持选择与一键清除子任务默认模型，�
     spawner: "owner 10000001",
   }]);
   assert.match(box.textContent, /deepseek\/deepseek-reasoner · medium/);
+
+  // 设置卡片展示并保存防漏发回复兜底开关
+  renderSettings({
+    revision: "1122334455667788",
+    value: { groupTrigger: "mention_only", allowGroups: [], allowUsers: [], extractNamespaces: ["owner"], model: { provider: "deepseek", id: "deepseek-chat" } },
+    defaults: { groupTrigger: "mention_only", allowGroups: [], allowUsers: [], extractNamespaces: ["owner"], model: { provider: "deepseek", id: "deepseek-chat" } },
+    overrides: null,
+  });
+  assert.equal(document.getElementById("s-reply-guard").value, "on");
+  document.getElementById("s-reply-guard").value = "off";
+  await saveSettings();
+  await settle();
+  assert.equal(puts.at(-1).value.replyGuard, false);
+  assert.equal(document.getElementById("s-reply-guard").value, "off");
 });

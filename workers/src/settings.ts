@@ -17,12 +17,15 @@ export function defaultSettings(env: SettingsEnv): Settings {
 }
 // 每个 DO 用自己的 env 求默认值再叠加覆盖项，测试与部署都只有一条“默认被覆盖”的规则。
 export const effectiveSettings = (env: SettingsEnv, overrides: Settings | null): Settings => overrides ?? defaultSettings(env);
+export const replyGuardEnabled = (settings: Settings, env: { MODEL_PROVIDER?: string }): boolean =>
+  settings.replyGuard ?? env.MODEL_PROVIDER !== "faux";
 export function settingsRevision(value: Settings): string {
-  const { groupTrigger, allowGroups, allowUsers, extractNamespaces, model, subagentModel } = value;
+  const { groupTrigger, allowGroups, allowUsers, extractNamespaces, model, subagentModel, replyGuard } = value;
   return sha256Hex(JSON.stringify({
     groupTrigger, allowGroups, allowUsers, extractNamespaces,
     model: { provider: model.provider, id: model.id, reasoningEffort: model.reasoningEffort ?? null },
     ...(subagentModel ? { subagentModel: { provider: subagentModel.provider, id: subagentModel.id, reasoningEffort: subagentModel.reasoningEffort ?? null } } : {}),
+    ...(replyGuard !== undefined ? { replyGuard } : {}),
   })).slice(0, 16);
 }
 
