@@ -667,4 +667,29 @@ describe("Gemini provider 与原生搜索适配", () => {
     }
     expect((capturedPlainPayload?.config as { tools?: unknown })?.tools).toBeUndefined();
   });
+
+  it("clampCompactionContext 在小窗口兜底压缩时保留既有摘要与尾部对话并严格限制字符预算", () => {
+    const smallModel = {
+      ...models.openModels({ ...env, GEMINI_API_KEY: "test-gemini-key" }, store()).getModel("google", "gemini-4-carbon")!,
+      contextWindow: 32_000,
+    };
+    const priorSummary = "[User]: The conversation history before this point was compacted into the following summary:\n\n<summary>\n## Goal\n保留既有核心目标\n</summary>";
+    const middle = Array.from({ length: 40 }, (_, i) => `[User]: 早期长历史 ${i} ${"中".repeat(2_500)}`).join("\n\n");
+    const recent = `[User]: 最新关键上下文 ${"尾".repeat(1_000)}\n\n[Assistant]: 最新回复`;
+    const prompt = `<conversation>\n${priorSummary}\n\n${middle}\n\n${recent}\n</conversation>\n\nThe messages above are a conversation to summarize.`;
+    const clamped = models.clampCompactionContext(smallModel, {
+      messages: [
+        { role: "system", content: "You are a context summarization assistant.", timestamp: 1 },
+        { role: "user", content: [{ type: "text", text: prompt }], timestamp: 2 },
+      ],
+    }, { maxTokens: 8_000 });
+    const userMsg = clamped.messages[1]!;
+    const outText = userMsg.role === "user" && typeof userMsg.content !== "string" && userMsg.content[0]?.type === "text" ? userMsg.content[0].text : "";
+    // 32_000 - (16_384 + 4_096) = 11_520 tokens -> 上限 23_040 字符
+    expect(outText.length).toBeLessThanOrEqual(23_040);
+    expect(outText).toContain("保留既有核心目标");
+    expect(outText).toContain("omitted to fit summarization context window");
+    expect(outText).toContain("[Assistant]: 最新回复");
+    expect(outText).toContain("The messages above are a conversation to summarize.");
+  });
 });

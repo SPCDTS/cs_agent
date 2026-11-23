@@ -8,7 +8,7 @@ import { ownerIds, scopeOf, type Target, type TurnKind } from '../policy';
 import type { Settings, ModelSelection } from '../settings';
 import { QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS, recall } from '../context';
 import { DELEGATION_RULE, EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, WEB_RULE, subagentTurnIdentity, turnIdentity } from '../prompt';
-import { hostedSearchSteps, modelChange } from '../models';
+import { SWITCH_KEEP_RECENT_TOKENS, hostedSearchSteps, modelChange, selectionFromAgent } from '../models';
 import { captureModels } from '../requests/capture';
 import { contextSource } from '../requests/context-source';
 import { requestTrace } from '../requests/trace';
@@ -52,7 +52,7 @@ const WEB_SEND_RULE = "回复通道：本轮来自已通过管理口令认证的
 const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_page", "read_skill",
   "codemode"]);
 
-export type Runtime = { harness: Harness; root: Conversation; registry: Registry; selection: ModelSelection; profile: ToolProfile; mcp?: ThreadMcp; recovered: boolean };
+export type Runtime = { harness: Harness; root: Conversation; registry: Registry; selection: ModelSelection; profile: ToolProfile; mcp?: ThreadMcp; recovered: boolean; switchCompacting?: boolean };
 
 /** 装配模块只能使用显式宿主能力；执行状态、准入队列和 alarm 仍由 ThreadDO 拥有。 */
 export interface ThreadRuntimeHost {
@@ -348,7 +348,12 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     ],
   }));
   // Codex 默认先走 WebSocket 并按会话缓存连接；DO 里的连接跨不了请求，固定用 SSE。其他 provider 忽略这一项。
-  const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } },
+  let runtimeRef: Runtime | undefined;
+  const harness = await Harness.open(storage, { models, registry,
+    settings: () => ({
+      stream: { transport: "sse" },
+      ...(runtimeRef?.switchCompacting ? { compaction: { keepRecentTokens: SWITCH_KEEP_RECENT_TOKENS }, retry: { enabled: false } } : {}),
+    }),
     env: target => workspaceExecutionEnv({ id: "cloudflare:" + host.env.SANDBOX.idFromName(memory.ns), cwd: target.cwd,
       files: async callContext => {
         if (!await codingAllowed({ conversationId: target.conversationId, snapshot: target.read.snapshot.bind(target.read) }, callContext)) throw new Error("permission_denied");
@@ -358,8 +363,11 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     onWake: wake => host.ctx.waitUntil(host.runtimeWake(wake)),
   }, context);
   const root = await harness.root(context, { agent: modelChange(selection) });
-  await root.configure(modelChange(selection), context);
-  const runtime: Runtime = { harness, root, registry, selection, profile: "chat", mcp, recovered: false };
+  // 已有会话保留持久化 AgentDoc 中的原模型，交由 pump() -> syncModel() 先按原模型压缩后再切换。
+  const persistedAgent = selectionFromAgent(await root.agent(context), selection);
+  if (!persistedAgent.persisted) await root.configure(modelChange(selection), context);
+  const runtime: Runtime = { harness, root, registry, selection: persistedAgent.selection, profile: "chat", mcp, recovered: false };
+  runtimeRef = runtime;
   await applyToolProfile(runtime, await host.ctx.storage.get<ToolProfile>("tool_profile") ?? "chat", host.ctx.storage);
   // 快照先装配，远端离线不阻塞 Harness 恢复；首次执行仍强制核对完整目录。
   if (mcp) host.ctx.waitUntil(mcp.refreshAll().then(() => {}));

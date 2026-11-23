@@ -14,6 +14,7 @@ export { ModelAlarm, withAlarmWaitObserver } from "./alarm";
 export { MODEL_CREDENTIALS_SCHEMA, SqlCredentialStore, remoteCredentials, type CredentialLease, type CredentialMeta } from "./credentials";
 export { modelEgressDiagnostics } from "./egress";
 export { agentSearchOption, hostedSearchSteps, withResponsesSearch, type SearchItem, type SearchOptions, type SearchStep } from "./hosted-search";
+export { SWITCH_KEEP_RECENT_TOKENS, clampCompactionContext, selectionFromAgent, shouldCompactBeforeSwitch } from "./switch-compact";
 
 export const MODEL_PROVIDERS: Record<string, ProviderSpec> = {
   [DEEPSEEK_PROVIDER]: DEEPSEEK_SPEC,

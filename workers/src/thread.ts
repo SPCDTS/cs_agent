@@ -18,10 +18,10 @@ import { InboxDoc, LiveDoc, type Harness, type Conversation, type SettledSubmiss
 import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { Env } from "./env";
 import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target, type TurnKind } from "./policy";
-import { threadOpsSettings, effectiveSettings, type Settings } from "./settings";
+import { threadOpsSettings, effectiveSettings, type ModelSelection, type Settings } from "./settings";
 import { MESSAGE_SCHEMA, markMessageRecalled, recordMessage, recall, withReplyContext, type RecallOptions } from "./context";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
-import { ModelAlarm, hydrateCatalogs, modelChange, modelEgressDiagnostics, openModels, remoteCredentials, sameSelection, type ProviderCatalogs } from "./models";
+import { ModelAlarm, hydrateCatalogs, modelChange, modelEgressDiagnostics, openModels, remoteCredentials, sameSelection, shouldCompactBeforeSwitch, type ProviderCatalogs } from "./models";
 import { captureModels } from "./requests/capture";
 import { logDiag } from "./shared/diagnostics";
 import { MEMORY_SUPPORT_SCHEMA, MEMORY_LIFECYCLE_TRIGGERS } from "./memory/lifecycle";
@@ -68,6 +68,7 @@ export class ThreadDO extends DurableObject<Env> {
   private runtimeStarted = false;
   private extracting?: Promise<void>;
   private idleWait?: Promise<void>;
+  private switchCompacting?: Promise<void>;
   private readonly skills = new SkillCatalog(() => this.env.REGISTRY.getByName("main"));
   private readonly subagents = new ParentSubagents({ db: this.database, env: this.env, thread: () => this.namespace(),
     wake: input => this.queueInput(input), wakeBy: at => this.wakeBy(at), audit: (kind, detail) => this.audit(kind, detail) });
@@ -306,18 +307,86 @@ export class ThreadDO extends DurableObject<Env> {
     return applyToolProfile(runtime, profile, this.ctx.storage);
   }
 
-  // 改了模型后等当前运行空闲再切换，避免半途换模打断工具续轮；取不到设置时沿用当前模型。
+  private async modelCallable(selection: ModelSelection): Promise<boolean> {
+    const models = this.models();
+    return Boolean(models.getModel(selection.provider, selection.id))
+      && Boolean(await models.checkAuth(selection.provider).catch(() => false));
+  }
+
+  private async runSwitchCompact(runtime: Runtime): Promise<{ ok: boolean; taskId: number }> {
+    runtime.switchCompacting = true;
+    try {
+      const task = await runtime.root.compact(undefined, context);
+      const done = await runtime.harness.waitForTask(task, context);
+      if (done.state.status === "terminal" && done.state.outcome.status === "completed") {
+        const subId = done.state.outcome.result.submissionId;
+        if (subId !== undefined) await (await runtime.harness.submission(subId, context))?.wait(context);
+        return { ok: true, taskId: Number(task) };
+      }
+      return { ok: false, taskId: Number(task) };
+    } finally {
+      runtime.switchCompacting = false;
+    }
+  }
+
+  private async compactAndSwitchModel(runtime: Runtime, selection: ModelSelection): Promise<void> {
+    const from = runtime.selection;
+    let compacted = false;
+    if (await this.modelCallable(from)) {
+      try {
+        const res = await this.runSwitchCompact(runtime);
+        compacted = res.ok;
+        if (res.ok) {
+          await this.audit("session_compact", { taskId: res.taskId, status: "terminal", reason: "model_switch", model: `${from.provider}/${from.id}` });
+        } else {
+          logDiag(this.env, this.ctx, { level: "warn", event: "model_switch_compact_failed", thread: await this.namespace(), detail: { from: `${from.provider}/${from.id}`, to: `${selection.provider}/${selection.id}` } });
+        }
+      } catch (error) {
+        logDiag(this.env, this.ctx, { level: "warn", event: "model_switch_compact_failed", thread: await this.namespace(), error, detail: { from: `${from.provider}/${from.id}`, to: `${selection.provider}/${selection.id}` } });
+      }
+    }
+    await runtime.root.configure(modelChange(selection), context);
+    runtime.selection = selection;
+    if (!compacted && await this.modelCallable(selection)) {
+      try {
+        const res = await this.runSwitchCompact(runtime);
+        if (res.ok) {
+          await this.audit("session_compact", { taskId: res.taskId, status: "terminal", reason: "model_switch_fallback", model: `${selection.provider}/${selection.id}` });
+        }
+      } catch (error) {
+        logDiag(this.env, this.ctx, { level: "warn", event: "model_switch_fallback_compact_failed", thread: await this.namespace(), error });
+      }
+    }
+  }
+
+  // 改了模型后等当前运行空闲，先用原模型压缩历史再切换，节省新模型冷启动开销并避免小窗口溢出。
   private async syncModel(runtime: Runtime): Promise<"deferred" | undefined> {
     const selection = await this.loadSettings(true).then(settings => settings.model, () => runtime.selection);
     if (sameSelection(selection, runtime.selection)) return;
     if (!await this.idle(runtime)) return "deferred";
-    await runtime.root.configure(modelChange(selection), context);
-    runtime.selection = selection;
+    const view = await runtime.root.context(context);
+    if (!shouldCompactBeforeSwitch(view, runtime.selection, selection)) {
+      await runtime.root.configure(modelChange(selection), context);
+      runtime.selection = selection;
+      return;
+    }
+    const job = this.compactAndSwitchModel(runtime, selection)
+      .catch(async error => {
+        logDiag(this.env, this.ctx, { event: "model_switch_failed", thread: await this.namespace().catch(() => undefined), error });
+      })
+      .finally(async () => {
+        this.switchCompacting = undefined;
+        await this.requestPump(true).catch(() => {});
+      });
+    this.switchCompacting = job;
+    this.ctx.waitUntil(job);
+    return "deferred";
   }
 
   private async idle({ harness, root }: Runtime): Promise<boolean> {
+    if (this.switchCompacting) return false;
     const [live, inbox] = await Promise.all([harness.snapshot(LiveDoc, root.id, context), harness.snapshot(InboxDoc, root.id, context)]);
-    return !live?.run && !inbox?.items.length;
+    return !live?.run && !live?.compactions?.length && !inbox?.items.length;
   }
 
   private track(key: string, submission: Submission | undefined): void {
@@ -997,14 +1066,22 @@ export class ThreadDO extends DurableObject<Env> {
       await this.initialize();
       await this.bindNamespace(thread);
       const runtime = await this.open();
-      await this.syncModel(runtime);
       const { root, harness } = runtime;
       const live = await harness.snapshot(LiveDoc, root.id, context);
-      if (live?.compactions?.length) return { error: "busy" as const };
+      if (live?.compactions?.length || this.switchCompacting) return { error: "busy" as const };
+      const desired = await this.loadSettings(true).then(s => s.model, () => runtime.selection);
+      if (!sameSelection(desired, runtime.selection) && await this.idle(runtime) && !await this.modelCallable(runtime.selection)) {
+        await root.configure(modelChange(desired), context);
+        runtime.selection = desired;
+      }
       const task = await root.compact(instructions, context);
       this.ctx.waitUntil(harness.waitForTask(task, context).then(async result => {
+        if (!sameSelection(desired, runtime.selection) && await this.idle(runtime)) {
+          await root.configure(modelChange(desired), context);
+          runtime.selection = desired;
+        }
         await this.audit("session_compact", { taskId: Number(task), status: result.state.status });
-      }));
+      }).catch(() => {}));
       return { status: "started" as const, taskId: Number(task) };
     }));
   }

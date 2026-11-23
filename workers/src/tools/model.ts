@@ -156,7 +156,7 @@ export function createModelManagementExtension(deps: ModelManagementDeps) {
               target: args.target,
               ...(changesSelf ? {
                 effectiveFrom: "next_turn",
-                note: "主模型配置已保存；当前回合仍由原模型完成收尾回复，自下一回合起切换至新模型。",
+                note: "主模型配置已保存；当前回合仍由原模型完成收尾回复，下一回合切换前若历史较长会自动用原模型压缩上下文，再切换至新模型。",
               } : {}),
               self: current.model,
               subagentDefault: current.subagentModel ?? null,

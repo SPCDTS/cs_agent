@@ -333,4 +333,88 @@ describe("owner 非 subagent 自切主模型与子任务模型", () => {
     expect(await owner.submit(input(3, "测试过期子任务改模", 10000001))).toEqual({ status: "done" });
     expect(outputs.parent[2]).toContain("已过期清理");
   });
+
+  it("跨模型切换前先用原大窗口模型压缩历史以节省新模型冷启动，原模型压缩失败时自动回退由新模型压缩", async () => {
+    const events: { kind: "chat" | "compact"; model: string; hasSummary: boolean; chars: number }[] = [];
+    let failCompactFor: string | undefined;
+    const longChunkA = "A".repeat(9_000);
+    const longChunkB = "B".repeat(9_000);
+
+    const faux = fauxProvider({
+      models: [
+        { id: "test", contextWindow: 1_000_000 },
+        { id: "small-256k", contextWindow: 256_000 },
+        { id: "fallback-128k", contextWindow: 128_000 },
+      ],
+      tokensPerSecond: Infinity,
+    });
+    let activeModel = "unknown";
+    let stepIndex = 0;
+    const chatSteps: Step[] = [
+      { text: "第一轮长回复：" + longChunkA },
+      { tool: "model_manage", args: { action: "set", target: "self", model: { provider: "faux", id: "small-256k" } } },
+      { text: "第二轮收尾（仍在原 1M 模型）：" + longChunkB },
+      { text: "第三轮已在 256K 新模型轻装运行：" + "C".repeat(9_000) },
+      { tool: "model_manage", args: { action: "set", target: "self", model: { provider: "faux", id: "fallback-128k" } } },
+      { text: "第四轮收尾：" + "D".repeat(9_000) },
+      { text: "第五轮回退压缩后运行成功" },
+    ];
+
+    const respond: FauxResponseFactory = async transcript => {
+      faux.setResponses([respond]);
+      if (transcript.messages.some(m => m.role === "user" && typeof m.content === "string" && m.content.startsWith(MEMORY_EXTRACT_PROMPT))) {
+        return fauxAssistantMessage("[]");
+      }
+      const isCompact = transcript.messages.some(
+        m => m.role === "system" && typeof m.content === "string" && m.content.includes("context summarization assistant"),
+      );
+      const raw = JSON.stringify(transcript.messages);
+      const hasSummary = raw.includes("<summary>");
+      if (isCompact) {
+        events.push({ kind: "compact", model: activeModel, hasSummary, chars: raw.length });
+        if (failCompactFor === activeModel) {
+          return { ...fauxAssistantMessage(""), stopReason: "error", errorMessage: "upstream_quota_exceeded" };
+        }
+        return fauxAssistantMessage(`## Goal\n延续任务（由 ${activeModel} 压缩）\n\n## Progress\n### Done\n- [x] 已压缩历史`);
+      }
+      events.push({ kind: "chat", model: activeModel, hasSummary, chars: raw.length });
+      const next = chatSteps[stepIndex++];
+      if (!next || typeof next === "function") return fauxAssistantMessage("完");
+      if ("tool" in next) return fauxAssistantMessage([fauxToolCall(next.tool, next.args)], { stopReason: "toolUse" });
+      return fauxAssistantMessage(next.text);
+    };
+    faux.setResponses([respond]);
+
+    const wrapped = {
+      ...faux.provider,
+      stream: ((m, c, o) => { activeModel = m.id; return faux.provider.stream(m, c, o); }) as typeof faux.provider.stream,
+      streamSimple: ((m, c, o) => { activeModel = m.id; return faux.provider.streamSimple(m, c, o); }) as typeof faux.provider.streamSimple,
+    };
+    vi.spyOn(models, "openModels").mockImplementation(() => {
+      const m = createModels();
+      m.setProvider(wrapped);
+      return m;
+    });
+
+    const owner = env.THREAD.getByName("owner");
+    expect(await owner.submit(input(1, "先写入大段上下文", 10000001))).toEqual({ status: "done" });
+    expect(await owner.submit(input(2, "切换到 256K 模型", 10000001))).toEqual({ status: "done" });
+    expect(await owner.submit(input(3, "验证新模型冷启动已压缩", 10000001))).toEqual({ status: "done" });
+
+    // 第 1、2 轮全部在原模型 test 运行；第 3 轮开始前先由原模型 test 执行 compact，随后 small-256k 直接读取摘要
+    const firstCompactIdx = events.findIndex(e => e.kind === "compact");
+    expect(firstCompactIdx).toBe(3);
+    expect(events[firstCompactIdx]).toMatchObject({ kind: "compact", model: "test" });
+    const turn3Chat = events[firstCompactIdx + 1]!;
+    expect(turn3Chat).toMatchObject({ kind: "chat", model: "small-256k", hasSummary: true });
+
+    // 模拟原模型配额耗尽导致切前压缩失败：切换不卡死，自动回退由新模型 fallback-128k 压缩后再跑第 5 轮
+    failCompactFor = "small-256k";
+    expect(await owner.submit(input(4, "继续累积并切换到 128K 模型", 10000001))).toEqual({ status: "done" });
+    expect(await owner.submit(input(5, "验证原模型失效回退压缩", 10000001))).toEqual({ status: "done" });
+
+    const laterCompacts = events.slice(firstCompactIdx + 1).filter(e => e.kind === "compact");
+    expect(laterCompacts.map(e => e.model)).toEqual(["small-256k", "fallback-128k"]);
+    expect(events.at(-1)).toMatchObject({ kind: "chat", model: "fallback-128k", hasSummary: true });
+  });
 });

@@ -5,8 +5,9 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { SqliteExecutor } from "@earendil-works/chord/sqlite";
 import { createRegistry, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, section, type Conversation, type EntryId } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
+import type { MutableModels } from "@earendil-works/pi-ai/models";
 import type { Env } from "../env";
-import { ModelAlarm, loadProviderCatalogs, modelChange, openModels, remoteCredentials, sameSelection, usesDynamicCatalog, type ProviderCatalogs } from "../models";
+import { ModelAlarm, SWITCH_KEEP_RECENT_TOKENS, loadProviderCatalogs, modelChange, openModels, remoteCredentials, sameSelection, selectionFromAgent, shouldCompactBeforeSwitch, usesDynamicCatalog, type ProviderCatalogs } from "../models";
 import type { ModelSelection } from "../settings";
 import { captureModels } from "../requests/capture";
 import { requestTrace } from "../requests/trace";
@@ -30,7 +31,7 @@ const SUBAGENT_RULE = "你是主 agent 派出的子 agent，只负责完成交�
 /** queued → running → answered（回答已落库）→ reported（父线程已收下）；cancelled 是取消时还没回答的项。 */
 type InboxStatus = "queued" | "running" | "answered" | "reported" | "cancelled";
 type InboxRow = { request_id: string; text: string; received_at: number; status: InboxStatus; answer: string | null; outcome: "done" | "failed" | null };
-type Runtime = { harness: Harness; root: Conversation; selection: ModelSelection };
+type Runtime = { harness: Harness; root: Conversation; models: MutableModels; selection: ModelSelection; switchCompacting?: boolean };
 
 const state = (meta: SubagentMeta): SubagentState => ({ status: meta.status, version: meta.version });
 
@@ -253,6 +254,45 @@ export class SubagentDO extends DurableObject<Env> {
     return true;
   }
 
+  private async runSwitchCompact(runtime: Runtime): Promise<boolean> {
+    runtime.switchCompacting = true;
+    try {
+      const task = await runtime.root.compact(undefined, context);
+      const done = await runtime.harness.waitForTask(task, context);
+      if (done.state.status === "terminal" && done.state.outcome.status === "completed") {
+        const subId = done.state.outcome.result.submissionId;
+        if (subId !== undefined) await (await runtime.harness.submission(subId, context))?.wait(context);
+        return true;
+      }
+      return false;
+    } finally {
+      runtime.switchCompacting = false;
+    }
+  }
+
+  private async switchModel(runtime: Runtime, next: ModelSelection, meta: SubagentMeta): Promise<void> {
+    if (usesDynamicCatalog(next.provider) || usesDynamicCatalog(runtime.selection.provider)) await this.refreshCatalogs();
+    const view = await runtime.root.context(context);
+    if (!shouldCompactBeforeSwitch(view, runtime.selection, next)) {
+      await runtime.root.configure(modelChange(next), context);
+      runtime.selection = next;
+      return;
+    }
+    const callable = async (s: ModelSelection) =>
+      Boolean(runtime.models.getModel(s.provider, s.id)) && Boolean(await runtime.models.checkAuth(s.provider).catch(() => false));
+    let compacted = false;
+    if (await callable(runtime.selection)) {
+      try { compacted = await this.runSwitchCompact(runtime); }
+      catch (error) { logDiag(this.env, this.ctx, { level: "warn", event: "subagent_switch_compact_failed", thread: meta.parent, actor: meta.id, error }); }
+    }
+    await runtime.root.configure(modelChange(next), context);
+    runtime.selection = next;
+    if (!compacted && await callable(next)) {
+      try { await this.runSwitchCompact(runtime); }
+      catch (error) { logDiag(this.env, this.ctx, { level: "warn", event: "subagent_switch_fallback_compact_failed", thread: meta.parent, actor: meta.id, error }); }
+    }
+  }
+
   private async answer(row: InboxRow): Promise<void> {
     if (row.status === "queued") await this.update(async meta => {
       if (!meta.progress) return false;
@@ -263,9 +303,7 @@ export class SubagentDO extends DurableObject<Env> {
     const runtime = await this.open();
     const currentMeta = await this.meta();
     if (currentMeta && !sameSelection(currentMeta.model, runtime.selection)) {
-      if (usesDynamicCatalog(currentMeta.model.provider)) await this.refreshCatalogs();
-      await runtime.root.configure(modelChange(currentMeta.model), context);
-      runtime.selection = currentMeta.model;
+      await this.switchModel(runtime, currentMeta.model, currentMeta);
     }
     const { harness, root } = runtime;
     // requestId 让驱逐后的重交找回同一提交，不会把同一条输入跑两遍。
@@ -369,7 +407,12 @@ export class SubagentDO extends DurableObject<Env> {
     // 与 ThreadDO 相同：DO 里的连接跨不了请求，Codex 固定走 SSE。
     const storage = await openDurableObjectSqliteStorage(this.observedStorage, { prefix: "pi_" });
     this.projection.install();
-    const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } },
+    let runtimeRef: Runtime | undefined;
+    const harness = await Harness.open(storage, { models, registry,
+      settings: () => ({
+        stream: { transport: "sse" },
+        ...(runtimeRef?.switchCompacting ? { compaction: { keepRecentTokens: SWITCH_KEEP_RECENT_TOKENS }, retry: { enabled: false } } : {}),
+      }),
       env: async target => {
         const access = await parent().validateSubagentAccess(meta.id);
         if (!access?.capabilities.coding || !access.authority.owner) return;
@@ -384,10 +427,13 @@ export class SubagentDO extends DurableObject<Env> {
       },
     }, context);
     const root = await harness.root(context, { agent: modelChange(meta.model) });
-    // 已存在的持久化 root 不会因 harness.root 的初始参数覆盖旧模型，显式对齐 meta.model。
-    await root.configure(modelChange(meta.model), context);
+    // 已有会话保留持久化 AgentDoc 的原模型，在 answer() 切换边界先用原模型压缩再切换。
+    const persistedAgent = selectionFromAgent(await root.agent(context), meta.model);
+    if (usesDynamicCatalog(persistedAgent.selection.provider) && !usesDynamicCatalog(meta.model.provider)) await this.refreshCatalogs();
+    if (!persistedAgent.persisted) await root.configure(modelChange(meta.model), context);
     // 读取子会话只打开存储；执行由 alarm → drain → answer 的 submit 启动。
     void harness.closed.then(() => { this.runtime = undefined; void delegated.close(); });
-    return { harness, root, selection: meta.model };
+    runtimeRef = { harness, root, models, selection: persistedAgent.selection };
+    return runtimeRef;
   }
 }
