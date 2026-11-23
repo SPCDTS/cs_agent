@@ -194,7 +194,7 @@ it.each(["owner",group])("known YAML password block is completely redacted in au
     await s.storage.deleteAlarm();
   });
 });
-it("capacity remains full after successful pending retry; existing proof survives but new IDs stay rejected",async()=>{
+it("legacy unticketed backlog stays protected until lifecycle migration; existing pending proof survives",async()=>{
   await seed("owner");
   await expect(send("owner",group,"pending-limit")).rejects.toThrow("agent_recipient_not_ready");
   await runInDurableObject(env.THREAD.getByName("owner"),async(_i,s)=>{

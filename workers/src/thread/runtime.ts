@@ -1,4 +1,4 @@
-import { agentSendTool } from "../communication/tool";
+import { agentSendTool, durableAgentTicket } from "../communication/tool";
 import type { AgentReceipt, AgentSend } from "../communication/model";
 import { BACKGROUND_CONTEXT, type Context } from '@earendil-works/chord/context';
 import { Type } from '@earendil-works/pi-ai';
@@ -64,7 +64,8 @@ export interface ThreadRuntimeHost {
   skills: SkillCatalog;
   subagents: ParentSubagents;
   namespace(): Promise<string>;
-  agentSend(input: InboundRow, args: AgentSend, seed: string): Promise<AgentReceipt>;
+  agentSend(input: InboundRow, args: AgentSend, seed: string, ticket: import("../communication/service").AgentTicket): Promise<AgentReceipt>;
+  agentReserve(input: InboundRow, args: AgentSend, seed: string, at: number): Promise<import("../communication/service").AgentTicket>;
   readAgentFile(input: InboundRow, path: string, options: { offset?: number; limit?: number }): Promise<import("../sandbox/client").ReadResult>;
   models(): MutableModels;
   loadSettings(fresh?: boolean): Promise<Settings>;
@@ -149,7 +150,9 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     agentSendTool(async (args, seed, api, c) => {
       const input = await host.currentInput(harness, api, api.conversationId, c);
       if (!input) throw new Error("agent_input_missing");
-      return host.agentSend(input, args, seed);
+      if (input.kind === "schedule" || input.kind === "event") throw new Error("agent_turn_denied");
+      const ticket = await durableAgentTicket(api, c, at => host.agentReserve(input, args, seed, at));
+      return host.agentSend(input, args, seed, ticket);
     }),
     createWebPageTool(),
     createImageTool({ models: host.models(), repository: new MediaRepository({ bucket: host.env.ASSETS, scope: memory.ns }),

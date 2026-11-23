@@ -1,3 +1,5 @@
+import { durableAgentTicket } from "../communication/tool";
+import type { AgentTicket } from "../communication/service";
 import type { Context } from "@earendil-works/chord/context";
 import type { SqliteExecutor } from "@earendil-works/chord/sqlite";
 import { Type } from "@earendil-works/pi-ai";
@@ -41,7 +43,8 @@ type Host = {
   db: DurableObjectSqliteDatabase; env: Env;
   /** 父线程键，也是子 DO 名字的一段。 */
   thread(): Promise<string>;
-  communicate(to: string, text: string, seed: string, identity: SubagentIdentity): Promise<import("../communication/model").AgentReceipt>;
+  communicate(to: string, text: string, seed: string, identity: SubagentIdentity, ticket?: AgentTicket): Promise<import("../communication/model").AgentReceipt>;
+  reserveCommunication(args: import("../communication/model").AgentSend, seed: string, at: number, generation?: number): Promise<AgentTicket>;
   /** 把汇报作为 kind=subagent 的输入入队，入站键幂等。 */
   wake(input: InboundInput): Promise<"accepted" | "duplicate">;
   /** 让父 DO 的 alarm 不晚于 at 触发。 */
@@ -126,7 +129,7 @@ export class ParentSubagents {
     });
   }
 
-  async message(caller: SubagentCaller, id: string, text: string, seed: string): Promise<Reply> {
+  async message(caller: SubagentCaller, id: string, text: string, seed: string, ticket?: AgentTicket | (() => Promise<AgentTicket>)): Promise<Reply> {
     const row = await this.row(id);
     if (!row) return { text: `本会话没有子 agent ${id}`, error: true };
     if (row.status === "cancelled" || row.status === "timeout") return { text: `子 agent ${id} ${STATUS_TEXT[row.status]}，不能再发消息；需要的话重新 spawn。`, error: true };
@@ -139,7 +142,7 @@ export class ParentSubagents {
       throw error;
     }
     const thread = await this.host.thread();
-    await this.host.communicate(subagentName(thread, id), text, seed, caller.identity);
+    await this.host.communicate(subagentName(thread, id), text, seed, caller.identity, typeof ticket === "function" ? await ticket() : ticket);
     const current = await this.child(thread, id).status();
     if (current) await this.apply(id, { status: current.meta.status, version: current.meta.version });
     const deadline = row.timeout_ms ? Date.now() + row.timeout_ms : 0;
@@ -240,7 +243,9 @@ export class ParentSubagents {
         }
         if (args.action === "message") {
           if (!args.id || !args.text) return reply("message 需要 id 与 text", true);
-          const result = await this.message(who, args.id, args.text, seed);
+          const thread = await this.host.thread();
+          const result = await this.message(who, args.id, args.text, seed, () => durableAgentTicket(api, context,
+            at => this.host.reserveCommunication({ to: subagentName(thread, args.id!), text: args.text }, seed, at, who.origin.generation)));
           return reply(result.text, result.error);
         }
         if (args.action === "cancel") {

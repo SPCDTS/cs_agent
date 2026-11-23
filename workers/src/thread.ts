@@ -1,5 +1,5 @@
 import { childAddress, fingerprint, type AgentMessage, type AgentReceipt, type AgentSend } from "./communication/model";
-import { importFiles, incomingText, proves, sendAgent, verifyMessage } from "./communication/service";
+import { importFiles, incomingText, proves, reserveAgent, sendAgent, verifyMessage, type AgentTicket } from "./communication/service";
 import { MemoryAdmin } from "./memory/admin";
 import { McpAdmin } from "./mcp/admin";
 import { openThreadRuntime, applyToolProfile, type Runtime } from "./thread/runtime";
@@ -73,7 +73,8 @@ export class ThreadDO extends DurableObject<Env> {
   private idleWait?: Promise<void>;
   private readonly skills = new SkillCatalog(() => this.env.REGISTRY.getByName("main"));
   private readonly subagents = new ParentSubagents({ db: this.database, env: this.env, thread: () => this.namespace(),
-    communicate: (to, text, seed, identity) => this.sendAgentMessage({ to, text }, seed, undefined, identity),
+    communicate: (to, text, seed, identity, ticket) => this.sendAgentMessage({ to, text }, seed, undefined, identity, ticket),
+    reserveCommunication: (args, seed, at, generation) => this.reserveAgentMessage(args, seed, at, generation),
     wake: input => this.queueInput(input), wakeBy: at => this.wakeBy(at), audit: (kind, detail) => this.audit(kind, detail) });
 
   private readonly memoryAdmin = new MemoryAdmin({
@@ -202,7 +203,12 @@ export class ThreadDO extends DurableObject<Env> {
       namespace: () => this.namespace(), models: () => this.models(), loadSettings: fresh => this.loadSettings(fresh),
       installProjection: () => this.projection.install(), currentInput: (harness, read, id, context) => this.currentInput(harness, read, id, context),
       memoryBinding: (input, ns) => this.memoryBinding(input, ns), sessionGeneration: () => this.sessionGeneration(),
-      agentSend: (input, args, seed) => this.sendAgentMessage(args, seed, input),
+      agentSend: (input, args, seed, ticket) => this.sendAgentMessage(args, seed, input, undefined, ticket),
+      agentReserve: async (input, args, seed, at) => {
+        if (input.session_generation !== await this.sessionGeneration()) throw new Error("agent_session_revoked");
+        await this.narrowAgentRecipient(args, input);
+        return this.reserveAgentMessage(args, seed, at, input.session_generation);
+      },
       readAgentFile: async (input, path, options) => decodeFileRead((await this.readAgentBlob(input, path)).bytes, options),
       ownerTurnKind: input => this.ownerTurnKind(input), sandboxTaskForInput: input => this.sandboxTaskForInput(input),
       subagentCaller: (input, selection) => this.subagentCaller(input, selection), scheduleAccess: input => this.scheduleAccess(input),
@@ -579,15 +585,18 @@ export class ThreadDO extends DurableObject<Env> {
     await this.subagents.refresh(id);
   }
 
+  async agentGeneration(): Promise<number> { await this.initialize(); return this.sessionGeneration(); }
+  private async reserveAgentMessage(args: AgentSend, seed: string, startedAt: number, expectedGeneration?: number): Promise<AgentTicket> {
+    await this.initialize();
+    const generation = await this.sessionGeneration();
+    if (expectedGeneration !== undefined && generation !== expectedGeneration) throw new Error("agent_session_revoked");
+    return reserveAgent({ env: this.env, storage: this.ctx.storage, agentSessionId: await this.namespace(), generation }, args, seed, startedAt);
+  }
   async agentProof(id: string, hash: string): Promise<boolean> {
     await this.initialize();
     return proves(this.ctx.storage, id, hash, await this.sessionGeneration());
   }
-  private async sendAgentMessage(args: AgentSend, seed: string, input?: InboundRow, caller?: SubagentIdentity): Promise<AgentReceipt> {
-    await this.initialize();
-    const generation = await this.sessionGeneration();
-    if (input && input.session_generation !== generation) throw new Error("agent_session_revoked");
-    if (input && (input.kind === "schedule" || input.kind === "event")) throw new Error("agent_turn_denied");
+  private async narrowAgentRecipient(args: AgentSend, input?: InboundRow, caller?: SubagentIdentity): Promise<void> {
     const child = childAddress(args.to);
     if (child?.parent === await this.namespace()) {
       const identity = caller ?? (input?.kind === "message" ? { turn: "message" as const,
@@ -595,6 +604,13 @@ export class ThreadDO extends DurableObject<Env> {
           ...(isWebAdmin(input) ? { admin: true as const } : {}) } } : { turn: "agent" as const });
       await this.subagents.narrow(child.id, identity);
     }
+  }
+  private async sendAgentMessage(args: AgentSend, seed: string, input?: InboundRow, caller?: SubagentIdentity, ticket?: AgentTicket): Promise<AgentReceipt> {
+    await this.initialize();
+    const generation = await this.sessionGeneration();
+    if (input && input.session_generation !== generation) throw new Error("agent_session_revoked");
+    if (input && (input.kind === "schedule" || input.kind === "event")) throw new Error("agent_turn_denied");
+    await this.narrowAgentRecipient(args, input, caller);
     const receipt = await sendAgent({ env: this.env, storage: this.ctx.storage, agentSessionId: await this.namespace(), generation,
       readFile: async path => {
         const task = input && await this.sandboxTaskForInput(input);
@@ -602,7 +618,7 @@ export class ThreadDO extends DurableObject<Env> {
         if (!task?.permissions.coding) throw new Error("agent_file_access_denied");
         return this.env.SANDBOX.getByName(await this.namespace()).readBlob(path);
       },
-    }, args, seed);
+    }, args, seed, undefined, ticket);
     await this.audit("agent_send", { to: args.to, messageId: receipt.messageId, status: receipt.status, files: receipt.files.length });
     return receipt;
   }
@@ -621,7 +637,7 @@ export class ThreadDO extends DurableObject<Env> {
     await this.initialize();
     const ns = await this.namespace();
     if (!ns || !this.ctx.id.equals(this.env.THREAD.idFromName(message.to))) throw new Error("agent_recipient_not_ready");
-    await verifyMessage(this.env, ns, message);
+    await verifyMessage(this.env, ns, message, await this.sessionGeneration());
     if (message.report) {
       const source = /^sub:(.+):([0-9a-f-]{36})$/.exec(message.from);
       if (!source || source[1] !== ns || source[2] !== message.report.subagentId) throw new Error("agent_source_unverified");
@@ -632,8 +648,11 @@ export class ThreadDO extends DurableObject<Env> {
     return this.serial(async () => {
       const hash = fingerprint(message);
       const existing = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id=?", message.id);
+      if (message.targetGeneration !== undefined && message.targetGeneration !== await this.sessionGeneration()) throw new Error("agent_session_revoked");
       if (existing) {
+        if (existing.session_generation !== await this.sessionGeneration()) throw new Error("agent_session_revoked");
         if (existing.agent_hash !== hash) throw new Error("agent_message_conflict");
+        if (message.targetGeneration !== undefined && message.files.length) await this.env.SANDBOX.getByName(ns).retireAgentAttachments(message.id, message.files.length);
         return { messageId: message.id, status: "duplicate" as const, files: JSON.parse(existing.agent_files ?? "[]") as string[] };
       }
       const generation = await this.sessionGeneration();
@@ -646,6 +665,7 @@ export class ThreadDO extends DurableObject<Env> {
           generation, message.from, hash, JSON.stringify(paths), authority.message_id);
         await this.armPump();
       });
+      if (message.targetGeneration !== undefined && message.files.length) await this.env.SANDBOX.getByName(ns).retireAgentAttachments(message.id, message.files.length);
       return { messageId: message.id, status: "accepted" as const, files: paths };
     });
   }
@@ -792,6 +812,9 @@ export class ThreadDO extends DurableObject<Env> {
     const normalized = workPath(path);
     if (!/^\/work\/agent-files\/[0-9a-f]{64}\/[0-9]+-/.test(normalized)) throw new Error("agent_file_access_denied");
     return (await this.subagentAttachmentWorkspace(id)).saveAttachment(normalized, bytes, operationId);
+  }
+  async subagentRetireAttachments(id: string, messageId: string, count: number): Promise<void> {
+    await (await this.subagentAttachmentWorkspace(id)).retireAgentAttachments(messageId, count);
   }
   async subagentReadBlob(id: string, path: string) {
     const normalized = workPath(path), access = await this.subagentAccess(id);

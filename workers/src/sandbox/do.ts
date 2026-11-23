@@ -126,6 +126,10 @@ export class SandboxDO extends DurableObject<Env> {
   async saveAttachment(path: string, bytes: Uint8Array, operationId?: string): Promise<void> {
     await this.workspace.saveAttachment(path, bytes, operationId ?? crypto.randomUUID());
   }
+  async retireAgentAttachments(messageId: string, count: number): Promise<void> {
+    if (!/^agent:[0-9a-f]{64}$/.test(messageId) || !Number.isInteger(count) || count < 0 || count > 5) throw new Error("invalid_request");
+    await this.workspace.retireAttachments(Array.from({ length: count }, (_, index) => "agent-import:" + messageId + ":" + index));
+  }
   async editFile(path: string, edits: FileEdit[], operationId?: string): Promise<{ replaced: number }> {
     const result = await this.result({ kind: "edit", path, edits }, operationId);
     if (!("replaced" in result)) throw new Error("sandbox_error");

@@ -143,6 +143,14 @@ export class WorkspaceManager {
     });
   }
 
+  /** 仅在接收方已持久入箱后调用；部分导入或 unknown 不得释放附件证明。 */
+  retireAttachments(operationIds: string[]): Promise<void> {
+    return this.serial(async () => {
+      const keys = await Promise.all(operationIds.map(async id => "workspace:attachment:" + await sha256(id)));
+      if (keys.length) await this.deps.storage.delete(keys);
+    });
+  }
+
   private async ensureRuntime(manifest: WorkspaceManifest): Promise<void> {
     if (this.hydrated && this.deps.runtimeReady()) return;
     this.hydrated = false;

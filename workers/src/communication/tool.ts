@@ -21,3 +21,12 @@ export function agentSendTool(send: (input: AgentSend, seed: string, api: ToolEx
     },
   });
 }
+
+/** 在工具原有持久 memo 中保存票据，DO 驱逐/重放不得以当前时间重新签发。 */
+export async function durableAgentTicket(api: ToolExecutionApi, context: Context, reserve: (startedAt: number) => Promise<import("./service").AgentTicket>) {
+  const saved = await api.memo<import("./service").AgentTicket>("cs.agent.ticket", context);
+  if (saved) return saved;
+  const task = await api.getTask(api.taskId, context);
+  if (!task) throw new Error("agent_message_expired");
+  return api.memo("cs.agent.ticket", await reserve(task.startedAt ?? 0), context);
+}

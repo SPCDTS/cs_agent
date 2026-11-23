@@ -1,6 +1,6 @@
 import { redactReport, fingerprint, type AgentMessage, type AgentReceipt, type AgentSend } from "../communication/model";
-import { importFiles, incomingText, proves, sendAgent, verifyMessage } from "../communication/service";
-import { agentSendTool } from "../communication/tool";
+import { hasPendingAgentProof, importFiles, incomingText, proves, reserveAgent, sendAgent, verifyMessage, type AgentTicket } from "../communication/service";
+import { agentSendTool, durableAgentTicket } from "../communication/tool";
 import type { SubagentReport } from "./model";
 import { workspaceExecutionEnv } from "../sandbox/execution-env";
 import { ProjectionPublisher, observeWrites } from "../requests/projection";
@@ -32,7 +32,7 @@ const SUBAGENT_RULE = "你是主 agent 派出的子 agent，只负责完成交�
 
 /** queued → running → answered（回答已落库）→ reported（父线程已收下）；cancelled 是取消或父关系永久撤销后退休的项。 */
 type InboxStatus = "queued" | "running" | "answered" | "reported" | "cancelled";
-type InboxRow = { request_id: string; text: string; received_at: number; status: InboxStatus; answer: string | null; outcome: "done" | "failed" | null };
+type InboxRow = { request_id: string; text: string; received_at: number; status: InboxStatus; answer: string | null; outcome: "done" | "failed" | null; answered_at?: number; report_ticket?: string | null };
 type Runtime = { harness: Harness; root: Conversation };
 
 const state = (meta: SubagentMeta): SubagentState => ({ status: meta.status, version: meta.version });
@@ -60,6 +60,8 @@ export class SubagentDO extends DurableObject<Env> {
     `).then(async () => {
       const columns = await this.database.all<{ name: string }>("PRAGMA table_info(inbox)");
       for (const name of ["agent_hash", "agent_files"]) if (!columns.some(c => c.name === name)) await this.database.exec("ALTER TABLE inbox ADD COLUMN " + name + " TEXT");
+      if (!columns.some(c => c.name === "report_ticket")) await this.database.exec("ALTER TABLE inbox ADD COLUMN report_ticket TEXT");
+      if (!columns.some(c => c.name === "answered_at")) await this.database.exec("ALTER TABLE inbox ADD COLUMN answered_at INTEGER");
       this.projection.install();
     });
   }
@@ -153,6 +155,16 @@ export class SubagentDO extends DurableObject<Env> {
     return !!meta && meta.status !== "cancelled" && !!await this.database.get(
       "SELECT 1 FROM inbox,json_each(inbox.agent_files) WHERE json_each.value=? LIMIT 1", path);
   }
+  async agentGeneration(): Promise<number> {
+    const meta = await this.meta();
+    if (!meta || meta.status === "cancelled") throw new Error("agent_session_ended");
+    return meta.createdAt;
+  }
+  private async reserveAgentMessage(args: AgentSend, seed: string, at: number, report?: SubagentReport): Promise<AgentTicket> {
+    const meta = await this.meta();
+    if (!meta || meta.status === "cancelled") throw new Error("agent_session_ended");
+    return reserveAgent({ env: this.env, storage: this.ctx.storage, agentSessionId: subagentName(meta.parent, meta.id), generation: meta.createdAt }, args, seed, at, report);
+  }
   async agentProof(id: string, hash: string): Promise<boolean> {
     const meta = await this.meta();
     return !!meta && meta.status !== "cancelled" && await this.env.THREAD.getByName(meta.parent).agentChildAllowed(meta.id) && proves(this.ctx.storage, id, hash, meta.createdAt);
@@ -167,13 +179,14 @@ export class SubagentDO extends DurableObject<Env> {
     const meta = await this.meta();
     if (!meta || meta.status === "cancelled") throw new Error("agent_session_ended");
     if (message.report) throw new Error("agent_invalid_message");
-    await verifyMessage(this.env, subagentName(meta.parent, meta.id), message);
+    await verifyMessage(this.env, subagentName(meta.parent, meta.id), message, meta.createdAt);
     const parent = this.env.THREAD.getByName(meta.parent);
     const previous = await this.database.get<{ agent_hash: string | null; agent_files: string | null }>("SELECT agent_hash,agent_files FROM inbox WHERE request_id=?", message.id);
     if (previous) {
       if (previous.agent_hash !== fingerprint(message)) throw new Error("agent_message_conflict");
       // 回执丢失后仍补同步父状态，但不触碰接收方已编辑/删除的副本。
       await parent.agentChildWake(meta.id);
+      if (message.targetGeneration !== undefined && message.files.length) await parent.subagentRetireAttachments(meta.id, message.id, message.files.length);
       return { messageId: message.id, status: "duplicate", files: JSON.parse(previous.agent_files ?? "[]") as string[] };
     }
     if (message.from !== meta.parent) await parent.agentChildNarrow(meta.id);
@@ -181,14 +194,15 @@ export class SubagentDO extends DurableObject<Env> {
     const result = await this.message(message.id, incomingText(message, paths), { hash: fingerprint(message), files: paths });
     if (result.result === "ended") throw new Error("agent_session_ended");
     await parent.agentChildWake(meta.id);
+    if (message.targetGeneration !== undefined && message.files.length) await parent.subagentRetireAttachments(meta.id, message.id, message.files.length);
     return { messageId: message.id, status: result.result, files: paths };
   }
-  private async sendAgentMessage(args: AgentSend, seed: string, report?: SubagentReport): Promise<AgentReceipt> {
+  private async sendAgentMessage(args: AgentSend, seed: string, report?: SubagentReport, ticket?: AgentTicket): Promise<AgentReceipt> {
     const meta = await this.meta();
     if (!meta || meta.status === "cancelled") throw new Error("agent_session_ended");
     return sendAgent({ env: this.env, storage: this.ctx.storage, agentSessionId: subagentName(meta.parent, meta.id), generation: meta.createdAt,
       readFile: path => this.env.THREAD.getByName(meta.parent).subagentReadBlob(meta.id, path),
-    }, args, seed, report);
+    }, args, seed, report, ticket);
   }
 
   /** 只取消运行中的；已回答未送达的汇报也不再补送。 */
@@ -228,6 +242,14 @@ export class SubagentDO extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     this.modelAlarm.dispatch();
     const meta = await this.meta();
+    // 通用保留期也不能吞掉仍有效关系下的未知投递/未汇报回答；显式取消或父代次撤销仍可退休。
+    if (meta && meta.status !== "cancelled" && Date.now() >= (meta.endedAt ?? Infinity) + RETENTION_MS
+      && (await this.database.get("SELECT 1 FROM inbox WHERE status='answered' LIMIT 1") || await hasPendingAgentProof(this.ctx.storage, meta.createdAt))
+      && await this.env.THREAD.getByName(meta.parent).agentChildAllowed(meta.id)) {
+      await this.ctx.storage.setAlarm(Date.now() + HEARTBEAT_MS);
+      this.kick();
+      return;
+    }
     if (meta && Date.now() < (meta.endedAt ?? Infinity) + RETENTION_MS) {
       this.ctx.waitUntil(this.projection.flush());
       await this.update(async () => false);
@@ -306,7 +328,7 @@ export class SubagentDO extends DurableObject<Env> {
     await this.update(async (meta, tx) => {
       // 取消后迟到的回答既不落库也不汇报。
       if (meta.status === "cancelled") return false;
-      await tx.run("UPDATE inbox SET status = 'answered', answer = ?, outcome = ? WHERE request_id = ? AND status = 'running'", text, outcome, row.request_id);
+      await tx.run("UPDATE inbox SET status = 'answered', answer = ?, outcome = ?, answered_at = ? WHERE request_id = ? AND status = 'running'", text, outcome, Date.now(), row.request_id);
       if (await tx.get("SELECT 1 FROM inbox WHERE status IN ('queued', 'running') LIMIT 1")) return false;
       meta.status = outcome;
       if (outcome === "failed" || meta.progress?.kind !== "result") delete meta.progress;
@@ -326,11 +348,24 @@ export class SubagentDO extends DurableObject<Env> {
     // 自动汇报保留全文与任务状态；疑似凭据值明确脱敏，不丢弃整份报告。
     const text = redactReport(row.answer ?? "");
     try {
-      await this.sendAgentMessage({ to: meta.parent, text: "子 agent 自动汇报（正文随报告交回）" }, "report:" + row.request_id,
-        { subagentId: meta.id, requestId: row.request_id, text, identity: meta.identity, outcome, state: state(meta) });
+      const args = { to: meta.parent, text: "子 agent 自动汇报（正文随报告交回）" }, seed = "report:" + row.request_id;
+      const report = { subagentId: meta.id, requestId: row.request_id, text, identity: meta.identity, outcome, state: state(meta) };
+      // 回答记录已存在；票据在发送前落库，驱逐后不重新签发。
+      const current = await this.database.get<InboxRow>("SELECT * FROM inbox WHERE request_id=?", row.request_id);
+      if (!current) throw new Error("agent_message_expired");
+      if (current.status === "reported" || current.status === "cancelled") return;
+      let ticket = current?.report_ticket ? JSON.parse(current.report_ticket) as AgentTicket : undefined;
+      if (!ticket) {
+        const candidate = await this.reserveAgentMessage(args, seed, current?.answered_at ?? current?.received_at ?? meta.createdAt, report);
+        await this.database.run("UPDATE inbox SET report_ticket=? WHERE request_id=? AND report_ticket IS NULL", JSON.stringify(candidate), row.request_id);
+        const saved = await this.database.get<InboxRow>("SELECT * FROM inbox WHERE request_id=?", row.request_id);
+        if (!saved?.report_ticket) throw new Error("agent_message_expired");
+        ticket = JSON.parse(saved.report_ticket) as AgentTicket;
+      }
+      await this.sendAgentMessage(args, seed, report, ticket);
     } catch (error) {
       // 只有确证永久结束的关系退休；网络未知、临时失败保留 answered 重试。
-      if (!(error instanceof Error) || !["agent_session_denied", "agent_session_revoked", "agent_session_ended"].includes(error.message)) throw error;
+      if (!(error instanceof Error) || !["agent_session_denied", "agent_session_revoked", "agent_session_ended", "agent_message_expired"].includes(error.message)) throw error;
       await this.update(async (_meta, tx) => {
         await tx.run("UPDATE inbox SET status='cancelled' WHERE request_id=? AND status='answered'", row.request_id);
         return false;
@@ -339,6 +374,7 @@ export class SubagentDO extends DurableObject<Env> {
       return;
     }
     await this.update(async (meta, tx) => {
+      if (!await tx.get("SELECT 1 FROM inbox WHERE request_id=? AND status='answered'", row.request_id)) return false;
       await tx.run("UPDATE inbox SET status = 'reported' WHERE request_id = ? AND status = 'answered'", row.request_id);
       meta.reportCount++;
       return true;
@@ -391,7 +427,8 @@ export class SubagentDO extends DurableObject<Env> {
         } catch { console.error({ event: "subagent_progress_failed", id: meta.id }); }
       } })],
       tools: [
-        agentSendTool((args, seed) => this.sendAgentMessage(args, seed)),
+        agentSendTool(async (args, seed, api, c) => this.sendAgentMessage(args, seed, undefined,
+          await durableAgentTicket(api, c, at => this.reserveAgentMessage(args, seed, at)))),
         createWebPageTool(),
         defineTool({ name: "qq_context", description: QQ_CONTEXT_DESCRIPTION, parameters: QQ_CONTEXT_PARAMETERS, replay: "safe",
           execute: async options => ({ output: [{ type: "text", text: await parent().subagentContext(meta.id, options) }] }) }),
