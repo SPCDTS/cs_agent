@@ -34,6 +34,7 @@ const reportWithText = (meta: Omit<SubagentReport, "text">, text: string): Subag
 });
 const key = (id: string) => "agent-sent:" + id;
 const inputDigest = (input: AgentSend, report?: SubagentReport) => sha256Hex(JSON.stringify({ to: input.to, text: input.text ?? "", files: input.files ?? [],
+  ...(input.childModel ? { childModel: input.childModel } : {}),
   ...(report ? { report: { subagentId: report.subagentId, requestId: report.requestId, text: report.text, outcome: report.outcome } } : {}) }));
 const reportMeta = (report?: SubagentReport) => report ? { subagentId: report.subagentId, requestId: report.requestId, identity: report.identity, outcome: report.outcome, state: report.state } : undefined;
 
@@ -125,6 +126,7 @@ export async function sendAgent(host: CommunicationHost, input: AgentSend, seed:
   if (!sent.hash && !sent.message) {
     const targetGeneration = await endpoint(host.env, input.to).agentGeneration();
     const message: AgentMessage = { id, from, to: input.to, text: input.text ?? "", files: [], targetGeneration,
+      ...(input.childModel ? { childModel: input.childModel } : {}),
       ...(report && sent.report ? { report: reportWithText(sent.report, report.text) } : {}) };
     const repository = new MediaRepository({ bucket: host.env.ASSETS, scope: from });
     let total = 0;
@@ -160,6 +162,7 @@ export async function sendAgent(host: CommunicationHost, input: AgentSend, seed:
   if (sent.receipt) return { ...sent.receipt, status: "duplicate" };
   const message = sent.message ?? { id, from, to: input.to, text: input.text ?? "", files: [],
     ...(sent.targetGeneration !== undefined ? { targetGeneration: sent.targetGeneration } : {}),
+    ...(input.childModel ? { childModel: input.childModel } : {}),
     ...(report && sent.report ? { report: reportWithText(sent.report, report.text) } : {}) };
   if (!sent.message && ((input.files?.length ?? 0) > 0 || fingerprint(message) !== sent.hash)) throw new Error("agent_message_conflict");
   try {
@@ -183,6 +186,7 @@ export async function sendAgent(host: CommunicationHost, input: AgentSend, seed:
 /** 校验源宿主持久化证明；接收方从自己的地址求权限，不采纳发言人的身份。 */
 export async function verifyMessage(env: Env, to: string, message: AgentMessage, generation?: number): Promise<void> {
   if (message.targetGeneration !== undefined && message.targetGeneration !== generation) throw new Error("agent_session_revoked");
+  if (message.childModel && (childAddress(to)?.parent !== message.from || message.report)) throw new Error("agent_invalid_message");
   if (message.to !== to || !/^agent:[0-9a-f]{64}$/.test(message.id)) throw new Error("agent_invalid_message");
   validateSend({ to, text: message.text, files: message.files.map(file => file.name) });
   if (!await allowed(env, message.from, to)) throw new Error("agent_session_denied");

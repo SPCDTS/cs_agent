@@ -73,7 +73,7 @@ export class ThreadDO extends DurableObject<Env> {
   private idleWait?: Promise<void>;
   private readonly skills = new SkillCatalog(() => this.env.REGISTRY.getByName("main"));
   private readonly subagents = new ParentSubagents({ db: this.database, env: this.env, thread: () => this.namespace(),
-    communicate: (to, text, seed, identity, ticket) => this.sendAgentMessage({ to, text }, seed, undefined, identity, ticket),
+    communicate: (to, text, seed, identity, ticket, childModel) => this.sendAgentMessage({ to, text, ...(childModel ? { childModel } : {}) }, seed, undefined, identity, ticket),
     reserveCommunication: (args, seed, at, generation) => this.reserveAgentMessage(args, seed, at, generation),
     wake: input => this.queueInput(input), wakeBy: at => this.wakeBy(at), audit: (kind, detail) => this.audit(kind, detail) });
 
@@ -213,6 +213,14 @@ export class ThreadDO extends DurableObject<Env> {
       ownerTurnKind: input => this.ownerTurnKind(input), sandboxTaskForInput: input => this.sandboxTaskForInput(input),
       subagentCaller: (input, selection) => this.subagentCaller(input, selection), scheduleAccess: input => this.scheduleAccess(input),
       mcpAuthority: input => this.mcpAuthority(input), deliver: (input, text, outputId, options) => this.deliver(input, text, outputId, options),
+      syncSelfModel: async () => {
+        const settings = await this.loadSettings(true);
+        const current = await this.runtime;
+        if (current && !sameSelection(settings.model, current.selection)) {
+          await current.root.configure(modelChange(settings.model), context);
+          current.selection = settings.model;
+        }
+      },
       audit: (kind, detail) => this.audit(kind, detail), runtimeWake: wake => this.runtimeWake(wake),
       closed: () => { this.runtime = undefined; this.runtimeStarted = false; },
     });
@@ -610,6 +618,8 @@ export class ThreadDO extends DurableObject<Env> {
     const generation = await this.sessionGeneration();
     if (input && input.session_generation !== generation) throw new Error("agent_session_revoked");
     if (input && (input.kind === "schedule" || input.kind === "event")) throw new Error("agent_turn_denied");
+    // 模型变更仅由已确认 owner 的父任务交互入口附带；普通 Agent 通信没有此管理能力。
+    if (args.childModel && (caller?.turn !== "message" || !caller.as?.owner || childAddress(args.to)?.parent !== await this.namespace())) throw new Error("agent_model_denied");
     await this.narrowAgentRecipient(args, input, caller);
     const receipt = await sendAgent({ env: this.env, storage: this.ctx.storage, agentSessionId: await this.namespace(), generation,
       readFile: async path => {
@@ -825,20 +835,24 @@ export class ThreadDO extends DurableObject<Env> {
   async subagentWriteFile(id: string, path: string, content: string | Uint8Array) { return (await this.subagentWorkspaceFiles(id)).writeFile(workPath(path), content); }
   async subagentCreateTempDir(id: string, prefix?: string) { return (await this.subagentWorkspaceFiles(id)).createTempDir(prefix); }
 
-  private async subagentCaller(input: InboundRow | undefined, { sandboxId, mcpTools }: { sandboxId?: string; mcpTools?: McpToolSelection }): Promise<SubagentCaller | undefined> {
-    if (input?.kind !== "message" || !input.turn_id || input.user_id === input.self_id) return;
-    const authority = await this.mcpAuthority(input), { mcp } = await this.open();
-    const task = await this.sandboxTaskForInput(input), coding = !!task?.permissions.coding && authority?.scope === "owner";
-    let resource;
-    if (coding) {
-      const resources = this.env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner");
-      const scope = await this.namespace();
-      const id = sandboxId ?? (await resources.list(scope)).assignedSandboxId;
-      resource = await resources.get(scope, id);
-      if (!resource) throw new Error("sandbox_not_assigned");
-    } else if (sandboxId) throw new Error("permission_denied");
-    const capabilities = { coding, ...(resource ? { sandboxId: resource.id } : {}), ...(task ? { sandboxTask: task.id } : {}), ...(authority && mcp ? { mcp: await mcp.captureCapabilities(authority, mcpTools) } : {}) };
-    return { identity: { turn: "message", as: { userId: input.user_id, nickname: input.nickname, owner: isWebAdmin(input) ? this.ctx.id.equals(this.env.THREAD.idFromName("owner")) : ownerIds(this.env).includes(input.user_id), ...(isWebAdmin(input) ? { admin: true as const } : {}) } },
+  private async subagentCaller(input: InboundRow | undefined, { spawn = false, sandboxId, mcpTools }: { spawn?: boolean; sandboxId?: string; mcpTools?: McpToolSelection }): Promise<SubagentCaller | undefined> {
+    if (input?.kind !== "message" || !input.turn_id || input.user_id === input.self_id || input.session_generation !== await this.sessionGeneration()) return;
+    const owner = isWebAdmin(input) ? this.ctx.id.equals(this.env.THREAD.idFromName("owner")) : ownerIds(this.env).includes(input.user_id);
+    let capabilities: SubagentCaller["origin"]["capabilities"] = { coding: false };
+    if (spawn) {
+      const authority = await this.mcpAuthority(input), { mcp } = await this.open();
+      const task = await this.sandboxTaskForInput(input), coding = !!task?.permissions.coding && authority?.scope === "owner";
+      let resource;
+      if (coding) {
+        const resources = this.env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner");
+        const scope = await this.namespace();
+        const id = sandboxId ?? (await resources.list(scope)).assignedSandboxId;
+        resource = await resources.get(scope, id);
+        if (!resource) throw new Error("sandbox_not_assigned");
+      } else if (sandboxId) throw new Error("permission_denied");
+      capabilities = { coding, ...(resource ? { sandboxId: resource.id } : {}), ...(task ? { sandboxTask: task.id } : {}), ...(authority && mcp ? { mcp: await mcp.captureCapabilities(authority, mcpTools) } : {}) };
+    }
+    return { identity: { turn: "message", as: { userId: input.user_id, nickname: input.nickname, owner, ...(isWebAdmin(input) ? { admin: true as const } : {}) } },
       origin: { capabilities, generation: input.session_generation, target: targetOf(input), selfId: input.self_id, scopeName: input.scope_name, ...(isWeb(input) ? { replyChannel: "web" as const } : {}) } };
   }
 

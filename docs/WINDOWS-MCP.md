@@ -1,24 +1,27 @@
-# Windows MCP：持久 Hyper-V VM、临时 WSB 与独立桌面服务
+# Windows 接入：持久 VM 直接配对，临时 WSB 由宿主机管理
 
-Cloudflare Container 保留原生 `cs.coding` 工具与 R2 工作区；其他远程环境一律通过标准 MCP 接入，不走 R2 同步。`runner/` 提供：
-
-1. **宿主机 Windows MCP 服务**：基于官方 MCP Streamable HTTP，将已配置的 **Hyper-V Windows VM** 作为持久工作区，将 **Windows Sandbox（WSB）** 作为临时隔离环境；监听 `127.0.0.1:7791`，经 HTTPS Tunnel 接入管理页。
-2. **VM 内独立桌面 MCP 服务**：运行在 VM 登录用户交互会话内，将原生 `agent-desktop mcp` 的 stdio 转为 Streamable HTTP（监听来宾 `127.0.0.1:7792/mcp`），经 VM 内独立 HTTPS Tunnel 接入，与宿主机后台任务完全解耦。
-
-## 1. 环境与安全边界
-
-| 环境 | 文件与系统状态 | 生命周期 | 工具 |
+| 环境 | 安装位置 | cs-agent 使用的工具 | 文件与运行条件 |
 | --- | --- | --- | --- |
-| Hyper-V VM（宿主机 MCP） | 持久保存在 VM 磁盘（`.git`、`node_modules`、已安装软件长期保留） | 管理员预建并启动；取消任务仅终止任务进程树，不关机/删除/回滚 VM | `env_list` / `env_status` / `env_submit` / `env_job_get` / `env_job_cancel` |
-| WSB（宿主机 MCP） | 同一 session 内可复用；`C:\AgentWork` 及来宾目录全部易失 | 首次提交创建，显式关闭、活跃任务取消、空闲或硬期限销毁 | 同上 + `env_close` |
-| 独立桌面 MCP（VM 内） | 与同 VM 共享磁盘、应用、焦点与剪贴板 | 随目标用户交互登录启动，注销后不可用 | 原生 `desktop_*` 工具 |
+| 持久 Windows VM | 在来宾里登录开发账户，运行设备客户端配对 | `device_info`、`shell_*`，可选独立的 `desktop_*` 服务 | 仓库和软件留在 VM 磁盘；客户端随用户登录启动 |
+| 临时 Windows Sandbox（WSB） | 在 Windows 宿主机运行 WSB 服务 | `env_*` | 同一 session 可复用，关闭、超时或取消活跃任务会销毁临时实例 |
+| 旧宿主机 Hyper-V target | 已有的宿主机服务和来宾助手 | 既有 `env_*` 收据按原 envId 查询和取消 | 可逐台迁移，保留来宾磁盘和宿主机任务账本 |
 
-- **隔离约定**：WSB 不映射宿主项目、源码或依赖缓存，仅映射只读执行程序、当前命令输入与窄范围输出。Hyper-V 是受信任开发工作区，同 VM 的 shell 与桌面共享账户域；运行不可信代码必须选择 WSB。
-- **调用归属**：模型不能通过参数指定宿主路径、任意 VM GUID 或调用者身份。每条任务幂等键为 `(principal, scope, target, requestId)`，由宿主注入不可伪造的 `params._meta["cs-agent/caller"]`（含 `scope` 与环境授权 `environments`）。
+持久 VM 是受信任的开发环境。运行来源不明的代码时使用 WSB。WSB 只映射执行程序和本次任务的输入输出，宿主项目与依赖缓存留在宿主机。
 
-## 2. 宿主机 Windows MCP 安装与运行
+## 持久 VM 接入
 
-需要 Windows、Node.js 24+；WSB 需启用 Windows Sandbox（含 `wsb.exe`），Hyper-V 需启用完整 Hyper-V 并预先准备支持 PowerShell Direct 的 Windows VM。
+在管理台的「模型与接入 → MCP 与设备」生成设备配对链接。在 VM 内下载客户端，用开发账户的 PowerShell 执行配对，`--workdir` 指向已有项目目录。配对时可单独勾选桌面能力。账号、路径和工具的验收步骤见[设备配对说明](DEVICE-MCP.md#持久-windows-vm)。
+
+### 迁移已有宿主机 VM 环境
+
+1. 先在来宾内配对。用新设备的 `device_info` 核对主机名、用户和工作目录，再通过 `shell_exec` 执行 `Get-Location`。迁移前已发出的命令继续由原服务管理，包括执行结果尚未确认的命令；跨服务重复提交会被当作另一项任务。
+2. 在宿主机原 `config.json` 中，仅给这台 VM 的 `hyperv` target 加上 `"drainOnly": true`，将原 envId、来宾凭据、工作目录和 `stateDir` 保持原值，重启更新后的 runner。`env_list` 将标记该环境只处理旧任务，新的 `env_submit` 返回 `hyperv_target_draining`。已受理的任务继续运行，原参数重试仍返回原收据，可用 `env_job_get` 查询、用 `env_job_cancel` 取消。
+3. 新设备默认仅主人可用。需要共享时，在管理台为该设备重新选择群、成员和具体工具。旧的环境授权与审批设置只作用于原宿主机服务。
+4. 保留旧 target 和账本，直到各调用会话确认排队、运行中及结果未知的任务都已结清，并取回所需输出。仍需通过 MCP 查询历史收据时继续保留该配置。可以退役时，从有其他目标的配置中移除这台 VM；若它是唯一目标，可停用旧服务。共用宿主机的 WSB 继续使用原配置和授权。
+
+## 临时 WSB 的宿主机配置
+
+在宿主机安装 Node.js 24+ 并启用 Windows Sandbox（含 `wsb.exe`）。
 
 ```powershell
 npm run install:workers
@@ -35,14 +38,6 @@ npm --prefix runner start -- init --state D:\windows-mcp-state
   "port": 7791,
   "principals": [{ "id": "cs_agent", "tokenEnv": "WINDOWS_MCP_TOKEN" }],
   "targets": [
-    {
-      "kind": "hyperv",
-      "id": "dev",
-      "vmId": "00000000-0000-0000-0000-000000000000",
-      "credentialPath": "D:\\private\\vm-credential.xml",
-      "guestWorkdir": "C:\\AgentWork",
-      "instructions": "用于长期开发；已有工具链和仓库位于 C:\\AgentWork。"
-    },
     {
       "kind": "wsb",
       "id": "temp",
@@ -64,26 +59,13 @@ npm --prefix runner start -- inspect --config D:\windows-mcp-state\config.json
 npm --prefix runner start -- run --config D:\windows-mcp-state\config.json
 ```
 
-### 一次性准备 Hyper-V 来宾
-
-由运行服务的同一 Windows 身份经 DPAPI 保存来宾凭据，再安装受限 S4U 计划任务与 `ProgramData\CsAgentHyperv` 助手（每条命令以挂起创建 → 加入 Job Object → 恢复执行，确保进程树受控）：
-
-```powershell
-$credential = Get-Credential
-$credential | Export-Clixml -LiteralPath D:\private\vm-credential.xml -Encoding UTF8
-.\runner\scripts\prepare-hyperv.ps1 `
-  -VmId <VM GUID> `
-  -CredentialPath D:\private\vm-credential.xml `
-  -GuestWorkdir C:\AgentWork
-```
-
 ### Cloudflare Tunnel 与管理页接入
 
 配置 Tunnel 将专用 HTTPS 域名转发到 `http://127.0.0.1:7791`（`httpHostHeader: localhost:7791`），其余路径返回 404。在管理页「模型与接入 → MCP 服务」登记 `https://<域名>/mcp`、选择 Token 认证填写 `WINDOWS_MCP_TOKEN`，检测后勾选全部 6 个 `env_*` 工具并启用（仅 `env_list`、`env_status`、`env_job_get` 标记为只读）。
 
-## 3. Agent 调用流程、群环境授权与账本
+## Agent 调用流程、群环境授权与账本
 
-无论配置多少台 VM，工具固定为 6 项（新增 VM 仅改本机 `config.json` 并重启，无需改工具目录或重部署 Worker）：
+宿主机服务提供以下 6 项工具。直接配对的 VM 出现在管理台的设备服务中。
 
 | 工具 | 作用 |
 | --- | --- |
@@ -98,7 +80,9 @@ $credential | Export-Clixml -LiteralPath D:\private\vm-credential.xml -Encoding 
 - **子 agent 与群环境授权**：owner 私聊可访问全部已配置环境；群默认禁止所有 `env_*`，需在「权限与运维 → MCP 群授权」显式配置允许的 `envId` 列表、工具与成员，并可单独选择是否对授权范围内的环境写操作免逐次审批。子 agent 派出时通过 `mcpTools` 收窄工具并冻结当前环境范围快照。
 - **本机 SQLite 账本**：任务身份、参数指纹、终态与退出摘要长期保留（无硬上限停服）；命令与输出正文存独立 payload 表，完成 7 天后每小时在线清理（已清理返回 `details: "archived"` 并保留 `resultSummary`）。调度器在每次派发前先结算所有已过期排队项，避免前序任务阻塞后续超时回执。
 
-## 4. VM 内独立桌面 MCP
+## 维护旧版 VM 独立桌面 MCP
+
+已单独部署桌面服务的 VM 可继续沿用其登录会话检查与原有桌面授权。以下为旧服务的维护步骤。新设备可在配对时勾选桌面能力。
 
 在 VM 内安装 Node.js 24+ 与 `agent-desktop` 并登录目标用户，准备独立 32 字节十六进制 Token 文件，从宿主机安装：
 
@@ -119,7 +103,7 @@ npm --prefix runner run build
 - 在 VM 内配置 Cloudflare Tunnel，仅转发 `/mcp`（`httpHostHeader: localhost`），其余返回 404；在管理页作为独立 MCP 服务接入，保留原生 `desktop_*` 工具。
 - **运行边界**：每次调用前校验用户 SID、登录会话、默认桌面与显示拓扑（锁屏/安全桌面/断线直接拒绝）；串行执行，最多 16 排队、8 原生客户端（空闲 10 分钟回收），请求上限 512 KiB，结果上限 12 MiB，含排队默认 45 秒超时；已开始后的超时或断线返回 `desktop_mcp_outcome_unknown` 不自动重放。首次读取 `desktop_skills_get`，截图经 `image(block)` 交给模型。
 
-## 5. 验证与参考
+## 验证与参考
 
 ```powershell
 npm --prefix runner test

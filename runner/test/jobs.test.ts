@@ -41,6 +41,28 @@ test('持久请求去重、冲突与重启只查证据，不重新执行', async
   assert.equal(x.jobs.get(subject, vm, id).state, 'succeeded');
   assert.equal(x.jobs.submit(subject, vm, id, command).state, 'succeeded');
 });
+test('VM 配对后旧入口拒接新命令，原收据和排队中的任务仍归原调用方', async t => {
+  const x = await fixture(t);
+  x.jobs.bindTargets([vm, wsb]);
+  const running = x.jobs.submit(subject, vm, randomUUID(), command);
+  const queued = x.jobs.submit(subject, vm, randomUUID(), command);
+  await x.jobs.tick();
+  await x.restart();
+  const draining = { ...vm, drainOnly: true };
+  x.jobs.bindTargets([draining, wsb]);
+  assert.equal(x.jobs.submit(subject, draining, running.requestId, command).jobId, running.jobId);
+  assert.throws(() => x.jobs.submit(subject, draining, queued.requestId, { ...command, script: 'Get-Location' }), /request_id_conflict/);
+  assert.throws(() => x.jobs.submit({ ...subject, scope: 'other' }, draining, running.requestId, command), /hyperv_target_draining/);
+  assert.throws(() => x.jobs.submit(subject, draining, randomUUID(), command), /hyperv_target_draining/);
+  x.jobs.cancel(subject, draining, running.requestId);
+  await x.jobs.tick();
+  assert.equal(x.jobs.get(subject, draining, running.requestId).state, 'cancelled');
+  await x.jobs.tick();
+  x.f.states.set(queued.jobId, success);
+  await x.jobs.tick();
+  assert.deepEqual(x.f.calls.map(job => job.id), [running.jobId, queued.jobId]);
+  assert.equal(x.jobs.get(subject, draining, queued.requestId).result?.stdout, 'ok');
+});
 test('WSB 首提交丢回包可找回 session，去重先于容量检查，关闭后仍保留收据', async t => {
   const x = await fixture(t), id = randomUUID();
   const first = x.jobs.submit(subject, wsb, id, command); assert.ok(first.sessionId);

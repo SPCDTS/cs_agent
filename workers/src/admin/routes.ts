@@ -336,9 +336,15 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   // 模型选择是设置的一项，共用 revision 做 CAS；Thread 在下一批接纳输入时读新值，Bridge 不用它。
   { method: "GET", path: "/admin/model", handle: async ({ env }) => json(await env.REGISTRY.getByName("main").modelView()) },
   { method: "PUT", path: "/admin/model", handle: async ({ env, request }) => {
-    const { model, expectedRevision } = await body(request, Type.Object({ model: ModelSelectionSchema, expectedRevision: Type.String({ pattern: "^[0-9a-f]{16}$" }) }, strict));
+    const { model, subagentModel, expectedRevision } = await body(request, Type.Object({
+      model: ModelSelectionSchema,
+      subagentModel: Type.Optional(Type.Union([ModelSelectionSchema, Type.Null()])),
+      expectedRevision: Type.String({ pattern: "^[0-9a-f]{16}$" }),
+    }, strict));
     const registry = env.REGISTRY.getByName("main");
-    await putSettings(env, { ...(await registry.settings()).value, model }, expectedRevision);
+    const { subagentModel: currentSub, ...rest } = (await registry.settings()).value;
+    const nextSub = subagentModel === undefined ? currentSub : subagentModel ?? undefined;
+    await putSettings(env, { ...rest, model, ...(nextSub ? { subagentModel: nextSub } : {}) }, expectedRevision);
     return json(await registry.modelView());
   } },
   { method: "GET", path: "/admin/model/oauth/codex/helper.mjs", public: true,

@@ -1,12 +1,13 @@
+import type { ModelSelection } from "../settings";
 import { containsSecret, redactSecrets } from "../memory/secrets";
 import { sha256Hex } from "../shared/hash";
 import type { SubagentReport } from "../subagent/model";
 import type { AssetRef } from "../media/repository";
 
 export const SESSION_PATTERN = "^(?:owner|(?:group|private):[1-9][0-9]{0,19}|sub:(?:owner|(?:group|private):[1-9][0-9]{0,19}):[0-9a-f-]{36})$";
-export type AgentMessage = { id: string; from: string; to: string; text: string; files: AssetRef[]; targetGeneration?: number; report?: SubagentReport };
+export type AgentMessage = { id: string; from: string; to: string; text: string; files: AssetRef[]; targetGeneration?: number; childModel?: ModelSelection; report?: SubagentReport };
 export type AgentReceipt = { messageId: string; status: "accepted" | "duplicate"; files: string[] };
-export type AgentSend = { to: string; text?: string; files?: string[] };
+export type AgentSend = { to: string; text?: string; files?: string[]; /** 仅父任务已授权的 message(model) 入口，非 agent_send 参数。 */ childModel?: ModelSelection };
 export function sessionId(value: string): string {
   if (!new RegExp(SESSION_PATTERN).test(value)) throw new Error("agent_invalid_session");
   return value;

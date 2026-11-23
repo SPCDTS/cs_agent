@@ -9,7 +9,7 @@ import type { Env } from "../env";
 import { McpToolSelectionSchema, type McpToolSelection } from "../mcp/access";
 import { ResourceIdSchema } from "../sandbox/resources";
 import { ownerIds, scopeOf, type InboundInput, type Target } from "../policy";
-import type { ModelSelection } from "../settings";
+import { ModelSelectionSchema, type ModelSelection } from "../settings";
 import { formatBeijingTime } from "../memory/time";
 import { shortSummary } from "./activity";
 import {
@@ -28,11 +28,11 @@ CREATE INDEX IF NOT EXISTS subagents_deadline ON subagents(status, deadline);
 `;
 
 /** 汇报回合回到派出时的会话：目标、机器人号与群名。 */
-export type SubagentOrigin = { capabilities?: SubagentCapabilities; workspaceRevision?: string; generation?: number; target: Target; selfId: string; scopeName: string; replyChannel?: "web" };
+export type SubagentOrigin = { capabilities?: SubagentCapabilities; model?: ModelSelection; workspaceRevision?: string; generation?: number; target: Target; selfId: string; scopeName: string; replyChannel?: "web" };
 export type SubagentCaller = { identity: SubagentIdentity; origin: SubagentOrigin };
 export type SubagentView = {
   id: string; task: string; summary: string; status: ParentSubagentStatus; createdAt: number; deadline: number | null;
-  endedAt?: number; lastReportAt?: number; spawner?: string; sandboxId?: string;
+  endedAt?: number; lastReportAt?: number; spawner?: string; sandboxId?: string; model?: ModelSelection;
 };
 type Row = {
   id: string; task: string; summary: string | null; created_at: number; status: ParentSubagentStatus; ended_at: number | null; identity_json: string;
@@ -43,7 +43,7 @@ type Host = {
   db: DurableObjectSqliteDatabase; env: Env;
   /** 父线程键，也是子 DO 名字的一段。 */
   thread(): Promise<string>;
-  communicate(to: string, text: string, seed: string, identity: SubagentIdentity, ticket?: AgentTicket): Promise<import("../communication/model").AgentReceipt>;
+  communicate(to: string, text: string, seed: string, identity: SubagentIdentity, ticket?: AgentTicket, nextModel?: ModelSelection): Promise<import("../communication/model").AgentReceipt>;
   reserveCommunication(args: import("../communication/model").AgentSend, seed: string, at: number, generation?: number): Promise<AgentTicket>;
   /** 把汇报作为 kind=subagent 的输入入队，入站键幂等。 */
   wake(input: InboundInput): Promise<"accepted" | "duplicate">;
@@ -58,16 +58,19 @@ const span = (ms: number) => ms < 60_000 ? `${Math.round(ms / 1000)} 秒` : `${M
 const reply = (text: string, error = false) => ({ ...(error ? { isError: true } : {}), output: [{ type: "text" as const, text }] });
 
 const PARAMETERS = Type.Object({
-  action: Type.Union([Type.Literal("spawn"), Type.Literal("message"), Type.Literal("list"), Type.Literal("cancel")]),
+  action: Type.Union([Type.Literal("spawn"), Type.Literal("message"), Type.Literal("set_model"), Type.Literal("list"), Type.Literal("cancel")]),
   sandboxId: Type.Optional(ResourceIdSchema),
   mcpTools: Type.Optional(McpToolSelectionSchema),
+  model: Type.Optional(Type.Object({
+    ...ModelSelectionSchema.properties,
+  }, { additionalProperties: false, description: "仅主人交互会话可用：为 spawn / message / set_model 显式指定或切换该子 agent 的模型（省略时沿用子任务默认模型或主模型）" })),
   task: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "spawn 必填：自包含的任务目标、上下文与验收标准" })),
   summary: Type.Optional(Type.String({ minLength: 1, maxLength: 80, description: "spawn 必填：15–30 字中文任务简介（供管理台展示，不含凭据或原始参数）" })),
-  id: Type.Optional(Type.String({ pattern: `^${SUBAGENT_ID}$`, description: "message / cancel 必填：spawn 或 list 返回的子 agent ID" })),
+  id: Type.Optional(Type.String({ pattern: `^${SUBAGENT_ID}$`, description: "message / set_model / cancel 必填：spawn 或 list 返回的子 agent ID" })),
   text: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "message 必填：追加给该子 agent 的说明" })),
   timeoutMs: Type.Optional(Type.Integer({ minimum: MIN_TIMEOUT_MS, description: "spawn 可选：明确截止时长（毫秒）；无硬期限请省略" })),
 }, { additionalProperties: false });
-const DESCRIPTION = "管理后台独立上下文子 agent（spawn 派出 / message 追问 / list 查看 / cancel 取消）。spawn 立即返回，结果以“[子 agent 完成]”自动唤醒父回合；勿轮询 list。默认继承当前会话已批准的技能与 MCP；传 mcpTools 可按服务与原始工具名收敛权限（空数组为不授 MCP，且不含 MCP 资源读取）。传 sandboxId 绑定 sandbox_list 中的工作区（同 ID 共享文件与运行时；需隔离请先调 sandbox_create 再传入返回 ID；省略则继承父默认工作区）。子 agent 不能直接发 QQ、改权限或发布技能；可用 agent_send 与授权会话通信。";
+const DESCRIPTION = "管理后台独立上下文子 agent（spawn 派出 / message 追问 / set_model 切换模型 / list 查看 / cancel 取消）。spawn 立即返回，结果以“[子 agent 完成]”自动唤醒父回合；勿轮询 list。默认继承子任务默认模型或当前主模型，主人会话可通过 model 为单个子任务指定或切换模型。默认继承当前会话已批准的技能与 MCP；传 mcpTools 可按服务与原始工具名收敛权限（空数组为不授 MCP，且不含 MCP 资源读取）。传 sandboxId 绑定 sandbox_list 中的工作区（同 ID 共享文件与运行时；需隔离请先调 sandbox_create 再传入返回 ID；省略则继承父默认工作区）。子 agent 不能直接发 QQ、改权限、改模型或发布技能；可用 agent_send 与授权会话通信。";
 
 /** 父线程的子 agent 登记：派出、交代、取消、汇报入队与超时，都经这张表。 */
 export class ParentSubagents {
@@ -102,8 +105,9 @@ export class ParentSubagents {
       return { text: "timeoutMs 必须为至少 1000 的安全整数，且截止时间不能溢出。", error: true };
     // 0 表示不设截止时间，兼容已保存的 NOT NULL 列；显式 timeoutMs 才安排父 alarm。
     const timeout = timeoutMs ?? 0;
+    const origin: SubagentOrigin = { ...caller.origin, model };
     await this.host.db.run(`INSERT OR IGNORE INTO subagents (id, task, summary, created_at, status, identity_json, origin_json, timeout_ms, deadline)
-      VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`, id, task, shortSummary(summary || task), now, JSON.stringify(caller.identity), JSON.stringify(caller.origin), timeout, timeout ? now + timeout : 0);
+      VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`, id, task, shortSummary(summary || task), now, JSON.stringify(caller.identity), JSON.stringify(origin), timeout, timeout ? now + timeout : 0);
     const row = (await this.row(id))!;
     try {
       await this.apply(id, await this.child(thread, id).start({ parent: thread, id, task: row.task, summary: row.summary ?? shortSummary(row.task), identity: JSON.parse(row.identity_json) as SubagentIdentity, model, capabilities: (JSON.parse(row.origin_json) as SubagentOrigin).capabilities }));
@@ -113,8 +117,8 @@ export class ParentSubagents {
       return { text: "子 agent 启动失败，请稍后再试。", error: true };
     }
     if (row.deadline) await this.host.wakeBy(row.deadline);
-    await this.host.audit("subagent_spawn", { id, timeoutMs: row.timeout_ms, chars: row.task.length });
-    return { text: `已派出子 agent ${id}（${row.timeout_ms ? "限时 " + span(row.timeout_ms) : "不设自动超时"}），完成后结果会作为「[子 agent 完成]」输入交回给你。` };
+    await this.host.audit("subagent_spawn", { id, model: `${model.provider}/${model.id}`, timeoutMs: row.timeout_ms, chars: row.task.length });
+    return { text: `已派出子 agent ${id}（模型 ${model.provider}/${model.id}，${row.timeout_ms ? "限时 " + span(row.timeout_ms) : "不设自动超时"}），完成后结果会作为「[子 agent 完成]」输入交回给你。` };
   }
 
   async narrow(id: string, next: SubagentIdentity): Promise<void> {
@@ -129,7 +133,8 @@ export class ParentSubagents {
     });
   }
 
-  async message(caller: SubagentCaller, id: string, text: string, seed: string, ticket?: AgentTicket | (() => Promise<AgentTicket>)): Promise<Reply> {
+  async message(caller: SubagentCaller, id: string, text: string, seed: string, ticket?: AgentTicket | (() => Promise<AgentTicket>), nextModel?: ModelSelection): Promise<Reply> {
+    if (nextModel && !caller.identity.as?.owner) return { text: "只有 owner 权限的非子任务交互回合可以切换子 agent 的模型。", error: true };
     const row = await this.row(id);
     if (!row) return { text: `本会话没有子 agent ${id}`, error: true };
     if (row.status === "cancelled" || row.status === "timeout") return { text: `子 agent ${id} ${STATUS_TEXT[row.status]}，不能再发消息；需要的话重新 spawn。`, error: true };
@@ -142,13 +147,71 @@ export class ParentSubagents {
       throw error;
     }
     const thread = await this.host.thread();
-    await this.host.communicate(subagentName(thread, id), text, seed, caller.identity, typeof ticket === "function" ? await ticket() : ticket);
+    let receipt: import("../communication/model").AgentReceipt;
+    try {
+      receipt = await this.host.communicate(subagentName(thread, id), text, seed, caller.identity, typeof ticket === "function" ? await ticket() : ticket, nextModel);
+    } catch (error) {
+      const current = await this.child(thread, id).status().catch(() => undefined);
+      const missing = error instanceof Error && /subagent_missing|no such table: meta|agent_session_ended/.test(error.message) && !current;
+      if (nextModel) await this.host.audit("model_change", { target: "subagent_instance", subagentId: id, model: `${nextModel.provider}/${nextModel.id}`, result: missing ? "expired" : "rpc_failed" });
+      if (current?.meta.status === "cancelled") {
+        await this.apply(id, { status: current.meta.status, version: current.meta.version });
+        return { text: `子 agent ${id} 已取消，不能再发消息。`, error: true };
+      }
+      if (missing) return { text: `子 agent ${id} 已过期清理，不能再发消息；需要的话重新 spawn。`, error: true };
+      throw error;
+    }
     const current = await this.child(thread, id).status();
     if (current) await this.apply(id, { status: current.meta.status, version: current.meta.version });
+    if (nextModel) {
+      const savedOrigin = JSON.parse(row.origin_json) as SubagentOrigin;
+      await this.host.db.run("UPDATE subagents SET origin_json = ? WHERE id = ?", JSON.stringify({ ...savedOrigin, model: current?.meta.model ?? nextModel }), id);
+      if (receipt.status === "accepted") await this.host.audit("model_change", { target: "subagent_instance", subagentId: id, model: `${nextModel.provider}/${nextModel.id}`, result: "ok" });
+    }
     const deadline = row.timeout_ms ? Date.now() + row.timeout_ms : 0;
     await this.host.db.run("UPDATE subagents SET deadline = ? WHERE id = ? AND status = 'running'", deadline, id);
     if (deadline) await this.host.wakeBy(deadline);
-    return { text: `已把消息交给子 agent ${id}，回答会作为「[子 agent 完成]」输入交回给你。` };
+    const modelNote = !nextModel ? "" : receipt.status === "duplicate" ? "（原消息已处理，未重复切换模型）" : `（模型已切换为 ${nextModel.provider}/${nextModel.id}）`;
+    return { text: `已把消息交给子 agent ${id}${modelNote}，回答会作为「[子 agent 完成]」输入交回给你。` };
+  }
+
+  async setModel(caller: SubagentCaller, id: string, nextModel: ModelSelection, seed: string): Promise<Reply> {
+    const thread = await this.host.thread();
+    if (!caller.identity.as?.owner) {
+      return { text: "只有 owner 权限的非子任务交互回合可以切换子 agent 的模型。", error: true };
+    }
+    const check = await this.host.env.REGISTRY.getByName("main").validateModel(nextModel);
+    if (!check.ok) {
+      await this.host.audit("model_change", { target: "subagent_instance", subagentId: id, model: `${nextModel.provider}/${nextModel.id}`, result: "invalid_model" });
+      return { text: `目标模型不可用（${check.reason}），请先用 model_manage 查看已就绪模型。`, error: true };
+    }
+    const row = await this.row(id);
+    if (!row) return { text: `本会话没有子 agent ${id}`, error: true };
+    if (row.status === "cancelled" || row.status === "timeout") return { text: `子 agent ${id} ${STATUS_TEXT[row.status]}，不能切换模型。`, error: true };
+    const savedOrigin = JSON.parse(row.origin_json) as SubagentOrigin;
+    if (savedOrigin.generation !== caller.origin.generation) return { text: "该子任务属于已归档会话，不能切换模型。", error: true };
+    if (savedOrigin.replyChannel !== caller.origin.replyChannel) return { text: "这个子任务属于另一个回复入口，不能跨入口切换模型。", error: true };
+    let rpcResult: { result: "updated" | "duplicate" | "ended"; state: SubagentState };
+    try {
+      rpcResult = await this.child(thread, id).setModel(`mm-${(await stableId(seed)).slice(0, 22)}`, nextModel);
+    } catch (error) {
+      const missing = error instanceof Error && /subagent_missing|no such table: meta/.test(error.message);
+      await this.host.audit("model_change", { target: "subagent_instance", subagentId: id, model: `${nextModel.provider}/${nextModel.id}`, result: missing ? "expired" : "rpc_failed" });
+      return {
+        text: missing
+          ? `子 agent ${id} 已过期清理，不能切换模型；需要的话重新 spawn。`
+          : `子 agent ${id} 模型切换失败，请稍后再试。`,
+        error: true,
+      };
+    }
+    const { result, state } = rpcResult;
+    await this.apply(id, state);
+    if (result === "ended") return { text: `子 agent ${id} 已取消，不能切换模型。`, error: true };
+    await this.host.db.run("UPDATE subagents SET origin_json = ? WHERE id = ?", JSON.stringify({ ...savedOrigin, model: nextModel }), id);
+    if (result === "updated") {
+      await this.host.audit("model_change", { target: "subagent_instance", subagentId: id, model: `${nextModel.provider}/${nextModel.id}`, result: "ok" });
+    }
+    return { text: `已将子 agent ${id} 的模型切换为 ${nextModel.provider}/${nextModel.id}${nextModel.reasoningEffort ? `（推理 ${nextModel.reasoningEffort}）` : ""}，自下一次模型请求起生效。` };
   }
 
   /** 只取消运行中的；子 DO 已经答完的保持它的结果，汇报照常送达。 */
@@ -200,8 +263,9 @@ export class ParentSubagents {
     const rows = await this.host.db.all<Row>("SELECT * FROM subagents ORDER BY created_at DESC LIMIT 50");
     return rows.map(row => {
       const as = (JSON.parse(row.identity_json) as SubagentIdentity).as;
-      const sandboxId = (JSON.parse(row.origin_json) as SubagentOrigin).capabilities?.sandboxId;
-      return { ...(sandboxId ? { sandboxId } : {}), id: row.id, task: clip(row.task, 200), summary: row.summary ?? shortSummary(row.task), status: row.status, createdAt: row.created_at, deadline: row.deadline || null,
+      const origin = JSON.parse(row.origin_json) as SubagentOrigin;
+      const sandboxId = origin.capabilities?.sandboxId;
+      return { ...(sandboxId ? { sandboxId } : {}), ...(origin.model ? { model: origin.model } : {}), id: row.id, task: clip(row.task, 200), summary: row.summary ?? shortSummary(row.task), status: row.status, createdAt: row.created_at, deadline: row.deadline || null,
         ...(row.ended_at === null ? {} : { endedAt: row.ended_at }), ...(row.last_report_at === null ? {} : { lastReportAt: row.last_report_at }),
         ...(as ? { spawner: `${as.owner ? "owner" : "成员"} ${as.userId}` } : {}) };
     });
@@ -226,26 +290,41 @@ export class ParentSubagents {
   }
 
   /** 只在用户亲自发消息的回合可用；caller 由 ThreadDO 按当前输入求出，每次执行都重新求。 */
-  tool(caller: (api: ToolExecutionApi, context: Context, selection: { sandboxId?: string; mcpTools?: McpToolSelection }) => Promise<SubagentCaller | undefined>, model: () => Promise<ModelSelection>) {
+  tool(caller: (api: ToolExecutionApi, context: Context, selection: { spawn?: boolean; sandboxId?: string; mcpTools?: McpToolSelection }) => Promise<SubagentCaller | undefined>, model: () => Promise<ModelSelection>) {
     return defineTool({
       name: "subagent", description: DESCRIPTION, parameters: PARAMETERS,
-      // spawn 的 id 与 message 的 requestId 都由本次工具调用的任务 id 求出，中断后重放找回同一个子 agent 与同一条消息。
+      // spawn 的 id 与 message / set_model 的 requestId 都由本次工具调用的任务 id 求出，中断后重放找回同一个子 agent 与同一条操作。
       replay: "safe",
       execute: async (args, api, context) => {
         if ((args.sandboxId || args.mcpTools) && args.action !== "spawn") return reply("sandboxId 与 mcpTools 只用于 spawn；已有子任务不能改绑。", true);
-        const who = await caller(api, context, { sandboxId: args.sandboxId, mcpTools: args.mcpTools });
+        if (args.model && !["spawn", "message", "set_model"].includes(args.action)) return reply("model 只用于 spawn、message 或 set_model。", true);
+        const who = await caller(api, context, { spawn: args.action === "spawn", sandboxId: args.sandboxId, mcpTools: args.mcpTools });
         if (!who) return reply("子 agent 只能在用户亲自发消息的回合使用；本轮请勿重试。", true);
         const seed = `${api.conversationId}:${api.taskId}`;
+        if (args.action === "set_model") {
+          if (!args.id || !args.model) return reply("set_model 需要 id 与 model", true);
+          const result = await this.setModel(who, args.id, args.model, seed);
+          return reply(result.text, result.error);
+        }
+        if (args.model) {
+          if (!who.identity.as?.owner) {
+            return reply("只有 owner 权限的非子任务交互回合可以指定或切换子 agent 的模型。", true);
+          }
+          const check = await this.host.env.REGISTRY.getByName("main").validateModel(args.model);
+          if (!check.ok) {
+            return reply(`目标模型不可用（${check.reason}），请先用 model_manage 查看已就绪模型。`, true);
+          }
+        }
         if (args.action === "spawn") {
-          if (!args.task || args.id || args.text) return reply("spawn 需要 task 与任务短简介 summary（可选 timeoutMs）", true);
-          const result = await this.spawn(who, args.task, args.timeoutMs, await model(), seed, args.summary);
+          if (!args.task || args.id || args.text) return reply("spawn 需要 task 与任务短简介 summary（可选 timeoutMs、model）", true);
+          const result = await this.spawn(who, args.task, args.timeoutMs, args.model ?? await model(), seed, args.summary);
           return reply(result.text, result.error);
         }
         if (args.action === "message") {
           if (!args.id || !args.text) return reply("message 需要 id 与 text", true);
           const thread = await this.host.thread();
           const result = await this.message(who, args.id, args.text, seed, () => durableAgentTicket(api, context,
-            at => this.host.reserveCommunication({ to: subagentName(thread, args.id!), text: args.text }, seed, at, who.origin.generation)));
+            at => this.host.reserveCommunication({ to: subagentName(thread, args.id!), text: args.text, ...(args.model ? { childModel: args.model } : {}) }, seed, at, who.origin.generation)), args.model);
           return reply(result.text, result.error);
         }
         if (args.action === "cancel") {
@@ -254,7 +333,7 @@ export class ParentSubagents {
           return status ? reply(`子 agent ${args.id}：${STATUS_TEXT[status]}`) : reply(`本会话没有子 agent ${args.id}`, true);
         }
         const views = await this.list();
-        return reply(views.map(view => `${view.id} · ${STATUS_TEXT[view.status]}${view.sandboxId ? " · 沙箱 " + view.sandboxId : ""} · 派出 ${formatBeijingTime(view.createdAt)}（北京时间） · 任务：${clip(view.task.replace(/\s+/g, " "), 80)}`)
+        return reply(views.map(view => `${view.id} · ${STATUS_TEXT[view.status]}${view.model ? ` · 模型 ${view.model.provider}/${view.model.id}` : ""}${view.sandboxId ? " · 沙箱 " + view.sandboxId : ""} · 派出 ${formatBeijingTime(view.createdAt)}（北京时间） · 任务：${clip(view.task.replace(/\s+/g, " "), 80)}`)
           .join("\n") || "本会话没有子 agent。");
       },
     });

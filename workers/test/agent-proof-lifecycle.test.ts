@@ -350,3 +350,36 @@ it("parent follow-up authorization rejects the wrong reply channel before reserv
     expect((await s.storage.list({ prefix: "agent-sent:" })).size).toBe(0);
   });
 });
+
+
+it("model-bearing parent follow-ups bind the model to the proof and cannot reapply it on recovery or expiry", async () => {
+  const f = await child("owner"), model = { provider: "faux", id: "pro" }, later = { provider: "faux", id: "worker" };
+  const args = { to: f.address, text: "model follow-up", childModel: model };
+  const ticket = await reserve("owner", args, "model-followup");
+  const follow = () => runInDurableObject(env.THREAD.getByName("owner"), async instance =>
+    (instance as any).subagents.message({ identity: f.identity, origin: f.origin }, cid, args.text, "model-followup", ticket, model));
+  expect(await follow()).not.toHaveProperty("error");
+  expect((await env.SUBAGENT.getByName(f.address).status())?.meta.model).toEqual(model);
+  await env.SUBAGENT.getByName(f.address).setModel("later-change", later);
+  // 已入箱但源回执丢失；恢复必须走真实接收查重，不能重施旧模型或重新入箱。
+  await runInDurableObject(env.THREAD.getByName("owner"), async (_i, s) => {
+    const key = "agent-sent:" + messageId("owner", "0:model-followup");
+    const saved = await s.storage.get<any>(key); delete saved.receipt; await s.storage.put(key, saved);
+  });
+  expect((await follow()).text).toContain("未重复切换模型");
+  expect((await env.SUBAGENT.getByName(f.address).status())?.meta.model).toEqual(later);
+  await runInDurableObject(env.THREAD.getByName("owner"), async (instance, s) => {
+    expect(JSON.parse(s.storage.sql.exec<any>("SELECT origin_json FROM subagents WHERE id=?", cid).one().origin_json).model).toEqual(later);
+    await expect((instance as any).sendAgentMessage(args, "forged-model")).rejects.toThrow("agent_model_denied");
+    const denied = await (instance as any).subagents.message({ identity: { turn: "message", as: { userId: "10000003", owner: false } }, origin: f.origin }, cid, args.text, "unauthorized-model", () => { throw new Error("must_not_reserve"); }, model);
+    expect(denied.error).toBe(true);
+  });
+  await runInDurableObject(env.SUBAGENT.getByName(f.address), async instance => {
+    await expect((instance as any).sendAgentMessage({ ...args, to: "owner" }, "forged-model")).rejects.toThrow("agent_model_denied");
+    await expect((instance as any).agentReceive({ id: messageId(group, "forged-model"), from: group, to: f.address, text: "not parent", files: [], childModel: model })).rejects.toThrow("agent_invalid_message");
+  });
+  await expect(reserve("owner", { ...args, childModel: later }, "model-followup")).rejects.toThrow("agent_message_conflict");
+  await burst("owner", f.address, SENT_LIMIT + 1, "model-cap");
+  await expect(follow()).rejects.toThrow("agent_message_expired");
+  expect((await env.SUBAGENT.getByName(f.address).status())?.meta.model).toEqual(later);
+}, 120_000);
