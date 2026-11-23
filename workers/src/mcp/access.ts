@@ -6,10 +6,12 @@ import { MCP_CONFIG } from "./config";
 import { digest } from "./names";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
-export type McpAuthority = {
-  kind: TurnKind; scope: string; actor: string; owner: boolean; generation: number; replyChannel: "web" | "qq";
-  subagentId?: string;
-};
+export const McpAuthoritySchema = Type.Object({
+  kind: Type.Union([Type.Literal("message"), Type.Literal("schedule"), Type.Literal("event"), Type.Literal("subagent"), Type.Literal("agent")]),
+  scope: Type.String(), actor: Type.String(), owner: Type.Boolean(), generation: Type.Integer({ minimum: 0 }),
+  replyChannel: Type.Union([Type.Literal("web"), Type.Literal("qq")]), subagentId: Type.Optional(Type.String()),
+});
+export type McpAuthority = Static<typeof McpAuthoritySchema>;
 export type McpCapabilitySnapshot = {
   scope: string; actor: string; generation: number; replyChannel: "web" | "qq"; catalogJson: string; tools: string[]; resourceAllow?: { server: string; prefixes: string[] }[]; environments?: { server: string; access: EnvironmentAccess }[];
 };

@@ -1,3 +1,5 @@
+import { durableAgentTicket } from "../communication/tool";
+import type { AgentTicket } from "../communication/service";
 import type { Context } from "@earendil-works/chord/context";
 import type { SqliteExecutor } from "@earendil-works/chord/sqlite";
 import { Type } from "@earendil-works/pi-ai";
@@ -41,6 +43,8 @@ type Host = {
   db: DurableObjectSqliteDatabase; env: Env;
   /** 父线程键，也是子 DO 名字的一段。 */
   thread(): Promise<string>;
+  communicate(to: string, text: string, seed: string, identity: SubagentIdentity, ticket?: AgentTicket, nextModel?: ModelSelection): Promise<import("../communication/model").AgentReceipt>;
+  reserveCommunication(args: import("../communication/model").AgentSend, seed: string, at: number, generation?: number): Promise<AgentTicket>;
   /** 把汇报作为 kind=subagent 的输入入队，入站键幂等。 */
   wake(input: InboundInput): Promise<"accepted" | "duplicate">;
   /** 让父 DO 的 alarm 不晚于 at 触发。 */
@@ -66,7 +70,7 @@ const PARAMETERS = Type.Object({
   text: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "message 必填：追加给该子 agent 的说明" })),
   timeoutMs: Type.Optional(Type.Integer({ minimum: MIN_TIMEOUT_MS, description: "spawn 可选：明确截止时长（毫秒）；无硬期限请省略" })),
 }, { additionalProperties: false });
-const DESCRIPTION = "管理后台独立上下文子 agent（spawn 派出 / message 追问 / set_model 切换模型 / list 查看 / cancel 取消）。spawn 立即返回，结果以“[子 agent 完成]”自动唤醒父回合；勿轮询 list。默认继承子任务默认模型或当前主模型，主人会话可通过 model 为单个子任务指定或切换模型。默认继承当前会话已批准的技能与 MCP；传 mcpTools 可按服务与原始工具名收敛权限（空数组为不授 MCP，且不含 MCP 资源读取）。传 sandboxId 绑定 sandbox_list 中的工作区（同 ID 共享文件与运行时；需隔离请先调 sandbox_create 再传入返回 ID；省略则继承父默认工作区）。子 agent 不能直接发消息、改权限、改模型或发布技能。";
+const DESCRIPTION = "管理后台独立上下文子 agent（spawn 派出 / message 追问 / set_model 切换模型 / list 查看 / cancel 取消）。spawn 立即返回，结果以“[子 agent 完成]”自动唤醒父回合；勿轮询 list。默认继承子任务默认模型或当前主模型，主人会话可通过 model 为单个子任务指定或切换模型。默认继承当前会话已批准的技能与 MCP；传 mcpTools 可按服务与原始工具名收敛权限（空数组为不授 MCP，且不含 MCP 资源读取）。传 sandboxId 绑定 sandbox_list 中的工作区（同 ID 共享文件与运行时；需隔离请先调 sandbox_create 再传入返回 ID；省略则继承父默认工作区）。子 agent 不能直接发 QQ、改权限、改模型或发布技能；可用 agent_send 与授权会话通信。";
 
 /** 父线程的子 agent 登记：派出、交代、取消、汇报入队与超时，都经这张表。 */
 export class ParentSubagents {
@@ -117,38 +121,58 @@ export class ParentSubagents {
     return { text: `已派出子 agent ${id}（模型 ${model.provider}/${model.id}，${row.timeout_ms ? "限时 " + span(row.timeout_ms) : "不设自动超时"}），完成后结果会作为「[子 agent 完成]」输入交回给你。` };
   }
 
-  async message(caller: SubagentCaller, id: string, text: string, seed: string, nextModel?: ModelSelection): Promise<Reply> {
+  async narrow(id: string, next: SubagentIdentity): Promise<void> {
+    await this.host.db.transaction(async tx => {
+      const row = await tx.get<Row>("SELECT * FROM subagents WHERE id=?", id);
+      if (!row) throw new Error("agent_session_revoked");
+      const current = JSON.parse(row.identity_json) as SubagentIdentity;
+      const identity = narrowIdentity(current, next);
+      // 无法保留原派出主体时在入箱前拒绝，不向仍在执行的 owner 上下文注入跨成员输入。
+      if (!identity.as || identity.as.owner !== current.as?.owner) throw new Error("agent_child_identity_denied");
+      await tx.run("UPDATE subagents SET identity_json=? WHERE id=?", JSON.stringify(identity), id);
+    });
+  }
+
+  async message(caller: SubagentCaller, id: string, text: string, seed: string, ticket?: AgentTicket | (() => Promise<AgentTicket>), nextModel?: ModelSelection): Promise<Reply> {
+    if (nextModel && !caller.identity.as?.owner) return { text: "只有 owner 权限的非子任务交互回合可以切换子 agent 的模型。", error: true };
     const row = await this.row(id);
     if (!row) return { text: `本会话没有子 agent ${id}`, error: true };
     if (row.status === "cancelled" || row.status === "timeout") return { text: `子 agent ${id} ${STATUS_TEXT[row.status]}，不能再发消息；需要的话重新 spawn。`, error: true };
-    const savedOrigin = JSON.parse(row.origin_json) as SubagentOrigin;
-    if (savedOrigin.generation !== caller.origin.generation) return {text:"该子任务属于已归档会话，请重新 spawn。",error:true};
-    if (savedOrigin.replyChannel !== caller.origin.replyChannel) return { text: "这个子任务属于另一个回复入口，请在当前入口新建子任务。", error: true };
-    // 这一轮交代的内容会进入子 agent 的上下文：登记的身份与本轮合并，不是同一人就降为基础权限，之后的汇报都按合并后的身份。
-    const identity = narrowIdentity(JSON.parse(row.identity_json) as SubagentIdentity, caller.identity);
-    await this.host.db.run("UPDATE subagents SET identity_json = ? WHERE id = ?", JSON.stringify(identity), id);
-    let rpcResult: { result: "accepted" | "duplicate" | "ended"; state: SubagentState };
+    if ((JSON.parse(row.origin_json) as SubagentOrigin).generation !== caller.origin.generation) return {text:"该子任务属于已归档会话，请重新 spawn。",error:true};
+    if ((JSON.parse(row.origin_json) as SubagentOrigin).replyChannel !== caller.origin.replyChannel) return { text: "这个子任务属于另一个回复入口，请在当前入口新建子任务。", error: true };
+    // 通信地址仍按会话绑定；人类派出的能力只能收敛，不能被别的发言人借用。
+    try { await this.narrow(id, caller.identity); }
+    catch (error) {
+      if (error instanceof Error && error.message === "agent_child_identity_denied") return { text: error.message, error: true };
+      throw error;
+    }
+    const thread = await this.host.thread();
+    let receipt: import("../communication/model").AgentReceipt;
     try {
-      rpcResult = await this.child(await this.host.thread(), id).message(`m-${(await stableId(seed)).slice(0, 23)}`, text, nextModel);
+      receipt = await this.host.communicate(subagentName(thread, id), text, seed, caller.identity, typeof ticket === "function" ? await ticket() : ticket, nextModel);
     } catch (error) {
-      const missing = error instanceof Error && /subagent_missing|no such table: meta/.test(error.message);
+      const current = await this.child(thread, id).status().catch(() => undefined);
+      const missing = error instanceof Error && /subagent_missing|no such table: meta|agent_session_ended/.test(error.message) && !current;
       if (nextModel) await this.host.audit("model_change", { target: "subagent_instance", subagentId: id, model: `${nextModel.provider}/${nextModel.id}`, result: missing ? "expired" : "rpc_failed" });
+      if (current?.meta.status === "cancelled") {
+        await this.apply(id, { status: current.meta.status, version: current.meta.version });
+        return { text: `子 agent ${id} 已取消，不能再发消息。`, error: true };
+      }
       if (missing) return { text: `子 agent ${id} 已过期清理，不能再发消息；需要的话重新 spawn。`, error: true };
       throw error;
     }
-    const { result, state } = rpcResult;
-    await this.apply(id, state);
-    if (result === "ended") return { text: `子 agent ${id} 已取消，不能再发消息。`, error: true };
+    const current = await this.child(thread, id).status();
+    if (current) await this.apply(id, { status: current.meta.status, version: current.meta.version });
     if (nextModel) {
-      await this.host.db.run("UPDATE subagents SET origin_json = ? WHERE id = ?", JSON.stringify({ ...savedOrigin, model: nextModel }), id);
-      if (result === "accepted") {
-        await this.host.audit("model_change", { target: "subagent_instance", subagentId: id, model: `${nextModel.provider}/${nextModel.id}`, result: "ok" });
-      }
+      const savedOrigin = JSON.parse(row.origin_json) as SubagentOrigin;
+      await this.host.db.run("UPDATE subagents SET origin_json = ? WHERE id = ?", JSON.stringify({ ...savedOrigin, model: current?.meta.model ?? nextModel }), id);
+      if (receipt.status === "accepted") await this.host.audit("model_change", { target: "subagent_instance", subagentId: id, model: `${nextModel.provider}/${nextModel.id}`, result: "ok" });
     }
     const deadline = row.timeout_ms ? Date.now() + row.timeout_ms : 0;
     await this.host.db.run("UPDATE subagents SET deadline = ? WHERE id = ? AND status = 'running'", deadline, id);
     if (deadline) await this.host.wakeBy(deadline);
-    return { text: `已把消息交给子 agent ${id}${nextModel ? `（模型已切换为 ${nextModel.provider}/${nextModel.id}）` : ""}，回答会作为「[子 agent 完成]」输入交回给你。` };
+    const modelNote = !nextModel ? "" : receipt.status === "duplicate" ? "（原消息已处理，未重复切换模型）" : `（模型已切换为 ${nextModel.provider}/${nextModel.id}）`;
+    return { text: `已把消息交给子 agent ${id}${modelNote}，回答会作为「[子 agent 完成]」输入交回给你。` };
   }
 
   async setModel(caller: SubagentCaller, id: string, nextModel: ModelSelection, seed: string): Promise<Reply> {
@@ -256,6 +280,11 @@ export class ParentSubagents {
       identity: confirmedIdentity(JSON.parse(row.identity_json) as SubagentIdentity, ownerIds(this.host.env)) };
   }
 
+  async refresh(id: string): Promise<void> {
+    const current = await this.child(await this.host.thread(), id).status();
+    if (current) await this.apply(id, { status: current.meta.status, version: current.meta.version });
+  }
+
   async exists(id: string): Promise<boolean> {
     return !!await this.row(id);
   }
@@ -293,7 +322,9 @@ export class ParentSubagents {
         }
         if (args.action === "message") {
           if (!args.id || !args.text) return reply("message 需要 id 与 text", true);
-          const result = await this.message(who, args.id, args.text, seed, args.model);
+          const thread = await this.host.thread();
+          const result = await this.message(who, args.id, args.text, seed, () => durableAgentTicket(api, context,
+            at => this.host.reserveCommunication({ to: subagentName(thread, args.id!), text: args.text, ...(args.model ? { childModel: args.model } : {}) }, seed, at, who.origin.generation)), args.model);
           return reply(result.text, result.error);
         }
         if (args.action === "cancel") {

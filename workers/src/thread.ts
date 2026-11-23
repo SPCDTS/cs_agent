@@ -1,8 +1,11 @@
+import { childAddress, fingerprint, type AgentMessage, type AgentReceipt, type AgentSend } from "./communication/model";
+import { importFiles, incomingText, proves, reserveAgent, sendAgent, verifyMessage, type AgentTicket } from "./communication/service";
 import { MemoryAdmin } from "./memory/admin";
 import { McpAdmin } from "./mcp/admin";
 import { openThreadRuntime, applyToolProfile, type Runtime } from "./thread/runtime";
 import { isWeb, isWebAdmin, profileOf, targetOf, type InboundRow, type ToolProfile } from "./thread/model";
 import { workPath } from "./sandbox/client";
+import { decodeFileRead } from "./sandbox/read";
 import { ProjectionPublisher, observeWrites } from "./requests/projection";
 import { MCP_POLICY_SCHEMA } from "./mcp/policy";
 import { createWorkspaceAdminApi, type WorkspaceAdminApi, type WorkspaceMergeInput } from "./sandbox/admin";
@@ -70,6 +73,8 @@ export class ThreadDO extends DurableObject<Env> {
   private idleWait?: Promise<void>;
   private readonly skills = new SkillCatalog(() => this.env.REGISTRY.getByName("main"));
   private readonly subagents = new ParentSubagents({ db: this.database, env: this.env, thread: () => this.namespace(),
+    communicate: (to, text, seed, identity, ticket, childModel) => this.sendAgentMessage({ to, text, ...(childModel ? { childModel } : {}) }, seed, undefined, identity, ticket),
+    reserveCommunication: (args, seed, at, generation) => this.reserveAgentMessage(args, seed, at, generation),
     wake: input => this.queueInput(input), wakeBy: at => this.wakeBy(at), audit: (kind, detail) => this.audit(kind, detail) });
 
   private readonly memoryAdmin = new MemoryAdmin({
@@ -113,7 +118,7 @@ export class ThreadDO extends DurableObject<Env> {
         nickname: "TEXT NOT NULL DEFAULT ''", self_id: "TEXT NOT NULL DEFAULT ''",
         scope_name: "TEXT NOT NULL DEFAULT ''", platform_message_id: "TEXT NOT NULL DEFAULT ''", when_busy: "TEXT", turn_id: "TEXT",
         persona_text: "TEXT", session_generation: "INTEGER NOT NULL DEFAULT 0", kind: "TEXT NOT NULL DEFAULT 'message'", reply_channel: "TEXT NOT NULL DEFAULT 'qq'",
-        admitted_at: "INTEGER",
+        admitted_at: "INTEGER", agent_from: "TEXT", agent_hash: "TEXT", agent_files: "TEXT", agent_authority: "TEXT",
       })) if (!columns.some(column => column.name === name)) await tx.exec(`ALTER TABLE inbound ADD COLUMN ${name} ${definition}`);
       const outboxColumns = await tx.all<{ name: string }>("PRAGMA table_info(outbox)");
       if (!(await tx.all<{ name: string }>("PRAGMA table_info(subagents)")).some(c => c.name === "summary")) await tx.exec("ALTER TABLE subagents ADD COLUMN summary TEXT");
@@ -198,6 +203,13 @@ export class ThreadDO extends DurableObject<Env> {
       namespace: () => this.namespace(), models: () => this.models(), loadSettings: fresh => this.loadSettings(fresh),
       installProjection: () => this.projection.install(), currentInput: (harness, read, id, context) => this.currentInput(harness, read, id, context),
       memoryBinding: (input, ns) => this.memoryBinding(input, ns), sessionGeneration: () => this.sessionGeneration(),
+      agentSend: (input, args, seed, ticket) => this.sendAgentMessage(args, seed, input, undefined, ticket),
+      agentReserve: async (input, args, seed, at) => {
+        if (input.session_generation !== await this.sessionGeneration()) throw new Error("agent_session_revoked");
+        await this.narrowAgentRecipient(args, input);
+        return this.reserveAgentMessage(args, seed, at, input.session_generation);
+      },
+      readAgentFile: async (input, path, options) => decodeFileRead((await this.readAgentBlob(input, path)).bytes, options),
       ownerTurnKind: input => this.ownerTurnKind(input), sandboxTaskForInput: input => this.sandboxTaskForInput(input),
       subagentCaller: (input, selection) => this.subagentCaller(input, selection), scheduleAccess: input => this.scheduleAccess(input),
       mcpAuthority: input => this.mcpAuthority(input), deliver: (input, text, outputId, options) => this.deliver(input, text, outputId, options),
@@ -216,6 +228,7 @@ export class ThreadDO extends DurableObject<Env> {
 
   /** 网页输出只入本线程；QQ 副作用由 Bridge 的稳定意图负责恢复与防重。 */
   private async deliver(input: InboundRow, text: string, outputId: string, options: { target?: Target; attachments?: AssetRef[] } = {}): Promise<{ status: string; message_id?: string; reason?: string }> {
+    if (input.kind === "agent") return { status: "rejected", reason: "agent_reply_requires_agent_send" };
     if (input.session_generation !== await this.sessionGeneration()) return { status: "rejected", reason: "session_generation_revoked" };
     if (isWeb(input)) {
       if (options.target) return { status: "rejected", reason: "web_reply_only" };
@@ -247,7 +260,7 @@ export class ThreadDO extends DurableObject<Env> {
     await this.initialize();
     if (source.thread !== await this.namespace() || source.generation !== await this.sessionGeneration()) return false;
     const input = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id=?", source.inputId);
-    if (!input || isWeb(input) || input.session_generation !== source.generation || source.scope !== scopeOf(targetOf(input)) || input.user_id === input.self_id) return false;
+    if (!input || input.kind === "agent" || isWeb(input) || input.session_generation !== source.generation || source.scope !== scopeOf(targetOf(input)) || input.user_id === input.self_id) return false;
     if (scopeOf(target) === source.scope) return true;
     return input.kind === "message" && this.env.REGISTRY.getByName("main").canAccess({ user: "qq:" + input.user_id, cap: "send", scope: source.scope, target: "qq:" + scopeOf(target) });
   }
@@ -563,6 +576,110 @@ export class ThreadDO extends DurableObject<Env> {
     return this.subagents.report(report);
   }
 
+
+  /** 通信身份不是 QQ 用户；工具上下文只取接收方既有记录。 */
+  private async agentAuthority(input: InboundRow | undefined): Promise<InboundRow | undefined> {
+    if (input?.kind !== "agent") return input;
+    if (!input.agent_authority || input.session_generation !== await this.sessionGeneration()) return;
+    return this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id=? AND kind='message' AND session_generation=?", input.agent_authority, input.session_generation);
+  }
+  async agentChildAllowed(id: string): Promise<boolean> {
+    await this.initialize();
+    const access = await this.subagents.access(id, true);
+    return !!access && (access.origin.generation ?? 0) === await this.sessionGeneration();
+  }
+  async agentChildWake(id: string): Promise<void> {
+    if (!await this.agentChildAllowed(id)) throw new Error("agent_session_revoked");
+    await this.subagents.refresh(id);
+  }
+
+  async agentGeneration(): Promise<number> { await this.initialize(); return this.sessionGeneration(); }
+  private async reserveAgentMessage(args: AgentSend, seed: string, startedAt: number, expectedGeneration?: number): Promise<AgentTicket> {
+    await this.initialize();
+    const generation = await this.sessionGeneration();
+    if (expectedGeneration !== undefined && generation !== expectedGeneration) throw new Error("agent_session_revoked");
+    return reserveAgent({ env: this.env, storage: this.ctx.storage, agentSessionId: await this.namespace(), generation }, args, seed, startedAt);
+  }
+  async agentProof(id: string, hash: string): Promise<boolean> {
+    await this.initialize();
+    return proves(this.ctx.storage, id, hash, await this.sessionGeneration());
+  }
+  private async narrowAgentRecipient(args: AgentSend, input?: InboundRow, caller?: SubagentIdentity): Promise<void> {
+    const child = childAddress(args.to);
+    if (child?.parent === await this.namespace()) {
+      const identity = caller ?? (input?.kind === "message" ? { turn: "message" as const,
+        as: { userId: input.user_id, nickname: input.nickname, owner: isWebAdmin(input) || ownerIds(this.env).includes(input.user_id),
+          ...(isWebAdmin(input) ? { admin: true as const } : {}) } } : { turn: "agent" as const });
+      await this.subagents.narrow(child.id, identity);
+    }
+  }
+  private async sendAgentMessage(args: AgentSend, seed: string, input?: InboundRow, caller?: SubagentIdentity, ticket?: AgentTicket): Promise<AgentReceipt> {
+    await this.initialize();
+    const generation = await this.sessionGeneration();
+    if (input && input.session_generation !== generation) throw new Error("agent_session_revoked");
+    if (input && (input.kind === "schedule" || input.kind === "event")) throw new Error("agent_turn_denied");
+    // 模型变更仅由已确认 owner 的父任务交互入口附带；普通 Agent 通信没有此管理能力。
+    if (args.childModel && (caller?.turn !== "message" || !caller.as?.owner || childAddress(args.to)?.parent !== await this.namespace())) throw new Error("agent_model_denied");
+    await this.narrowAgentRecipient(args, input, caller);
+    const receipt = await sendAgent({ env: this.env, storage: this.ctx.storage, agentSessionId: await this.namespace(), generation,
+      readFile: async path => {
+        const task = input && await this.sandboxTaskForInput(input);
+        if (input?.kind === "agent" && !task?.permissions.coding) return this.readAgentBlob(input, path);
+        if (!task?.permissions.coding) throw new Error("agent_file_access_denied");
+        return this.env.SANDBOX.getByName(await this.namespace()).readBlob(path);
+      },
+    }, args, seed, undefined, ticket);
+    await this.audit("agent_send", { to: args.to, messageId: receipt.messageId, status: receipt.status, files: receipt.files.length });
+    return receipt;
+  }
+  private async readAgentBlob(input: InboundRow, path: string) {
+    if (input.kind !== "agent" || input.session_generation !== await this.sessionGeneration()) throw new Error("agent_file_access_denied");
+    const normalized = workPath(path);
+    const allowed = await this.database.get("SELECT 1 FROM inbound,json_each(inbound.agent_files) WHERE inbound.kind='agent' AND inbound.session_generation=? AND json_each.value=? LIMIT 1", input.session_generation, normalized);
+    if (!allowed) throw new Error("agent_file_access_denied");
+    return this.env.SANDBOX.getByName(await this.namespace()).readBlob(normalized);
+  }
+  async agentChildNarrow(id: string): Promise<void> {
+    if (!await this.agentChildAllowed(id)) throw new Error("agent_session_revoked");
+    await this.subagents.narrow(id, { turn: "agent" });
+  }
+  async agentReceive(message: AgentMessage): Promise<AgentReceipt> {
+    await this.initialize();
+    const ns = await this.namespace();
+    if (!ns || !this.ctx.id.equals(this.env.THREAD.idFromName(message.to))) throw new Error("agent_recipient_not_ready");
+    await verifyMessage(this.env, ns, message, await this.sessionGeneration());
+    if (message.report) {
+      const source = /^sub:(.+):([0-9a-f-]{36})$/.exec(message.from);
+      if (!source || source[1] !== ns || source[2] !== message.report.subagentId) throw new Error("agent_source_unverified");
+      const result = await this.subagentReport(message.report);
+      if (result === "ignored") throw new Error("agent_session_revoked");
+      return { messageId: message.id, status: result, files: [] };
+    }
+    return this.serial(async () => {
+      const hash = fingerprint(message);
+      const existing = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id=?", message.id);
+      if (message.targetGeneration !== undefined && message.targetGeneration !== await this.sessionGeneration()) throw new Error("agent_session_revoked");
+      if (existing) {
+        if (existing.session_generation !== await this.sessionGeneration()) throw new Error("agent_session_revoked");
+        if (existing.agent_hash !== hash) throw new Error("agent_message_conflict");
+        if (message.targetGeneration !== undefined && message.files.length) await this.env.SANDBOX.getByName(ns).retireAgentAttachments(message.id, message.files.length);
+        return { messageId: message.id, status: "duplicate" as const, files: JSON.parse(existing.agent_files ?? "[]") as string[] };
+      }
+      const generation = await this.sessionGeneration();
+      const authority = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE kind='message' AND session_generation=? AND turn_id IS NOT NULL AND user_id<>self_id ORDER BY rowid DESC LIMIT 1", generation);
+      if (!authority) throw new Error("agent_recipient_not_ready");
+      const paths = await importFiles(this.env, message, (path, bytes, operationId) => this.env.SANDBOX.getByName(ns).saveAttachment(path, bytes, operationId));
+      await this.database.transaction(async tx => {
+        await tx.run("INSERT INTO inbound(message_id,platform_message_id,user_id,self_id,text,received_at,status,chat_kind,chat_id,nickname,scope_name,kind,reply_channel,session_generation,when_busy,agent_from,agent_hash,agent_files,agent_authority) VALUES(?,?,'','agent',?,?,'queued',?,?,?,?,'agent','qq',?,NULL,?,?,?,?)",
+          message.id, message.id, incomingText(message, paths), Date.now(), authority.chat_kind, authority.chat_id, "", authority.scope_name,
+          generation, message.from, hash, JSON.stringify(paths), authority.message_id);
+        await this.armPump();
+      });
+      if (message.targetGeneration !== undefined && message.files.length) await this.env.SANDBOX.getByName(ns).retireAgentAttachments(message.id, message.files.length);
+      return { messageId: message.id, status: "accepted" as const, files: paths };
+    });
+  }
+
   /** 子 agent 的 qq_context：只读派出它的会话。 */
   async subagentContext(id: string, options: RecallOptions): Promise<string> {
     await this.initialize();
@@ -586,6 +703,8 @@ export class ThreadDO extends DurableObject<Env> {
   }
 
   private async sandboxTaskForInput(input: InboundRow | undefined): Promise<SandboxTask | undefined> {
+    // 通信边只授予投递与附件只读；没有独立 coding 委托时，任何 Agent 回合都不签发沙箱任务。
+    if (input?.kind === "agent") return;
     if (!input || !input.turn_id || input.user_id === input.self_id || input.session_generation !== await this.sessionGeneration()) return;
     const scope = await this.namespace(), subject = { scope, actor: input.user_id, generation: input.session_generation,
       replyChannel: input.reply_channel, owner: isWebAdmin(input) ? scope === "owner" : ownerIds(this.env).includes(input.user_id) };
@@ -611,7 +730,15 @@ export class ThreadDO extends DurableObject<Env> {
   }
 
   private async mcpAuthority(input: InboundRow | undefined): Promise<McpAuthority | undefined> {
+    if (input?.kind === "agent") {
+      // 本地记录只证明会话已就绪，不把最近发言人的身份/权限借给 Agent。
+      if (!await this.agentAuthority(input)) return;
+      const scope = await this.namespace();
+      return { kind: "agent", scope, actor: "agent:" + scope, owner: false,
+        generation: input.session_generation, replyChannel: "qq" };
+    }
     if (!input?.turn_id || input.session_generation !== await this.sessionGeneration()) return;
+    if (input.kind === "subagent" && !await this.reportIdentityValid(input)) return;
     return { kind: input.kind, scope: await this.namespace(), actor: input.user_id, owner: isWebAdmin(input) || ownerIds(this.env).includes(input.user_id),
       generation: input.session_generation, replyChannel: input.reply_channel };
   }
@@ -653,6 +780,17 @@ export class ThreadDO extends DurableObject<Env> {
   }
   async subagentCoding(id: string, operation: SubagentCodingOperation): ReturnType<SubagentCapabilityHost["subagentCoding"]> {
     const access = await this.validateSubagentAccess(id);
+    if (operation.kind === "read" && access && (!access.capabilities.coding || !access.authority.owner)) {
+      try {
+        const file = decodeFileRead((await this.subagentReadBlob(id, operation.path)).bytes, operation);
+        if ("kind" in file) {
+          const image = { type: "image" as const, data: file.data, mimeType: file.mimeType };
+          return { output: [image], structuredOutput: { kind: "image", image } };
+        }
+        const text = JSON.stringify({ status: "committed", result: file });
+        return { output: [{ type: "text", text }], structuredOutput: { kind: "text", text } };
+      } catch { return { isError: true, output: [{ type: "text", text: "delegation_denied" }] }; }
+    }
     if (!access?.capabilities.coding || !access.authority.owner) return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
     const name = access.sandbox?.name ?? subagentName(await this.namespace(), id), sandbox = this.env.SANDBOX.getByName(name);
     // 旧子任务沿用原资源目录；创建 subagent 不触发初始化或克隆。
@@ -666,12 +804,34 @@ export class ThreadDO extends DurableObject<Env> {
       ...(operation.kind === "read" && result.status === "committed" ? { structuredOutput: { kind: "text", text: value } } : {}) };
   }
 
-  private async subagentWorkspaceFiles(id: string) {
-    const access = await this.validateSubagentAccess(id);
+  private async subagentWorkspaceFiles(id: string, completed = false) {
+    const access = await this.subagentAccess(id, completed);
     if (!access?.capabilities.coding || !access.authority.owner) throw new Error("delegation_denied");
     return this.env.SANDBOX.getByName(access.sandbox?.name ?? subagentName(await this.namespace(), id));
   }
-  async subagentReadBlob(id: string, path: string) { return (await this.subagentWorkspaceFiles(id)).readBlob(workPath(path)); }
+  private async subagentAttachmentWorkspace(id: string) {
+    await this.initialize();
+    const access = await this.subagents.access(id, true), scope = await this.namespace();
+    if (!access?.identity.as || access.origin.generation !== await this.sessionGeneration()) throw new Error("delegation_denied");
+    const resourceId = access.origin.capabilities?.sandboxId;
+    const resource = resourceId ? await this.env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner").get(scope, resourceId) : undefined;
+    if (resourceId && !resource) throw new Error("delegation_denied");
+    return this.env.SANDBOX.getByName(resource?.name ?? subagentName(scope, id));
+  }
+  async subagentSaveAttachment(id: string, path: string, bytes: Uint8Array, operationId?: string) {
+    const normalized = workPath(path);
+    if (!/^\/work\/agent-files\/[0-9a-f]{64}\/[0-9]+-/.test(normalized)) throw new Error("agent_file_access_denied");
+    return (await this.subagentAttachmentWorkspace(id)).saveAttachment(normalized, bytes, operationId);
+  }
+  async subagentRetireAttachments(id: string, messageId: string, count: number): Promise<void> {
+    await (await this.subagentAttachmentWorkspace(id)).retireAgentAttachments(messageId, count);
+  }
+  async subagentReadBlob(id: string, path: string) {
+    const normalized = workPath(path), access = await this.subagentAccess(id);
+    if (access?.capabilities.coding && access.authority.owner) return (await this.subagentWorkspaceFiles(id)).readBlob(normalized);
+    if (!await this.env.SUBAGENT.getByName(subagentName(await this.namespace(), id)).agentFileAllowed(normalized)) throw new Error("delegation_denied");
+    return (await this.subagentAttachmentWorkspace(id)).readBlob(normalized);
+  }
   async subagentWriteFile(id: string, path: string, content: string | Uint8Array) { return (await this.subagentWorkspaceFiles(id)).writeFile(workPath(path), content); }
   async subagentCreateTempDir(id: string, prefix?: string) { return (await this.subagentWorkspaceFiles(id)).createTempDir(prefix); }
 
@@ -759,7 +919,15 @@ export class ThreadDO extends DurableObject<Env> {
     return input.kind;
   }
 
+  private async reportIdentityValid(input: InboundRow): Promise<boolean> {
+    const id = /^subagent-report:([0-9a-f-]{36}):/.exec(input.message_id)?.[1];
+    const access = id ? await this.subagents.access(id, true) : undefined;
+    return !!access?.identity.as && access.identity.as.userId === input.user_id
+      && access.origin.generation === input.session_generation && input.session_generation === await this.sessionGeneration();
+  }
+
   private async scheduleAccess(input: InboundRow | undefined): Promise<ScheduleAccess> {
+    if (input?.kind === "subagent" && !await this.reportIdentityValid(input)) return { kind: "none" };
     if (input && isWebAdmin(input)) return { kind: "manage", actor: "admin:web" };
     if (input?.kind === "schedule") {
       const key = parseScheduleInputKey(input.message_id);
@@ -865,6 +1033,7 @@ export class ThreadDO extends DurableObject<Env> {
 
   private memoryBinding(input: InboundRow, ns: string): MemoryBinding | undefined {
     if (!input.turn_id) return;
+    if (input.kind === "agent") return { ns, origin: "agent", owner: false, userId: "", turnId: input.turn_id, scope: ns, messageId: input.message_id };
     const owner = isWebAdmin(input) ? ns === "owner" : ownerIds(this.env).includes(input.user_id);
     const expected = isWebAdmin(input) ? ns : owner && input.chat_kind === "private" ? "owner" : scopeOf(targetOf(input));
     if (expected !== ns || input.user_id === input.self_id) return;
@@ -1066,6 +1235,13 @@ export class ThreadDO extends DurableObject<Env> {
   }
 
   private async currentMcpAuthority(original: McpAuthority): Promise<McpAuthority | undefined> {
+    if (original.kind === "agent") {
+      const scope = await this.namespace();
+      if (original.scope !== scope || original.actor !== "agent:" + scope || original.replyChannel !== "qq"
+        || original.generation !== await this.sessionGeneration()) return;
+      const input = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE kind='agent' AND session_generation=? ORDER BY rowid DESC LIMIT 1", original.generation);
+      return this.mcpAuthority(input);
+    }
     if (original.subagentId) {
       const access = await this.subagentAccess(original.subagentId, true), snapshot = access?.capabilities.mcp;
       return access && snapshot && snapshot.scope === original.scope && snapshot.actor === original.actor && snapshot.generation === original.generation

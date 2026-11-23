@@ -10,7 +10,7 @@ import { parseMemoryTime, parseClearableTime } from "./time";
 import { isMemoryNs, type MemoryInput } from "./types";
 
 export type MemoryBinding = { ns: string; owner: boolean; userId: string; turnId: string; scope: string; messageId: string;
-  origin: "message" | "web" | "schedule" | "event" | "subagent" };
+  origin: "message" | "web" | "schedule" | "event" | "subagent" | "agent" };
 export type MemoryToolOptions = { rememberInNamespace?: (
   ns: string, input: Omit<MemoryInput, "ns">, options: { supersedes?: number }, binding: MemoryBinding
 ) => ReturnType<MemoryStore["remember"]> };

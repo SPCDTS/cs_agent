@@ -34,10 +34,15 @@ export class McpPolicyError extends Error {
 }
 export const GrantInput = Type.Object({ environments: Type.Optional(EnvIdsSchema), environmentApproval: Type.Optional(Type.Union([Type.Literal("required"), Type.Literal("none")])), tools: Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: 200, uniqueItems: true }),
  resourceAllow: Type.Array(Type.String({ minLength: 1, maxLength: 2048 }), { maxItems: 100, uniqueItems: true }),
- actors: Type.Array(Type.String({ pattern: "^(?:[1-9][0-9]{0,19}|admin:web|\\*)$" }), { minItems: 1, maxItems: 100, uniqueItems: true }),
+ actors: Type.Array(Type.String({ pattern: "^(?:[1-9][0-9]{0,19}|admin:web|agent:group:[1-9][0-9]{0,19}|\\*)$" }), { minItems: 1, maxItems: 100, uniqueItems: true }),
  expiresAt: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]) }, { additionalProperties: false });
 const Result = Type.Object({ isError: Type.Optional(Type.Boolean()), structuredOutput: Type.Optional(Type.Unknown()),
  output: Type.Optional(Type.Array(Type.Object({ type: Type.Literal("text"), text: Type.String() }))) }, { additionalProperties: false });
+
+// 旧的人类通配符不自动授予 Agent；会话主体必须显式列入当前 grant。
+function actorAllowed(grant: McpGrant, authority: McpAuthority): boolean {
+ return grant.actors.includes(authority.actor) || authority.kind !== "agent" && grant.actors.includes("*");
+}
 
 function receiptOutput(value: unknown, limits: McpLimits) {
  if (value === undefined) return {};
@@ -103,29 +108,31 @@ export class McpPolicyStore {
   });
  }
  async allows(authority: McpAuthority, server: McpServerConfig, tool?: string, uri?: string) {
-  if (authority.scope === "owner") return authority.owner && (authority.kind !== "event" || tool !== undefined && server.tools.eventAllow.includes(tool));
+  if (authority.scope === "owner") return authority.kind === "agent"
+    ? tool !== undefined && server.tools.eventAllow.includes(tool)
+    : authority.owner && (authority.kind !== "event" || tool !== undefined && server.tools.eventAllow.includes(tool));
   if (authority.kind === "event" || !authority.scope.startsWith("group:")) return false;
   const grant = await this.grant(authority.scope, server.id);
-  return !!grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now()) && (grant.actors.includes("*") || grant.actors.includes(authority.actor))
+  return !!grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now()) && actorAllowed(grant, authority)
    && (tool !== undefined ? grant.tools.includes(tool) : uri !== undefined ? grant.resourceAllow.some(prefix => uri.startsWith(prefix)) : grant.resourceAllow.length > 0);
  }
  async environments(authority: McpAuthority, server: McpServerConfig): Promise<EnvironmentAccess> {
-  if (authority.scope === 'owner') return authority.owner ? { kind: 'all' } : noEnvironments();
+  if (authority.scope === 'owner') return authority.owner && authority.kind !== 'agent' ? { kind: 'all' } : noEnvironments();
   const grant = await this.grant(authority.scope, server.id);
   return grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now())
-    && (grant.actors.includes('*') || grant.actors.includes(authority.actor))
+    && actorAllowed(grant, authority)
     ? { kind: 'selected', envIds: grant.environments ?? [] } : noEnvironments();
  }
  async requiresApproval(authority: McpAuthority, server: McpServerConfig, tool: string): Promise<boolean> {
-  if (authority.owner) return false;
+  if (authority.owner && authority.kind !== "agent") return false;
   if (!isEnvironmentTool(tool)) return true;
   return (await this.grant(authority.scope, server.id))?.environmentApproval !== 'none';
  }
  async resourcePrefixes(authority: McpAuthority, server: McpServerConfig): Promise<string[]> {
-  if (authority.scope === "owner") return authority.owner && authority.kind !== "event" ? server.resourceAllow : [];
+  if (authority.scope === "owner") return authority.owner && authority.kind !== "event" && authority.kind !== "agent" ? server.resourceAllow : [];
   if (authority.kind === "event" || !authority.scope.startsWith("group:")) return [];
   const grant = await this.grant(authority.scope, server.id);
-  return grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now()) && (grant.actors.includes("*") || grant.actors.includes(authority.actor))
+  return grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now()) && actorAllowed(grant, authority)
     ? grant.resourceAllow.filter(prefix => server.resourceAllow.some(global => prefix.startsWith(global))) : [];
  }
  async list(scope: string) {
@@ -179,11 +186,16 @@ export class McpPolicyStore {
   const state = unknown ? "unknown" : "succeeded", json = unknown ? null : receipt(result, this.config.limits);
   await this.db.transaction(async tx => {
    await tx.run("UPDATE mcp_invocations SET status=?,result_json=? WHERE id=?", state, json, id);
-   await tx.run("UPDATE mcp_approvals SET status=?,result_json=? WHERE id=?", state, json, id);
+   await tx.run("UPDATE mcp_approvals SET status=?,result_json=? WHERE id=?", unknown ? "unknown" : result.isError ? "rejected" : "succeeded", json, id);
   });
  }
+ async rejectUnclaimedApproval(scope: string, id: string, result: ToolExecutionResult) {
+  await this.initialize();
+  await this.db.run("UPDATE mcp_approvals SET status='rejected',result_json=? WHERE id=? AND scope=? AND status='approved'",
+   receipt(result, this.config.limits), id, scope);
+ }
  async decide(scope: string, id: string, decision: "approve" | "reject", reviewer: McpAuthority) {
-  if (!reviewer.owner || reviewer.kind === "event" || reviewer.kind === "subagent" || reviewer.subagentId) throw new McpPolicyError("denied");
+  if (!reviewer.owner || reviewer.kind === "event" || reviewer.kind === "agent" || reviewer.kind === "subagent" || reviewer.subagentId) throw new McpPolicyError("denied");
   await this.initialize();
   return this.db.transaction(async tx => {
    const row = await tx.get<McpApproval>("SELECT * FROM mcp_approvals WHERE id=? AND scope=?", id, scope);
