@@ -119,6 +119,8 @@ export class SubagentDO extends DurableObject<Env> {
   /** 同一 requestId 只收一次；已取消的不再接受，已结束的重新进入运行并保留之前的上下文。 */
   async message(requestId: string, text: string, nextModel?: ModelSelection): Promise<{ result: "accepted" | "duplicate" | "ended"; state: SubagentState }> {
     await this.initialize();
+    const catalogRefreshed = Boolean(nextModel && this.runtime && usesDynamicCatalog(nextModel.provider));
+    if (catalogRefreshed) await this.refreshCatalogs();
     let result = "duplicate" as "accepted" | "duplicate" | "ended";
     const meta = await this.update(async (meta, tx) => {
       if (meta.status === "cancelled") { result = "ended"; return false; }
@@ -132,13 +134,15 @@ export class SubagentDO extends DurableObject<Env> {
       await this.wakeBy(Date.now());
       return true;
     });
-    if (result === "accepted" && nextModel && this.runtime) await this.syncRuntimeModel(nextModel);
+    if (result === "accepted" && nextModel && this.runtime) await this.syncRuntimeModel(nextModel, catalogRefreshed);
     return { result, state: state(meta) };
   }
 
-  /** 切换已有子 agent 的模型（不追加消息）；已打开运行时则立即更新会话配置，驱逐休眠中则在下次打开/应答时生效。 */
+  /** 切换已有子 agent 的模型（不追加消息）；先预刷动态目录避免瞬时故障卡死 lastModelOp，运行时配置失败则由下次 answer() 自动补齐。 */
   async setModel(requestId: string, nextModel: ModelSelection): Promise<{ result: "updated" | "duplicate" | "ended"; state: SubagentState }> {
     await this.initialize();
+    const catalogRefreshed = Boolean(this.runtime && usesDynamicCatalog(nextModel.provider));
+    if (catalogRefreshed) await this.refreshCatalogs();
     let result = "duplicate" as "updated" | "duplicate" | "ended";
     const meta = await this.update(async meta => {
       if (meta.status === "cancelled") { result = "ended"; return false; }
@@ -148,16 +152,22 @@ export class SubagentDO extends DurableObject<Env> {
       result = "updated";
       return true;
     });
-    if (result === "updated" && this.runtime) await this.syncRuntimeModel(nextModel);
+    if (result === "updated" && this.runtime) await this.syncRuntimeModel(nextModel, catalogRefreshed);
     return { result, state: state(meta) };
   }
 
-  private async syncRuntimeModel(selection: ModelSelection): Promise<void> {
+  private async syncRuntimeModel(selection: ModelSelection, catalogRefreshed = false): Promise<void> {
     const runtime = await this.runtime?.catch(() => undefined);
     if (!runtime || sameSelection(selection, runtime.selection)) return;
-    if (usesDynamicCatalog(selection.provider)) await this.refreshCatalogs();
-    await runtime.root.configure(modelChange(selection), context);
-    runtime.selection = selection;
+    try {
+      if (!catalogRefreshed && usesDynamicCatalog(selection.provider)) await this.refreshCatalogs();
+      await runtime.root.configure(modelChange(selection), context);
+      runtime.selection = selection;
+    } catch (error) {
+      // meta.model 已落库且 runtime.selection 未推进，下次 answer() / openRuntime() 会按 !sameSelection 自动重配。
+      const meta = await this.meta().catch(() => undefined);
+      logDiag(this.env, this.ctx, { level: "warn", event: "subagent_model_sync_deferred", thread: meta?.parent, actor: meta?.id, error });
+    }
   }
 
   /** 只取消运行中的；已回答未送达的汇报也不再补送。 */
@@ -210,9 +220,11 @@ export class SubagentDO extends DurableObject<Env> {
     // 结束满 14 天（或从未启动）：整个对象连同 Pi 存储一起删除。
     const runtime = await this.runtime?.catch(() => undefined);
     await runtime?.harness.close(context).catch(() => {});
+    this.runtime = undefined;
     await this.ctx.storage.deleteAlarm();
     this.projection.reset();
     await this.ctx.storage.deleteAll();
+    this.initialized = undefined;
     this.initialized = this.runtime = undefined;
   }
 

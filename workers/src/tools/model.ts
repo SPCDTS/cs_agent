@@ -8,10 +8,12 @@ import { classifyError } from "../shared/diagnostics";
 
 export type ModelManagementDeps = {
   env: Env;
-  /** 仅限确证 owner 的非 subagent 用户消息回合（排除 SubagentDO、kind=subagent 汇报回合、event 与 schedule）。 */
+  /** 仅限主人会话（owner）内确证 owner 的非 subagent 用户消息回合（排除 SubagentDO、kind=subagent 汇报回合、event、schedule 与群聊）。 */
   allowed(api: ToolExecutionApi, context: Context): Promise<boolean>;
   /** 刷新本线程模型目录缓存并立即将最新主模型同步到当前会话 root。 */
   syncSelfModel(): Promise<void>;
+  /** 查询指定模型是否声明支持推理强度设置。 */
+  modelReasoning(provider: string, id: string): boolean;
   /** 按 ID 切换本会话内某个已存在子 agent 的模型。 */
   setSubagentModel(api: ToolExecutionApi, context: Context, subagentId: string, model: ModelSelection): Promise<{ text: string; error?: true }>;
   audit(detail: { target: string; model?: string; subagentId?: string; result: string }): Promise<unknown>;
@@ -58,6 +60,7 @@ export function createModelManagementExtension(deps: ModelManagementDeps) {
           const registry = deps.env.REGISTRY.getByName("main");
 
           if (args.action === "list") {
+            await deps.syncSelfModel().catch(() => {});
             const view = await registry.modelView();
             return jsonOut({
               self: view.current,
@@ -65,7 +68,13 @@ export function createModelManagementExtension(deps: ModelManagementDeps) {
               effectiveSubagentDefault: view.subagent ?? view.current,
               reasoningEfforts: REASONING_EFFORTS,
               codexStatus: view.codex.status,
-              providers: view.providers,
+              providers: view.providers.map(provider => ({
+                ...provider,
+                models: provider.models.map(item => {
+                  const reasoning = deps.modelReasoning(provider.id, item.id);
+                  return { ...item, reasoning, ...(reasoning ? { reasoningEfforts: REASONING_EFFORTS } : {}) };
+                }),
+              })),
             });
           }
 
@@ -77,8 +86,14 @@ export function createModelManagementExtension(deps: ModelManagementDeps) {
             if (args.target !== "subagent" || !args.model || args.inheritSelf) {
               return jsonOut("invalid_arguments：指定 subagentId 时必须设置 target='subagent' 且提供 model（不能同时传 inheritSelf）。", true);
             }
-            const res = await deps.setSubagentModel(api, context, args.subagentId, args.model);
-            return jsonOut(res.error ? res.text : { status: "updated", target: "subagent_instance", subagentId: args.subagentId, model: args.model, message: res.text }, Boolean(res.error));
+            try {
+              const res = await deps.setSubagentModel(api, context, args.subagentId, args.model);
+              return jsonOut(res.error ? res.text : { status: "updated", target: "subagent_instance", subagentId: args.subagentId, model: args.model, message: res.text }, Boolean(res.error));
+            } catch (error) {
+              const code = classifyError(error).code ?? "update_failed";
+              await deps.audit({ target: "subagent_instance", subagentId: args.subagentId, model: `${args.model.provider}/${args.model.id}`, result: code }).catch(() => {});
+              return jsonOut(`model_error：${code}`, true);
+            }
           }
 
           if (args.inheritSelf) {
@@ -91,11 +106,15 @@ export function createModelManagementExtension(deps: ModelManagementDeps) {
                 await deps.audit({ target: "subagent", result: saved.reason }).catch(() => {});
                 return jsonOut({ error: saved.error, reason: saved.reason }, true);
               }
-              await deps.syncSelfModel();
-              await deps.audit({ target: "subagent", model: "inherit_self", result: "ok" }).catch(() => {});
+              let synced = true, syncError: string | undefined;
+              try { await deps.syncSelfModel(); }
+              catch (err) { synced = false; syncError = classifyError(err).code ?? "sync_failed"; }
+              await deps.audit({ target: "subagent", model: "inherit_self", result: synced ? "ok" : "sync_failed" }).catch(() => {});
               const current = saved.current.value;
               return jsonOut({
                 status: "updated",
+                synced,
+                ...(syncError ? { syncError } : {}),
                 target: "subagent",
                 self: current.model,
                 subagentDefault: null,
@@ -124,11 +143,15 @@ export function createModelManagementExtension(deps: ModelManagementDeps) {
               await deps.audit({ target: args.target, model: label, result: "invalid_model" }).catch(() => {});
               return jsonOut({ error: saved.error, reason: saved.reason, message: "目标模型未配置或不可用，请先调用 model_manage(action='list') 查看可用模型。" }, true);
             }
-            await deps.syncSelfModel();
-            await deps.audit({ target: args.target, model: label, result: "ok" }).catch(() => {});
+            let synced = true, syncError: string | undefined;
+            try { await deps.syncSelfModel(); }
+            catch (err) { synced = false; syncError = classifyError(err).code ?? "sync_failed"; }
+            await deps.audit({ target: args.target, model: label, result: synced ? "ok" : "sync_failed" }).catch(() => {});
             const current = saved.current.value;
             return jsonOut({
               status: "updated",
+              synced,
+              ...(syncError ? { syncError, warning: "已写入全局设置，但本回合运行时同步失败，将在下一回合生效。" } : {}),
               target: args.target,
               self: current.model,
               subagentDefault: current.subagentModel ?? null,

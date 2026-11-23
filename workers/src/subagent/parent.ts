@@ -126,13 +126,24 @@ export class ParentSubagents {
     if (savedOrigin.replyChannel !== caller.origin.replyChannel) return { text: "这个子任务属于另一个回复入口，请在当前入口新建子任务。", error: true };
     // 这一轮交代的内容会进入子 agent 的上下文：登记的身份与本轮合并，不是同一人就降为基础权限，之后的汇报都按合并后的身份。
     const identity = narrowIdentity(JSON.parse(row.identity_json) as SubagentIdentity, caller.identity);
-    const updatedOrigin = nextModel ? { ...savedOrigin, model: nextModel } : savedOrigin;
-    await this.host.db.run("UPDATE subagents SET identity_json = ?, origin_json = ? WHERE id = ?", JSON.stringify(identity), JSON.stringify(updatedOrigin), id);
-    const { result, state } = await this.child(await this.host.thread(), id).message(`m-${(await stableId(seed)).slice(0, 23)}`, text, nextModel);
+    await this.host.db.run("UPDATE subagents SET identity_json = ? WHERE id = ?", JSON.stringify(identity), id);
+    let rpcResult: { result: "accepted" | "duplicate" | "ended"; state: SubagentState };
+    try {
+      rpcResult = await this.child(await this.host.thread(), id).message(`m-${(await stableId(seed)).slice(0, 23)}`, text, nextModel);
+    } catch (error) {
+      const missing = error instanceof Error && /subagent_missing|no such table: meta/.test(error.message);
+      if (nextModel) await this.host.audit("model_change", { target: "subagent_instance", subagentId: id, model: `${nextModel.provider}/${nextModel.id}`, result: missing ? "expired" : "rpc_failed" });
+      if (missing) return { text: `子 agent ${id} 已过期清理，不能再发消息；需要的话重新 spawn。`, error: true };
+      throw error;
+    }
+    const { result, state } = rpcResult;
     await this.apply(id, state);
     if (result === "ended") return { text: `子 agent ${id} 已取消，不能再发消息。`, error: true };
-    if (nextModel && result === "accepted") {
-      await this.host.audit("model_change", { target: "subagent_instance", subagentId: id, model: `${nextModel.provider}/${nextModel.id}`, result: "ok" });
+    if (nextModel) {
+      await this.host.db.run("UPDATE subagents SET origin_json = ? WHERE id = ?", JSON.stringify({ ...savedOrigin, model: nextModel }), id);
+      if (result === "accepted") {
+        await this.host.audit("model_change", { target: "subagent_instance", subagentId: id, model: `${nextModel.provider}/${nextModel.id}`, result: "ok" });
+      }
     }
     const deadline = row.timeout_ms ? Date.now() + row.timeout_ms : 0;
     await this.host.db.run("UPDATE subagents SET deadline = ? WHERE id = ? AND status = 'running'", deadline, id);
@@ -156,7 +167,20 @@ export class ParentSubagents {
     const savedOrigin = JSON.parse(row.origin_json) as SubagentOrigin;
     if (savedOrigin.generation !== caller.origin.generation) return { text: "该子任务属于已归档会话，不能切换模型。", error: true };
     if (savedOrigin.replyChannel !== caller.origin.replyChannel) return { text: "这个子任务属于另一个回复入口，不能跨入口切换模型。", error: true };
-    const { result, state } = await this.child(thread, id).setModel(`mm-${(await stableId(seed)).slice(0, 22)}`, nextModel);
+    let rpcResult: { result: "updated" | "duplicate" | "ended"; state: SubagentState };
+    try {
+      rpcResult = await this.child(thread, id).setModel(`mm-${(await stableId(seed)).slice(0, 22)}`, nextModel);
+    } catch (error) {
+      const missing = error instanceof Error && /subagent_missing|no such table: meta/.test(error.message);
+      await this.host.audit("model_change", { target: "subagent_instance", subagentId: id, model: `${nextModel.provider}/${nextModel.id}`, result: missing ? "expired" : "rpc_failed" });
+      return {
+        text: missing
+          ? `子 agent ${id} 已过期清理，不能切换模型；需要的话重新 spawn。`
+          : `子 agent ${id} 模型切换失败，请稍后再试。`,
+        error: true,
+      };
+    }
+    const { result, state } = rpcResult;
     await this.apply(id, state);
     if (result === "ended") return { text: `子 agent ${id} 已取消，不能切换模型。`, error: true };
     await this.host.db.run("UPDATE subagents SET origin_json = ? WHERE id = ?", JSON.stringify({ ...savedOrigin, model: nextModel }), id);
@@ -237,7 +261,7 @@ export class ParentSubagents {
   }
 
   /** 只在用户亲自发消息的回合可用；caller 由 ThreadDO 按当前输入求出，每次执行都重新求。 */
-  tool(caller: (api: ToolExecutionApi, context: Context, selection: { sandboxId?: string; mcpTools?: McpToolSelection }) => Promise<SubagentCaller | undefined>, model: () => Promise<ModelSelection>) {
+  tool(caller: (api: ToolExecutionApi, context: Context, selection: { spawn?: boolean; sandboxId?: string; mcpTools?: McpToolSelection }) => Promise<SubagentCaller | undefined>, model: () => Promise<ModelSelection>) {
     return defineTool({
       name: "subagent", description: DESCRIPTION, parameters: PARAMETERS,
       // spawn 的 id 与 message / set_model 的 requestId 都由本次工具调用的任务 id 求出，中断后重放找回同一个子 agent 与同一条操作。
@@ -245,7 +269,7 @@ export class ParentSubagents {
       execute: async (args, api, context) => {
         if ((args.sandboxId || args.mcpTools) && args.action !== "spawn") return reply("sandboxId 与 mcpTools 只用于 spawn；已有子任务不能改绑。", true);
         if (args.model && !["spawn", "message", "set_model"].includes(args.action)) return reply("model 只用于 spawn、message 或 set_model。", true);
-        const who = await caller(api, context, { sandboxId: args.sandboxId, mcpTools: args.mcpTools });
+        const who = await caller(api, context, { spawn: args.action === "spawn", sandboxId: args.sandboxId, mcpTools: args.mcpTools });
         if (!who) return reply("子 agent 只能在用户亲自发消息的回合使用；本轮请勿重试。", true);
         const seed = `${api.conversationId}:${api.taskId}`;
         if (args.action === "set_model") {

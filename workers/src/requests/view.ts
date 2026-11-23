@@ -180,9 +180,9 @@ export class AgentReadView {
       ORDER BY last_active_at DESC,created_at DESC,subagents.id LIMIT 50`,JSON.stringify(activity));
     const items: (SubagentView & {lastActiveAt: number})[]=[];
     for (const {id,last_active_at} of ids) { const row=await this.child(id); if(!row)continue;
-      const as=(JSON.parse(row.identity_json) as SubagentIdentity).as, sandboxId=(JSON.parse(row.origin_json) as SubagentOrigin).capabilities?.sandboxId;
+      const as=(JSON.parse(row.identity_json) as SubagentIdentity).as, origin=JSON.parse(row.origin_json) as SubagentOrigin, sandboxId=origin.capabilities?.sandboxId;
       items.push({id,lastActiveAt:last_active_at,task:clip(row.task,200),summary:row.summary??shortSummary(row.task),status:row.status,createdAt:row.created_at,deadline:row.deadline||null,
-        ...(sandboxId?{sandboxId}:{}),...(as?{spawner:(as.owner?"owner":"成员")+" "+as.userId}:{}),
+        ...(sandboxId?{sandboxId}:{}),...(origin.model?{model:origin.model}:{}),...(as?{spawner:(as.owner?"owner":"成员")+" "+as.userId}:{}),
         ...(row.ended_at===null?{}:{endedAt:row.ended_at}),...(row.last_report_at===null?{}:{lastReportAt:row.last_report_at})});
     }
     return items;

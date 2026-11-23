@@ -228,8 +228,9 @@ export class RegistryDO extends DurableObject<Env> {
 
   private async checkModelSelection(providers: ProviderStatus[], selection: ModelSelection): Promise<string | undefined> {
     if (!Check(ModelSelectionSchema, selection)) return "invalid_format";
+    const codex = selection.provider === CODEX_PROVIDER ? this.chatgpt.view() : undefined;
     const problem = selectionProblem(providers, selection)
-      ?? (selection.provider === CODEX_PROVIDER && this.chatgpt.view().needsReauth ? "reauth_required" : undefined);
+      ?? (codex?.needsReauth ? "reauth_required" : codex?.status === "refresh_failed" ? "refresh_failed" : undefined);
     return problem;
   }
 
@@ -301,9 +302,8 @@ export class RegistryDO extends DurableObject<Env> {
   async executionSettings() {
     const { overrides, value } = this.settings();
     const catalog = this.codexCatalog();
-    const needsCatalog = usesDynamicCatalog(value.model.provider) || Boolean(value.subagentModel && usesDynamicCatalog(value.subagentModel.provider));
-    // Codex 凭据故障时，独立的其他 provider 仍能运行。
-    return { overrides, catalog: await (needsCatalog ? catalog : catalog.catch(() => [])) };
+    // 主会话仅自身模型强依赖动态目录；子任务模型由 SubagentDO 独立加载，Codex 凭据故障时不拖垮其他 provider 的主会话。
+    return { overrides, catalog: await (usesDynamicCatalog(value.model.provider) ? catalog : catalog.catch(() => [])) };
   }
 
   async modelView(): Promise<ModelView> {
