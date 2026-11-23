@@ -30,7 +30,7 @@ const Credential = Type.Union([
 ]);
 const Server = Type.Object({
   id: Type.String({ pattern: "^[A-Za-z][A-Za-z0-9_-]{0,63}$" }), enabled: Type.Optional(Type.Boolean()),
-  transport: Type.Object({ kind: Type.Literal("streamable-http"), url: clean(4096, 1),
+  transport: Type.Object({ kind: Type.Union([Type.Literal("streamable-http"), Type.Literal("reverse-websocket")]), url: clean(4096, 1),
     headers: Type.Optional(Type.Record(Header, clean(8192), strict)), secretHeaders: Type.Optional(Type.Record(Header, Variable, strict)) }, strict),
   resourceAllow: Type.Optional(Type.Array(clean(2048, 1), { maxItems: 100, uniqueItems: true })),
   credential: Credential, access: Type.Object({ kind: Type.Literal("owner-private"), revision: Type.Optional(clean(128, 1)) }, strict),
@@ -61,6 +61,7 @@ export function parseMcpConfig(value: unknown): McpConfig {
     const servers = value.servers.map(server => {
       httpsUrl(server.transport.url);
       const headers = server.transport.headers ?? {}, secretHeaders = server.transport.secretHeaders ?? {};
+      if (server.transport.kind === "reverse-websocket" && server.credential.kind !== "managed") throw new Error();
       const names = [...Object.keys(headers), ...Object.keys(secretHeaders)].map(n => n.toLowerCase());
       if (new Set(names).size !== names.length || names.some(n => /^(accept|content-type|host|content-length|connection|transfer-encoding|upgrade|te|trailer|keep-alive|mcp-.*|last-event-id|proxy-.*|sec-.*|cookie|set-cookie)$/i.test(n))
         || Object.keys(headers).some(n => /(?:^|[-_])(?:auth|authorization|cookie|token|key|secret)(?:$|[-_])/i.test(n))) throw new Error();

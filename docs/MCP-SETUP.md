@@ -55,3 +55,19 @@ Token 不通过聊天或模型工具参数接收，不回显。凭据使用现�
 持久 Hyper-V VM 在来宾内按[设备配对流程](DEVICE-MCP.md)接入，模型通过 `device_info` 和 `shell_*` 使用它。临时 WSB 使用宿主机的 `env_*` 服务，旧 VM 任务的收尾步骤见 [Windows MCP](WINDOWS-MCP.md)。Cloudflare Container 保留原生 coding，不迁移为 MCP。
 
 Windows runner 的固定 env_* 工具使用环境级授权：管理页群授权中的 environments 是 envId 清单，留空即不开放；environmentApproval 默认为 required，可明确设为 none 允许授权范围内的环境操作直接执行。两字段沿用现有 PUT /admin/mcp/access 和 mcp_access JSON 存储，不新增服务。固定工具名及宿主元数据协议见 [Windows MCP](WINDOWS-MCP.md)。这些名称由平台按环境协议识别；其他普通 MCP 工具继续按原工具权限与逐次审批策略执行。
+
+## 不开放入站端口的节点：反向 WebSocket
+
+在管理页选择「反向 WebSocket」，或通过 `put` 提交 `server: {"id":"phone","transport":"reverse-websocket"}`。不用提供公网 MCP 地址，也不创建 Cloudflare Tunnel。在管理页为此实例设置独立的 `Authorization` Bearer 凭据（由密码管理器生成至少 32 个随机 URL-safe 字符）；绝不要使用管理员 Token 或在聊天中传递凭据。
+
+节点使用支持自定义请求头的 WebSocket 客户端，主动连接 `wss://<cs-agent 主机>/mcp/reverse/phone`，握手携带 `Authorization: Bearer <专用凭据>`。HTTP 101 表示注册成功；401 表示未获授权。只接受请求头，不支持 URL 参数或普通浏览器页面的原生 WebSocket 构造器。连接后执行原有的 `probe → activate` 并选择允许工具；节点不能自行启用工具或授予会话权限。
+
+**节点与 SDK 的接线约定**：这是自定义 MCP 传输，不是 Streamable HTTP。每个 UTF-8 文本帧含一个会话信封，最大 1 MiB（含信封），每个实例最多同时 16 个逻辑会话：
+
+- 收到 `{"session":"<uuid>","message":{...}}`：按 UUID 取得独立的 MCP Server 会话；首次 `initialize` 时创建。将 `message` 原样送交该会话的 SDK transport。响应或通知用相同 UUID 和相同信封格式发回；不同会话的 JSON-RPC id 可以重复，不要串用。
+- 收到 `{"session":"<uuid>","close":true}`：释放该会话。物理连接关闭时释放全部会话。再次连入会替换同一实例原连接；不要缓存或重发旧调用。节点不在线时探测返回 `reverse_offline`；已发出的写操作失去应答时，沿用 `outcome_unknown`，先核实结果。
+- 更换注册凭据会停用服务、清空已发现目录并隔离旧连接；用新凭据重连后重新探测及启用。现有 HTTP、OAuth 和设备 Tunnel 配对无需迁移。
+
+可参考 `workers/test/mcp-reverse.test.ts` 中用标准 SDK Server 处理会话的可运行例子。
+
+**独立节点试用**：仓库自带仅返回固定问候的 Node 示例，无 shell 或文件权限。安装仓库依赖后，在节点环境安全注入 `REVERSE_MCP_URL`（完整 wss 注册地址）和 `REVERSE_MCP_TOKEN`（不含 Bearer 前缀，不要写进版本库或命令历史），运行 `node runner/scripts/reverse-mcp-example.ts`。保持进程开启，在管理页检测并启用 `hello`。断线后可重新启动示例；示例不自动重试。

@@ -1,3 +1,4 @@
+import { ReverseRelay } from "./mcp/reverse-relay";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
 import { channelDown, parseFrame, type SendReceipt } from "./onebot";
@@ -26,6 +27,7 @@ function decodeMediaContent(encoded: string, invalidCode: string): Uint8Array {
 
 export class BridgeDO extends DurableObject<Env> {
   // echo 与发送事实持久化；内存 Promise 仅用于等待本次连接的响应。
+  private readonly reverse = new ReverseRelay(this.ctx);
   private readonly ledger = new DeliveryStore(this.ctx.storage);
   private readonly sending = new Map<string, Promise<Delivery>>();
   private readonly runSending = new Map<string, Promise<Delivery>>();
@@ -52,6 +54,7 @@ export class BridgeDO extends DurableObject<Env> {
   }
 
   override fetch(request: Request): Response {
+    if (ReverseRelay.isInternalRequest(request)) return this.reverse.upgrade(request);
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response("websocket required", { status: 426 });
     for (const socket of this.ctx.getWebSockets()) {
       this.disconnect(socket);
@@ -65,6 +68,7 @@ export class BridgeDO extends DurableObject<Env> {
   }
 
   override async webSocketMessage(socket: WebSocket, raw: string | ArrayBuffer): Promise<void> {
+    if (this.reverse.owns(socket)) return this.reverse.message(socket, raw);
     const frame = parseFrame(raw);
     if (!frame) return;
     if (frame.kind === "response") {
@@ -400,10 +404,12 @@ export class BridgeDO extends DurableObject<Env> {
     }
   }
   override webSocketClose(socket: WebSocket, code: number): void {
+    if (this.reverse.owns(socket)) return this.reverse.disconnect(socket);
     this.disconnect(socket);
     socket.close(code === 1005 || code === 1006 ? 1000 : code);
   }
   override webSocketError(socket: WebSocket): void {
+    if (this.reverse.owns(socket)) return this.reverse.disconnect(socket);
     this.disconnect(socket);
     socket.close(1011, "websocket error");
   }

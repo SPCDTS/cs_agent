@@ -1,3 +1,4 @@
+import { ReverseTransport } from "./transport-reverse";
 import type { EnvironmentAccess } from "./environments";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -9,10 +10,10 @@ import { connectionDigest } from "./names";
 
 export class McpConnection {
   private readonly client = new Client({ name: "cs-agent-workers", version: "1.0.0" }, { capabilities: {} });
-  private readonly transport: StreamableHTTPClientTransport;
+  private readonly transport: StreamableHTTPClientTransport | ReverseTransport;
   private failure?: McpConnectionError;
   private closing?: Promise<void>;
-  private constructor(server: McpServerConfig, env: Env, private readonly limits: McpLimits, onChanged: () => void, managedHeaders: Record<string, string>) {
+  private constructor(server: McpServerConfig, env: Env, private readonly limits: McpLimits, onChanged: () => void, managedHeaders: Record<string, string>, connectSignal: AbortSignal) {
     const headers = new Headers({ ...server.transport.headers, ...managedHeaders });
     for (const [name, ref] of Object.entries(server.transport.secretHeaders)) {
       const value = referencedSecret(env, ref);
@@ -26,7 +27,7 @@ export class McpConnection {
         return value;
       } catch { throw new McpConnectionError("auth_required", "auth_required"); }
     };
-    this.transport = new StreamableHTTPClientTransport(new URL(server.transport.url), {
+    this.transport = server.transport.kind === "reverse-websocket" ? new ReverseTransport(env, connectionDigest(server), limits.messageBytes, connectSignal) : new StreamableHTTPClientTransport(new URL(server.transport.url), {
       requestInit: { headers, redirect: "manual" },
       fetch: boundedFetch(new URL(server.transport.url), limits.messageBytes, error => { this.failure = error; void this.close(); },
         server.credential.kind === "oauth" ? { accessToken: () => token(), rejected: token,
@@ -38,8 +39,8 @@ export class McpConnection {
     this.client.setNotificationHandler(ToolListChangedNotificationSchema, () => { if (!this.closing) onChanged(); });
   }
   static async open(server: McpServerConfig, env: Env, limits: McpLimits, signal: AbortSignal, onChanged: () => void): Promise<McpConnection> {
-    const managed = server.credential.kind === "managed" ? await env.REGISTRY.getByName("main").mcpCredentialHeaders(server.id, connectionDigest(server)) : {};
-    const connection = new McpConnection(server, env, limits, onChanged, managed);
+    const managed = server.transport.kind === "streamable-http" && server.credential.kind === "managed" ? await env.REGISTRY.getByName("main").mcpCredentialHeaders(server.id, connectionDigest(server)) : {};
+    const connection = new McpConnection(server, env, limits, onChanged, managed, signal);
     try {
       await connection.client.connect(connection.transport, { signal, timeout: limits.connectMs, maxTotalTimeout: limits.connectMs });
       signal.throwIfAborted();
@@ -47,6 +48,7 @@ export class McpConnection {
       return connection;
     } catch (error) { await connection.close(); throw connection.failure ?? safeError(error); }
   }
+  get reverseDisconnected() { return this.transport instanceof ReverseTransport && !!this.failure; }
   async listTools(signal: AbortSignal): Promise<Tool[]> {
     if (!this.client.getServerCapabilities()?.tools) return [];
     const tools: Tool[] = [], names = new Set<string>(), cursors = new Set<string>();
@@ -111,7 +113,7 @@ export class McpConnection {
     return this.closing ??= (async () => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        await Promise.race([this.transport.terminateSession().catch(() => {}), new Promise<void>(resolve => { timer = setTimeout(resolve, Math.min(250, this.limits.closePerConnectionMs)); })]);
+        if (this.transport instanceof StreamableHTTPClientTransport) await Promise.race([this.transport.terminateSession().catch(() => {}), new Promise<void>(resolve => { timer = setTimeout(resolve, Math.min(250, this.limits.closePerConnectionMs)); })]);
       } finally { clearTimeout(timer); await this.client.close(); await this.transport.close(); }
     })();
   }

@@ -7,5 +7,9 @@ export async function authenticated(request: Request, secret: string | undefined
   const token = header?.startsWith("Bearer ") ? header.slice(7) : queryToken ? new URL(request.url).searchParams.get("access_token") : null;
   if (token === null) return false;
   // 固定长度摘要交给原生常量时间比较，避免逐字符比较泄露匹配前缀。
-  return timingSafeEqual(sha256Bytes(token), sha256Bytes(secret));
+  return secretsEqual(token, secret);
+}
+
+export function secretsEqual(provided: string, expected: string) {
+  return timingSafeEqual(sha256Bytes(provided), sha256Bytes(expected));
 }

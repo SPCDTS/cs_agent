@@ -32,7 +32,7 @@ export const WorkspaceMergedSchema = Type.Object({ manifest: ManifestSchema });
 
 export const McpServerRecordSchema = Type.Object({
   server: Type.Object({ id: Type.String(), enabled: Type.Boolean(),
-    transport: Type.Object({ url: Type.String(), headers: Type.Record(Type.String(), Type.String()) }),
+    transport: Type.Object({ kind: Type.Optional(Type.String()), url: Type.String(), headers: Type.Record(Type.String(), Type.String()) }),
     credential: Type.Object({ kind: Type.String(), scope: Type.Optional(Type.String()) }),
     resourceAllow: strings(), access: Type.Object({ revision: Type.Optional(Type.String()) }),
     tools: Type.Object({ allow: strings(), readOnly: Type.Optional(strings()) }),

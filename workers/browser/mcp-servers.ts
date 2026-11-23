@@ -12,7 +12,7 @@ export function mcpServerRender(id:string){
   const record=mcpServers.rows.find(row=>row.server.id===id),server=record?.server;
   mcpServers.selected=id;mcpServers.revision=record?.revision||"absent";
   $("mcp-server-select").value=server?id:"";$("mcp-server-id").value=server?.id||"";$("mcp-server-id").disabled=!!server;
-  $("mcp-server-url").value=server?.transport.url||"";$("mcp-server-auth").value=server?.credential.kind==="oauth"?"oauth":server&&server.credential.kind!=="none"?"token":"none";
+  $("mcp-server-url").value=server?.transport.url||"";$("mcp-server-auth").value=server?.transport.kind==="reverse-websocket"?"reverse-websocket":server?.credential.kind==="oauth"?"oauth":server&&server.credential.kind!=="none"?"token":"none";
   $("mcp-server-scope").value=server?.credential.scope||"";$("mcp-secret-value").value="";
   $("mcp-server-resources").value=(server?.resourceAllow||[]).join("\n");
   $("mcp-server-credential").hidden=server?.credential.kind!=="managed";
@@ -38,7 +38,7 @@ export async function loadMcpServers(selected=mcpServers.selected){
 export async function mcpServerAction(action:ServerAction){
   const id=$("mcp-server-id").value.trim(),expectedRevision=mcpServers.revision;
   const allow=listInputs($("mcp-server-tools"),"input[data-tool]:checked").map(node=>node.dataset.tool).filter(name=>name!==undefined);
-  const input=action==="put"?{action,expectedRevision,server:{id,url:$("mcp-server-url").value.trim(),auth:$("mcp-server-auth").value,headers:mcpServers.rows.find(row=>row.server.id===id)?.server.transport.headers||{},...($("mcp-server-scope").value.trim()?{scope:$("mcp-server-scope").value.trim()}:{})}}
+  const input=action==="put"?{action,expectedRevision,server:$("mcp-server-auth").value==="reverse-websocket"?{id,transport:"reverse-websocket"}:{id,url:$("mcp-server-url").value.trim(),auth:$("mcp-server-auth").value,headers:mcpServers.rows.find(row=>row.server.id===id)?.server.transport.headers||{},...($("mcp-server-scope").value.trim()?{scope:$("mcp-server-scope").value.trim()}:{})}}
     :action==="login"?{action,id}
     :action==="activate"?{action,id,expectedRevision,selection:{allow,readOnly:listInputs($("mcp-server-tools"),"input[data-readonly]:checked").map(node=>node.dataset.readonly).filter(name=>name!==undefined&&allow.includes(name)),resourceAllow:mcpUiLines($("mcp-server-resources").value)}}
     :{action,id,expectedRevision};
