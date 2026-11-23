@@ -4,7 +4,7 @@ import { MediaRepository } from "../media/repository";
 import { cleanFileName, FILE_MAX_BYTES } from "../media/model";
 import { workPath } from "../sandbox/client";
 import { sha256Hex } from "../shared/hash";
-import { assertNoCredentials, childAddress, configuredEdge, fingerprint, messageId, sessionId, validateSend, type AgentMessage, type AgentReceipt, type AgentSend } from "./model";
+import { assertNoCredentials, childAddress, fingerprint, messageId, sessionId, validateSend, type AgentMessage, type AgentReceipt, type AgentSend } from "./model";
 
 export type CommunicationHost = {
   env: Env; storage: DurableObjectStorage; agentSessionId: string; generation: number;
@@ -20,7 +20,7 @@ export async function allowed(env: Env, from: string, to: string): Promise<boole
   const child = childAddress(from) ?? childAddress(to);
   if (child && (from === child.parent || to === child.parent))
     return env.THREAD.getByName(child.parent).agentChildAllowed(child.id);
-  return configuredEdge(env.AGENT_COMMUNICATION_EDGES, from, to);
+  return env.REGISTRY.getByName("main").edgeAllowed(from, to);
 }
 export type AgentTicket = { generation: number; nonce: string };
 type Sent = { inputHash: string; message?: AgentMessage; generation: number; hash?: string; receipt?: AgentReceipt;

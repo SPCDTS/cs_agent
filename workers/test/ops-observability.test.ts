@@ -99,11 +99,14 @@ describe("cs-agent 自观测能力（ops_health 与 runtime-ops Code Mode 命名
     });
 
     const script = [
+      "const access = await describeNamespace('access'), runtime = await describeNamespace('runtime-ops');",
+      "await tools.edge_grant({from:'owner',to:'private:42'});",
       "const usage = await tools.ops_usage({ hours: 24, thread: 'owner' });",
       "const reqs = await tools.ops_requests({ hours: 24, thread: 'owner', includeTimings: true });",
       `const inspected = await tools.ops_inspect({ kind: 'request', id: '${priorReqId}' });`,
       "const logs = await tools.ops_logs({ source: 'diag', level: 'error' });",
       "text('RESULT_JSON:' + JSON.stringify({",
+      "  access:access.tools, runtime:runtime.tools,",
       "  priorFound: reqs.requests.some(r => r.id === '" + priorReqId + "'),",
       "  hasSelfTurn: reqs.requests.some(r => r.binding?.turnId === reqs.excludedTurnId),",
       "  excludedTurnId: reqs.excludedTurnId,",
@@ -145,6 +148,8 @@ describe("cs-agent 自观测能力（ops_health 与 runtime-ops Code Mode 命名
     const jsonLine = seen.outputs[1]!.split("\n").find(line => line.startsWith("RESULT_JSON:"))!;
     const codemodeOut = JSON.parse(jsonLine.slice("RESULT_JSON:".length));
     expect(codemodeOut).toMatchObject({
+      access: expect.arrayContaining(["auth_grant","auth_revoke","auth_list","qq_chats","edge_list","edge_revoke","edge_grant"]),
+      runtime: expect.arrayContaining(["ops_health","ops_usage","ops_requests","ops_inspect","ops_logs","sandbox_list","sandbox_create"]),
       priorFound: true,
       hasSelfTurn: false,
       excludedTurnId: expect.stringMatching(/^turn:/),
@@ -153,6 +158,7 @@ describe("cs-agent 自观测能力（ops_health 与 runtime-ops Code Mode 命名
       bodyDeferred: true,
       logEvents: expect.arrayContaining(["mcp_refresh_failed"]),
     });
+    expect(await env.REGISTRY.getByName("main").edgeAllowed("owner","private:42")).toBe(true);
     expect(Number(codemodeOut.reasoningTokens)).toBeGreaterThanOrEqual(40);
     expect(auditRows.map(r => JSON.parse(r.detail))).toEqual([
       { tool: "ops_health", result: "ok" },

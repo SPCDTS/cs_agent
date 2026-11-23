@@ -1,3 +1,4 @@
+import { EDGE_SCHEMA, EdgeStore } from "./communication/edges";
 import { DurableObject } from "cloudflare:workers";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
@@ -32,6 +33,10 @@ export type ModelStatus = (ModelSelection & { subagentModel?: ModelSelection; co
 export type PutSettingsResult = { ok: true; current: SettingsSnapshot } | { ok: false; error: "conflict"; current: SettingsSnapshot } | { ok: false; error: "invalid_model"; reason: string };
 
 export class RegistryDO extends DurableObject<Env> {
+  private readonly edges = new EdgeStore(this.ctx.storage, this.env.AGENT_COMMUNICATION_EDGES);
+  edgeAllowed(from: string, to: string) { return this.edges.allowed(from, to); }
+  edgeList() { return this.edges.list(); }
+  edgeSet(from: string, to: string, decision: 'allow' | 'deny', actor: string) { return this.edges.set(from, to, decision, actor); }
   private readonly grantStore = new GrantStore(this.ctx.storage, this.env);
   private readonly alertStore = new AlertStore(this.ctx.storage);
   private alertDrain?: Promise<void>;
@@ -55,6 +60,7 @@ export class RegistryDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`
+      ${EDGE_SCHEMA}
       CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (
         server_id TEXT NOT NULL, account_id TEXT NOT NULL, revision TEXT NOT NULL, issuer TEXT NOT NULL,
         access_token TEXT NOT NULL, refresh_token TEXT, scope TEXT, expires_at INTEGER, updated_at INTEGER NOT NULL,

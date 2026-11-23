@@ -11,6 +11,8 @@ export function installCodemode(registry: Registry, options: {
   const sandbox = createInlineCodemodeSandbox();
   const extension = () => createCodemodeExtension({ sandbox, models: false, namespaces: [
     { name: "workspace-skills", prefix: "skill_", description: "Cloudflare 工作区技能检查与发布" },
+    ...["ops_", "sandbox_list", "sandbox_create"].map(prefix => ({ name: "runtime-ops", prefix, description: "运行状态、请求观测和沙箱资源管理" })),
+    ...["auth_", "qq_chats", "edge_"].map(prefix => ({ name: "access", prefix, description: "QQ 授权、聊天目录和有向通信边" })),
     ...options.namespaces?.() ?? [],
   ] });
   const base = extension();

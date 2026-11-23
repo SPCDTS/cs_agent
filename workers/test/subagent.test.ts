@@ -322,6 +322,7 @@ describe("subagents as child Durable Objects", () => {
       { tool: "codemode", args: { code: 'text((await tools.sandbox_list({})).assignedSandboxId);' } },
       { tool: "codemode", args: { code: 'text(await tools.bash({command:"pwd"}));' } },
       { tool: "codemode", args: { code: 'const check=await tools.skill_inspect({path:"skills/example"});text(await tools.skill_publish({path:"skills/example",workspaceRevision:check.workspaceRevision,expectedRevision:check.expectedRevision}));text((await tools.read({workspace:"group:200000001",path:"skills/example/sources.md"})).text);' } },
+      { tool: "codemode", args: { code: 'text(await tools.edge_grant({from:"owner",to:"private:42"}));' } },
       { text: "已核实主工作区" },
     ], [{ text: "子工作区为空，请主会话核实", after: ready.promise }]);
     if (channel === "web") {
@@ -336,6 +337,8 @@ describe("subagents as child Durable Objects", () => {
     expect(exec).toHaveBeenCalledTimes(1);
     expect(outputs.parent[3]).toContain('"ok":true');
     expect(outputs.parent[3]).toContain("中文来源说明");
+    expect(outputs.parent[4]).toContain("仅限 owner");
+    expect(await env.REGISTRY.getByName("main").edgeAllowed("owner", "private:42")).toBe(false);
     expect((await env.REGISTRY.getByName("main").skillGet("example"))?.files).toEqual({"sources.md":"中文来源说明"});
 
   });

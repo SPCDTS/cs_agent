@@ -330,6 +330,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     }));
   }
   registry.install(createAccessExtension({
+    ownerThread: memory.ns === "owner",
     allowManage: async (api, c) => {
       const input = await ownerManagementInput(api, c);
       if (!input) return;
@@ -391,10 +392,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
   const codemode = installCodemode(registry, {
     allowed: async (api, callContext) => await codingAllowed(api, callContext) || await agentFileAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext)
       || (memory.ns === "owner" && await ownerMayManage(api, callContext)),
-    namespaces: () => [
-      ...(memory.ns === "owner" ? [{ name: "runtime-ops", prefix: "ops_", description: "实例运行状态、用量费用、请求轨迹与诊断日志只读查询（仅主人会话）" }] : []),
-      ...mcp.namespaces(),
-    ],
+    namespaces: () => mcp.namespaces(),
   });
   if (memory.ns === "owner" || memory.ns.startsWith("group:")) {
     registry.install(createScheduleExtension(host.env, memory.ns as ScheduleConversation, async (api, callContext) =>
