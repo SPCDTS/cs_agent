@@ -1,7 +1,7 @@
 import worker from "../src/index";
 import { env, SELF } from "cloudflare:test";
 import { expect } from "vitest";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { normalizeMessage, type InboundInput } from "../src/policy";
 import { threadView } from "../src/admin/read-views";

@@ -2,7 +2,7 @@ import {env,reset,runInDurableObject} from "cloudflare:test";
 import {afterEach,expect,it} from "vitest";
 import {BACKGROUND_CONTEXT} from "@earendil-works/chord/context";
 import {createModels} from "@earendil-works/pi-ai/models";
-import {Type} from "@earendil-works/pi-ai";
+import {Type} from "typebox";
 import {fauxProvider,fauxAssistantMessage,fauxToolCall} from "@earendil-works/pi-ai/providers/faux";
 import {createRegistry,defineExtension,defineTool,Harness,section,hook,GenerationTask} from "@earendil-works/pi-durable";
 import {openDurableObjectSqliteStorage,DurableObjectSqliteDatabase} from "@earendil-works/pi-durable/storage/sqlite/cloudflare";

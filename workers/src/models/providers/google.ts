@@ -143,7 +143,7 @@ export function withGoogleSearch(regular: ProviderStreams): ProviderStreams {
 }
 
 function createGoogleProvider(): Provider {
-  // Google 适配器不允许传入自定义 fetch（拒绝 ModelAlarm.fetch），直连公开端点即可。
+  // Gemini 沿用 Google SDK 的默认传输。
   const provider = googleProvider();
   const catalog = geminiModels();
   return { ...provider, getModels: () => catalog, getAllModels: () => catalog, ...withGoogleSearch(provider) };

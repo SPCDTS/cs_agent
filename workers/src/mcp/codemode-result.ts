@@ -1,5 +1,5 @@
 import { Type, type TSchema } from "typebox";
-import { copyJson } from "@earendil-works/chord";
+import { copyJson } from "@earendil-works/chord/json";
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
 
 export const MCP_RESULT_INSTRUCTIONS = "远端 MCP 及 mcp_resources_* 返回 { content, structuredContent?, isError? }：结构化字段读 result.structuredContent；content 的 text 块用 text(block.text)，image 块必须用 image(block) 展示（禁打图片 Base64，勿仅凭 frameId 假定已见截图）。";

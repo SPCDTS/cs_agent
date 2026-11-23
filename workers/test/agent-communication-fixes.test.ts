@@ -11,7 +11,7 @@ import { McpPolicyStore } from "../src/mcp/policy";
 import { ThreadMcp } from "../src/mcp";
 import { MCP_CONFIG } from "../src/mcp/config";
 
-const group = "group:200000001", cid = "11111111-1111-4111-8111-111111111111";
+const group = "group:200000001";
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
 async function seed(scope: string, user = 10000001, n = 1) {
   await runInDurableObject(env.THREAD.getByName(scope), async (i, s) => {
@@ -27,6 +27,7 @@ async function send(from: string, to: string, seedId = "message", text = "hello"
   });
 }
 async function child(parent = "owner") {
+  const cid = crypto.randomUUID();
   await seed(parent);
   const identity = { turn: "message", as: { userId: "10000001", nickname: "", owner: true } };
   const origin = { generation: 0, target: parent === group ? { kind: "group", groupId: "200000001" } : { kind: "private", userId: "10000001" }, selfId: "99999999", scopeName: "", capabilities: { coding: parent === "owner" } };
@@ -41,7 +42,7 @@ async function child(parent = "owner") {
     s.storage.sql.exec("DELETE FROM inbox");
     await s.storage.deleteAlarm();
   });
-  return { address, identity, origin };
+  return { cid, address, identity, origin };
 }
 
 it("group to owner keeps a session principal, cannot borrow owner sandbox, and MCP is bounded by eventAllow", async () => {
@@ -76,7 +77,7 @@ it("group to owner keeps a session principal, cannot borrow owner sandbox, and M
 });
 
 it.each(["subagent.message", "agent_send"])("%s rejects another member before insertion without contaminating persistent identity or the old report", async mode => {
-  const { address, identity, origin } = await child(group);
+  const { cid, address, identity, origin } = await child(group);
   await env.THREAD.getByName(group).subagentReport({ subagentId: cid, requestId: "old", text: "done", identity, outcome: "done", state: { status: "done", version: 1 } } as any);
   await seed(group, 10000003, 2);
   await runInDurableObject(env.THREAD.getByName(group), async (i, s) => {
@@ -101,14 +102,14 @@ it.each(["subagent.message", "agent_send"])("%s rejects another member before in
 });
 
 it("same-owner parent communication retains explicitly delegated child capabilities", async () => {
-  const { address } = await child();
+  const { cid, address } = await child();
   expect((await send("owner", address)).status).toBe("accepted");
   expect(await env.THREAD.getByName("owner").validateSubagentAccess(cid)).toMatchObject({ authority: { owner: true, actor: "10000001" }, capabilities: { coding: true } });
   await runInDurableObject(env.SUBAGENT.getByName(address), (_i, s) => s.storage.deleteAlarm());
 });
 
 it("an Agent round forwarding to its owner's child cannot preserve human-owner delegation", async () => {
-  const { address } = await child();
+  const { cid, address } = await child();
   await seed(group, 10000003);
   await send(group, "owner", "peer-request");
   await runInDurableObject(env.THREAD.getByName("owner"), async (i, s) => {
@@ -254,7 +255,7 @@ it("pending reports freeze metadata across child version changes without retaini
 });
 
 it("a child without coding_exec can receive, read and return only its registered attachments", async () => {
-  const { address } = await child(group);
+  const { cid, address } = await child(group);
   await env.SANDBOX.getByName(group).saveAttachment("/work/source.txt", new TextEncoder().encode("child-visible"), "child-source");
   const receipt = await runInDurableObject(env.THREAD.getByName(group), async (i, s) => {
     const row = s.storage.sql.exec("SELECT * FROM inbound WHERE kind='message'").one();

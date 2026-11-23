@@ -1,7 +1,7 @@
 import { adminHealth } from "./helpers";
 import { env, SELF, runInDurableObject, evictDurableObject, reset } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { normalizeMessage } from "../src/policy";
 

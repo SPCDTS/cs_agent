@@ -30,7 +30,7 @@ npm run check
 
 1. 从最新 main 创建功能分支，按变更性质使用语义前缀（`feat/`、`fix/`、`docs/`、`refactor/`、`test/`、`chore/`、`ci/`）。Windows 可用 `scripts/wt.ps1 new <前缀/名称>` 创建 worktree。
 2. 完成一个逻辑变更，运行相关检查，核对暂存区不含凭据、私有数据或无关文件。
-3. 推送功能分支，使用已获授权的 GitHub 身份创建 PR，说明问题、修改后的行为和验证结果。
+3. 推送功能分支，使用已获授权的 GitHub 身份按 [.github/pull_request_template.md](.github/pull_request_template.md) 创建 PR：重点写明背景与原因、关键方案取舍（为何如此设计）、对外行为与影响范围，以及实际验证与未覆盖边界；不逐文件复述 diff，小改动按需精简。
 4. 等待 GitHub Actions 的 `workers check` 成功，再由获授权的人通过 GitHub 合并。main 禁止直接推送、强推和删除。
 5. 主工作区使用 `git pull --ff-only` 更新；`scripts/wt.ps1 land` 不再执行本地合并。
 

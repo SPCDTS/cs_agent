@@ -1,4 +1,5 @@
-import { Type, type Static, type Models, type Usage } from "@earendil-works/pi-ai";
+import { Type, type Static } from "typebox";
+import type { Models, Usage } from "@earendil-works/pi-ai";
 import { Check } from "typebox/value";
 import type { SqliteExecutor } from "@earendil-works/chord/sqlite";
 import { MemoryStore, MemoryStoreError } from "./store";

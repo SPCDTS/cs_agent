@@ -1,5 +1,5 @@
 import { memoryIdentity } from "../memory/lifecycle";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { ExtractTimeout, completeWithin, type ExtractComplete } from "../memory/extractor";
 import { MemoryStoreError, normalizeMemoryText, type MemoryStore } from "../memory/store";

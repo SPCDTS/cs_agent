@@ -177,7 +177,10 @@ describe("cs-agent 自观测能力（ops_health 与 runtime-ops Code Mode 命名
       const thread = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       expect(await thread.submit(input(2, "看看日志", 10000001, 200000001, true))).toEqual({ status: "done" });
     });
-    expect(groupSeen.offers).not.toContain("ops_health");
+    for (const hidden of ["ops_health", "auth_list", "auth_grant", "auth_revoke", "qq_chats", "edge_list", "edge_grant", "edge_revoke"]) {
+      expect(groupSeen.offers).not.toContain(hidden);
+    }
+    expect(groupSeen.sections.join("\n")).not.toMatch(/^## access\b/m);
     expect(groupSeen.sections.join("\n")).not.toContain("runtime-ops");
     expect(groupSeen.outputs[0]).toContain("tools.ops_usage does not exist");
 

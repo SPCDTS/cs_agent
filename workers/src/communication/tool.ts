@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord/context";
 import { SESSION_PATTERN, type AgentReceipt, type AgentSend } from "./model";

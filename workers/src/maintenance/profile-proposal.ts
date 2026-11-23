@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { completeWithin, ExtractTimeout, type ExtractComplete } from "../memory/extractor";
 import { MemoryManager, MemoryAdminError } from "../memory/management";
