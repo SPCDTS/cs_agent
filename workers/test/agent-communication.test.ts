@@ -66,9 +66,8 @@ describe("agent communication MVP", () => {
       const api = instance as unknown as Internal, row = received[0]!;
       const source = state.storage.sql.exec("SELECT * FROM inbound WHERE message_id=?", row.agent_authority!).one() as unknown as InboundRow;
       const previous = await api.sandboxTaskForInput(source), current = await api.sandboxTaskForInput(row);
-      expect(current?.id).not.toBe(previous?.id);
-      expect(current?.subject).toMatchObject({ actor: "agent:" + group, owner: false });
-      expect(current?.permissions.coding).toBe(true);
+      expect(previous?.permissions.coding).toBe(true);
+      expect(current).toBeUndefined();
       expect(await api.deliver(row, "must not leave", "out")).toEqual({status:"rejected",reason:"agent_reply_requires_agent_send"});
       expect(state.storage.sql.exec("SELECT * FROM outgoing_intents").toArray()).toHaveLength(0);
     });

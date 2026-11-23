@@ -102,7 +102,9 @@ it("owner Agent reads and forwards received files through real tools without cod
   });
   await runInDurableObject(env.THREAD.getByName(group), async (i, s) => {
     const row = s.storage.sql.exec("SELECT * FROM inbound WHERE kind='agent' ORDER BY rowid DESC LIMIT 1").one();
-    expect((await (i as any).sendAgentMessage({ to: "owner", text: "group authorized file", files: ["/work/out/note.txt"] }, "group-agent-file", row)).status).toBe("accepted");
+    await expect((i as any).sendAgentMessage({ to: "owner", text: "not received", files: ["/work/out/note.txt"] }, "group-agent-file", row)).rejects.toThrow("agent_file_access_denied");
+    const received = JSON.parse((row as any).agent_files);
+    expect((await (i as any).sendAgentMessage({ to: "owner", text: "received file", files: received }, "group-received-file", row)).status).toBe("accepted");
   });
   expect(new TextDecoder().decode((await env.SANDBOX.getByName("owner").readBlob("/work/private.txt")).bytes)).toBe("OWNER-PRIVATE-SENTINEL");
 });

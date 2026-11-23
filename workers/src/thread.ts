@@ -673,15 +673,8 @@ export class ThreadDO extends DurableObject<Env> {
   }
 
   private async sandboxTaskForInput(input: InboundRow | undefined): Promise<SandboxTask | undefined> {
-    if (input?.kind === "agent") {
-      if (!await this.agentAuthority(input)) return;
-      const scope = await this.namespace();
-      // 群工作区属于会话；owner 工作区不是 Agent 通信的隐式授权。
-      if (!scope.startsWith("group:")) return;
-      const subject = { scope, actor: "agent:" + scope, owner: false, generation: input.session_generation, replyChannel: "qq" as const };
-      return this.sandboxTasks.issue({ sourceInputId: input.message_id, subject,
-        workspace: this.env.SANDBOX.idFromName(scope).toString(), permissions: { coding: true } });
-    }
+    // 通信边只授予投递与附件只读；没有独立 coding 委托时，任何 Agent 回合都不签发沙箱任务。
+    if (input?.kind === "agent") return;
     if (!input || !input.turn_id || input.user_id === input.self_id || input.session_generation !== await this.sessionGeneration()) return;
     const scope = await this.namespace(), subject = { scope, actor: input.user_id, generation: input.session_generation,
       replyChannel: input.reply_channel, owner: isWebAdmin(input) ? scope === "owner" : ownerIds(this.env).includes(input.user_id) };
