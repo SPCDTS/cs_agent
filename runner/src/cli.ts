@@ -42,11 +42,11 @@ async function main() {
     await prepareState(state);
     const file = path.join(state, 'config.json'); if (await exists(file)) throw new Error('config_already_exists');
     await atomicJson(file, { stateDir: state, host: '127.0.0.1', port: 7791, principals: [{ id: 'cs_agent', tokenEnv: 'WINDOWS_MCP_TOKEN' }], targets: [{ kind: 'wsb', id: 'temp', memoryMb: 6144, idleTimeoutMs: 600000, maxLifetimeMs: 3600000 }] });
-    console.log('配置已生成：' + file + '\n请按 docs/WINDOWS-MCP.md 配置 VM、凭据和 token，再运行 run。旧 WSB 目录没有迁移或挂载。');
+    console.log('配置已生成：' + file + '\n此配置用于临时 Windows Sandbox。请按 docs/WINDOWS-MCP.md 设置 token，再运行 run。持久 Windows VM 请在来宾内按 docs/DEVICE-MCP.md 配对。');
   } else if (action === 'run' || action === 'inspect') {
     const file = path.resolve(option('config', path.join(defaultDir, 'config.json'))); if (args.length) throw new Error('unknown_arguments');
     const config = await loadConfig(file);
-    if (action === 'inspect') { console.log(JSON.stringify({ endpoint: `http://${config.host}:${config.port}/mcp`, targets: config.targets.map(t => ({ id: t.id, kind: t.kind, instructions: t.instructions, ...(t.kind === 'hyperv' ? { vmId: t.vmId, guestWorkdir: t.guestWorkdir } : { memoryMb: t.memoryMb, idleTimeoutMs: t.idleTimeoutMs, maxLifetimeMs: t.maxLifetimeMs }) })) }, null, 2)); return; }
+    if (action === 'inspect') { console.log(JSON.stringify({ endpoint: `http://${config.host}:${config.port}/mcp`, targets: config.targets.map(t => ({ id: t.id, kind: t.kind, instructions: t.instructions, ...(t.kind === 'hyperv' ? { vmId: t.vmId, guestWorkdir: t.guestWorkdir, drainOnly: t.drainOnly } : { memoryMb: t.memoryMb, idleTimeoutMs: t.idleTimeoutMs, maxLifetimeMs: t.maxLifetimeMs }) })) }, null, 2)); return; }
     if (process.platform !== 'win32') throw new Error('windows_required');
     await prepareState(config.stateDir);
     const releaseLock = acquireServiceLock(config.stateDir);
@@ -63,6 +63,6 @@ async function main() {
         process.once('SIGINT', stop); process.once('SIGTERM', stop);
       });
     } finally { await jobs.shutdown(); releaseLock(); }
-  } else console.log('用法：\n  npm start -- init [--state 新专用目录]\n  npm start -- inspect [--config 配置文件]\n  npm start -- run [--config 配置文件]\n详细接入与 Hyper-V 准备见 docs/WINDOWS-MCP.md。');
+  } else console.log('用法：\n  npm start -- init [--state 新专用目录]\n  npm start -- inspect [--config 配置文件]\n  npm start -- run [--config 配置文件]\n宿主机 WSB 见 docs/WINDOWS-MCP.md；持久 VM 请在来宾内按 docs/DEVICE-MCP.md 配对。');
 }
 await main().catch(error => { console.error(error instanceof Error ? error.message : 'windows_mcp_failed'); process.exitCode = 1; });

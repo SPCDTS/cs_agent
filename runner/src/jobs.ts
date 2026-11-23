@@ -88,6 +88,7 @@ export class Jobs {
         if (prior.fingerprint !== fingerprint) throw new Error('request_id_conflict');
         return this.receipt(prior);
       }
+      if (target.kind === 'hyperv' && target.drainOnly) throw new Error('hyperv_target_draining');
       let deadline = this.now() + command.timeoutMs;
       if (target.kind === 'wsb') {
         if (sessionId) {

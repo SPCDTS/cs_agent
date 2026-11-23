@@ -4,7 +4,7 @@ import type { Readiness } from './environment-status.ts';
 export interface Subject { principal: string; scope: string }
 export interface HypervTarget {
   kind: 'hyperv'; id: string; vmId: string; credentialPath: string;
-  guestWorkdir: string; instructions?: string;
+  guestWorkdir: string; instructions?: string; drainOnly?: boolean;
 }
 export interface WsbTarget {
   kind: 'wsb'; id: string; memoryMb: number; idleTimeoutMs: number;

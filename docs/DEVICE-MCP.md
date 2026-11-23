@@ -36,6 +36,16 @@
 
 cloudflared 从 Cloudflare 官方 GitHub release 获取，校验对应 asset 的 SHA-256 和长度。桌面组件固定安装 `agent-desktop@1.3.0`，位于客户端私有目录，与系统全局安装分开。首次下载需要能访问 GitHub Releases；桌面选项还需要访问 npm。
 
+### 持久 Windows VM
+
+在管理台为这台 VM 生成独立的配对链接。登录来宾中实际用于开发的 Windows 账户，在其中下载客户端，然后从下载目录打开 PowerShell。如果已有工作区，填入它在来宾磁盘上的实际路径，例如：
+
+```powershell
+node .\cs-agent-device.cjs pair --workdir "C:\AgentWork"
+```
+
+客户端以该用户身份在登录后运行。配对完成后，从 cs-agent 的主人会话调用该设备的 `device_info`，核对主机名、用户、PowerShell 和工作目录，再用 `shell_exec` 执行 `Get-Location` 核对路径。现有 VM 由宿主机 `env_*` 接入时，按[旧环境迁移步骤](WINDOWS-MCP.md#迁移已有宿主机-vm-环境)收尾。
+
 ## 本机使用与恢复
 
 客户端配置、二进制、收据默认在 `~/.cs-agent-device`。其中包含设备凭据，不得分享或提交。Unix 目录使用 0700、凭据文件使用 0600；Windows 去除目录继承并授予当前用户和 SYSTEM。客户端不持有 cs-agent 管理口令或 Cloudflare 管理 Token。

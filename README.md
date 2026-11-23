@@ -4,7 +4,7 @@
 
 `cs-agent` 面向单一主人（Single-Owner）打造，而非多租户 SaaS 平台。它以日常高频使用的 **QQ（私聊与群聊）** 和 **专属管理台网页** 为交互入口，由云端 Durable Objects 全天候托管你的个人长期记忆、日程提醒、外部事件（Gmail / GitHub）与异步子任务；同时向下连接 Cloudflare 编码沙箱、你本机的 Windows / macOS / Linux 设备以及 Windows Hyper-V 开发虚拟机与 WSB 临时沙箱，成为能够跨聊天软件、个人云端工作区与私人物理设备协同工作的个人数字分身。
 
-应用主代码位于 `workers/`，`runner/` 提供跨平台设备接入（命令行与桌面 MCP）及 Windows 专用的 Hyper-V 持久工作区与 Windows Sandbox（WSB）临时沙箱服务。
+应用主代码位于 `workers/`，`runner/` 提供跨平台设备接入（命令行与桌面 MCP）。持久 Windows VM 在来宾内配对，Windows Sandbox（WSB）由宿主机 runner 管理。
 
 ---
 
@@ -24,7 +24,7 @@
 - **多层次代码执行与个人设备接入**：
   - **Cloudflare 云端编码容器（`cs.coding`）**：由 `SandboxDO` 按需启动 Lite 容器（空闲 3 分钟停止），提供受控 Linux `bash` 与文件读写；`/work` 快照与 SHA-256 去重 blob 持久化至私有 R2，支持为子任务克隆独立工作区及按路径合并产物。
   - **跨平台个人设备接入（Device MCP）**：在管理台生成一次性配对链接，在个人的 Windows / macOS / Linux 电脑上运行单文件客户端，即可自动配置 Cloudflare Tunnel、用户级登录自启动与本机 Shell MCP（可选启用 `agent-desktop` 桌面 GUI 操控）。
-  - **Windows Hyper-V 持久工作区 & WSB 临时沙箱**：`runner/` 提供标准 Streamable HTTP MCP 服务，将主人的 Hyper-V VM 作为长期保留 `.git`、依赖与工具链的持久开发环境（PowerShell Direct + Job Object 进程树约束，桌面由 VM 内独立 MCP 提供），将 WSB 作为运行未知代码的无宿主映射易失隔离沙箱。
+  - **Windows Hyper-V 持久工作区 & WSB 临时沙箱**：在持久 VM 内用开发账户配对设备客户端，沿用来宾磁盘上的仓库、依赖和工具链。临时 WSB 由宿主机 runner 创建和回收。
 - **受控 Code Mode 与细粒度权限**：模型在 QuickJS 沙箱中编写脚本编排多步工具调用，内部工具的大体积中间输出不重复挤占模型上下文，MCP 返回的截图可自动落盘并发送。每次调用均由宿主强制校验真实触发身份、会话代次（generation）与作用域。
 - **个人长期记忆、技能演进与外部事件**：按 owner、群聊、私聊分别沉淀长期记忆，支持带原文证据片段的自动抽取、与显式记忆冲突时的待确认保护、遗忘抑制、画像关联失效与整理回滚。Agent 可在编码工作区中编写、检查并通过双版本 CAS 发布新技能。内置 `ScheduleDO` 定时任务与 `EventsDO` 事件引擎（支持 Gmail 推送及多身份独立 GitHub App Webhook 接入，事件统一投递至主人私聊）。
 - **全景管理台**：提供 Token 用量与缓存命中率趋势、24 小时 Agent 父子球体拓扑图、嵌套子会话只读流式查看、请求级上下文字符组成与相邻回合 diff、Code Mode 内部调用树追踪，以及带版本 CAS 保护的人设、记忆、技能、MCP 和运维配置管理。
@@ -81,7 +81,7 @@
 | `workers/test/` | 运行在 `workerd` 中的业务与权限测试，以及独立 Node 测试（沙箱服务、登录助手、技能导入） |
 | `workers/scripts/` | 管理台构建、Secret 批量配置、技能导入与模拟 NapCat 工具脚本 |
 | `workers/deployments/` | 部署档案目录（`example.json` 模板与生产环境配置） |
-| `runner/` | 跨平台设备客户端（`cs-agent-device.cjs`）、Windows Hyper-V / WSB MCP 服务、来宾原生助手与桌面 MCP 桥接 |
+| `runner/` | 跨平台设备客户端（`cs-agent-device.cjs`）、WSB 宿主机服务、旧 Hyper-V 环境兼容与桌面 MCP 桥接 |
 | `scripts/` | Git worktree 协作脚本（`wt.ps1`）、CI 变更范围检查及本机 CS2 Workshop 接入脚本 |
 | `docs/` | 架构设计、运行契约、安全边界与运维部署文档 |
 
@@ -141,7 +141,7 @@ npm run check
 3. **接入模型与个人设备**：
    - **NapCat**：配置反向 WebSocket 指向 `wss://<PUBLIC_ORIGIN>/onebot`，携带相同 `NAPCAT_TOKEN`。
    - **模型账号**：DeepSeek 通过 `DEEPSEEK_API_KEY` 配置，Gemini 通过 `GEMINI_API_KEY` 配置；个人 ChatGPT 订阅在 `/admin/` 管理页下载一次性本机配对助手完成 Codex OAuth 登录。
-   - **个人电脑与远程沙箱**：在管理台「模型与接入」中按需配对你的随身设备（[docs/DEVICE-MCP.md](docs/DEVICE-MCP.md)）或登记 Windows Hyper-V / WSB MCP 服务（[docs/WINDOWS-MCP.md](docs/WINDOWS-MCP.md)）。
+   - **个人电脑与远程沙箱**：在管理台「模型与接入」中按需配对个人设备或持久 Windows VM；临时 WSB 单独登记宿主机服务。[设备配对](docs/DEVICE-MCP.md) · [Windows 沙箱与旧 VM 迁移](docs/WINDOWS-MCP.md)
 4. **上线核对**：公开 `/healthz` 仅检查 Worker 进程存活；部署后请携带 `Authorization: Bearer <ADMIN_TOKEN>` 请求 `/admin/health` 或登录 `/admin/` 核对 Worker、Bridge 与模型组件的实际状态。
 
 ---
