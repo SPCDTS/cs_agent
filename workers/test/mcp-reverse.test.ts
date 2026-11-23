@@ -6,6 +6,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { createRegistry } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { ThreadMcp, type McpAuthority } from "../src/mcp";
+import { connectionDigest } from "../src/mcp/names";
 import { MCP_CATALOG_SCHEMA } from "../src/mcp/catalog";
 import worker from "../src/index";
 import { McpConnection } from "../src/mcp/connection";
@@ -60,6 +61,14 @@ it("authenticates registration, probes a real SDK server and isolates replaced/d
   const replacement = await node("two");
   await expect(call(a)).rejects.toThrow();
   const b = await open();
+  // 模拟旧物理连接已不在活动列表，但其 close 事件在替换后才送达。
+  await runInDurableObject(env.BRIDGE.getByName("mcp-reverse:" + connectionDigest(record.server)), (relay, state) => {
+    const late = new WebSocketPair();
+    state.acceptWebSocket(late[1], ["device"]);
+    late[1].serializeAttachment({ session: "device", generation: crypto.randomUUID(), active: true });
+    relay.webSocketClose(late[1], 1000);
+    late[0].accept(); late[0].close(1000);
+  });
   expect((await call(b)).content).toEqual([{ type: "text", text: "two" }]);
   replacement.close(1000);
   await expect(call(b)).rejects.toThrow();
