@@ -89,7 +89,8 @@ describe("agent communication MVP", () => {
     await seed(group, input(2, "member", 10000003, 200000001));
     await env.SANDBOX.getByName("owner").saveAttachment("/work/report.txt", new TextEncoder().encode("report"));
     await env.SANDBOX.getByName(group).saveAttachment("/work/private.txt", new TextEncoder().encode("not received"));
-    const path = "/work/agent-files/" + messageId("owner", "0:send-1").slice(6) + "/0-report.txt";
+    const deliverySeed = "local-qq-report";
+    const path = "/work/agent-files/" + messageId("owner", "0:" + deliverySeed).slice(6) + "/0-report.txt";
     const privateImage = await new MediaRepository({ bucket: env.ASSETS, scope: group }).put({
       bytes: Uint8Array.of(137,80,78,71,13,10,26,10), name: "local.png", kind: "image",
     });
@@ -103,7 +104,7 @@ describe("agent communication MVP", () => {
       { name: "send_message", args: { text: "extra" } },
     ]);
     const { socket, frames } = await connect(sockets);
-    expect((await send("owner", {to:group, text:"report", files:["/work/report.txt"]})).files).toEqual([path]);
+    expect((await send("owner", {to:group, text:"report", files:["/work/report.txt"]}, deliverySeed)).files).toEqual([path]);
     const message = await action(frames);
     expect(message.params).toMatchObject({ group_id:"200000001", message:[{type:"text",data:{text:"result ready"}}] });
     reply(socket, message.echo);
