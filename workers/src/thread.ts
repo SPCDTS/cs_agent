@@ -271,8 +271,16 @@ export class ThreadDO extends DurableObject<Env> {
     if (source.thread !== await this.namespace() || source.generation !== await this.sessionGeneration()) return false;
     const input = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id=?", source.inputId);
     if (!input || isWeb(input) || input.session_generation !== source.generation || source.scope !== scopeOf(targetOf(input)) || input.user_id === input.self_id) return false;
+    if (input.kind === "agent") return scopeOf(target) === source.scope && !!await this.outgoingSelfId(this.database, input);
     if (scopeOf(target) === source.scope) return true;
     return input.kind === "message" && this.env.REGISTRY.getByName("main").canAccess({ user: "qq:" + input.user_id, cap: "send", scope: source.scope, target: "qq:" + scopeOf(target) });
+  }
+
+  // 新回合在接收时固定机器人身份；旧版已入箱的回合只查当时绑定的同代次记录。
+  private async outgoingSelfId(db: Pick<DurableObjectSqliteDatabase, "get">, input: InboundRow) {
+    if (input.kind !== "agent" || input.self_id !== "agent") return input.self_id;
+    return (await db.get<{ self_id: string }>("SELECT self_id FROM inbound WHERE message_id=? AND session_generation=? AND kind='message'",
+      input.agent_authority ?? null, input.session_generation))?.self_id;
   }
 
   private async projectDelivery(receipt: Delivery): Promise<void> {
@@ -285,9 +293,12 @@ export class ThreadDO extends DurableObject<Env> {
       if (!input || await tx.get("SELECT 1 FROM outbox WHERE delivery_id=?", receipt.id)) return;
       await tx.run("INSERT INTO outbox(message_id,text,sent_at,turn_id,input_id,delivery_id) VALUES(?,?,?,?,?,?)", receipt.messageId ?? "", pending.text, receipt.updatedAt, input.turn_id, input.message_id, receipt.id);
       const target: Target = JSON.parse(pending.target_json);
-      if (receipt.messageId) await recordMessage(tx, { messageId: receipt.messageId, selfId: input.self_id, userId: input.self_id,
+      if (!receipt.messageId) return;
+      const selfId = await this.outgoingSelfId(tx, input);
+      if (!selfId) return;
+      await recordMessage(tx, { messageId: receipt.messageId, selfId, userId: selfId,
         nickname: "机器人", target, text: pending.text || "[附件]", routeText: pending.text, time: Math.floor(receipt.updatedAt / 1000),
-        mentionedSelf: false, replyToId: scopeOf(target) === scopeOf(targetOf(input)) ? input.platform_message_id : null, imageCount: 0, scopeName: input.scope_name }, true);
+        mentionedSelf: false, replyToId: input.kind === "message" && scopeOf(target) === scopeOf(targetOf(input)) ? input.platform_message_id : null, imageCount: 0, scopeName: input.scope_name }, true);
     });
   }
 
@@ -764,8 +775,8 @@ export class ThreadDO extends DurableObject<Env> {
       if (!authority) throw new Error("agent_recipient_not_ready");
       const paths = await importFiles(this.env, message, (path, bytes, operationId) => this.env.SANDBOX.getByName(ns).saveAttachment(path, bytes, operationId));
       await this.database.transaction(async tx => {
-        await tx.run("INSERT INTO inbound(message_id,platform_message_id,user_id,self_id,text,received_at,status,chat_kind,chat_id,nickname,scope_name,kind,reply_channel,session_generation,when_busy,agent_from,agent_hash,agent_files,agent_authority) VALUES(?,?,'','agent',?,?,'queued',?,?,?,?,'agent','qq',?,NULL,?,?,?,?)",
-          message.id, message.id, incomingText(message, paths), Date.now(), authority.chat_kind, authority.chat_id, "", authority.scope_name,
+        await tx.run("INSERT INTO inbound(message_id,platform_message_id,user_id,self_id,text,received_at,status,chat_kind,chat_id,nickname,scope_name,kind,reply_channel,session_generation,when_busy,agent_from,agent_hash,agent_files,agent_authority) VALUES(?,?,'',?,?,?,'queued',?,?,?,?,'agent','qq',?,NULL,?,?,?,?)",
+          message.id, message.id, authority.self_id, incomingText(message, paths), Date.now(), authority.chat_kind, authority.chat_id, "", authority.scope_name,
           generation, message.from, hash, JSON.stringify(paths), authority.message_id);
         await this.armPump();
       });

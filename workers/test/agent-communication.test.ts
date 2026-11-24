@@ -60,7 +60,7 @@ describe("agent communication MVP", () => {
     await expect(send("owner", { to: group, text: "changed" })).rejects.toThrow("agent_message_conflict");
     const received = await rows(group);
     expect(received).toHaveLength(1);
-    expect(received[0]).toMatchObject({ kind: "agent", user_id: "", agent_from: "owner" });
+    expect(received[0]).toMatchObject({ kind: "agent", user_id: "", self_id: "10000000", agent_from: "owner" });
     // 入箱回执与 alarm 接纳可并行；尚未接纳为 null，接纳后只能是 followUp。
     expect([null, "followUp"]).toContain(received[0]?.when_busy);
     await runInDurableObject(env.THREAD.getByName(group), async (instance, state) => {
@@ -70,6 +70,13 @@ describe("agent communication MVP", () => {
       expect(previous?.permissions.coding).toBe(true);
       expect(current).toBeUndefined();
       expect(state.storage.sql.exec("SELECT * FROM outgoing_intents").toArray()).toHaveLength(0);
+      // 升级前已入箱的 Agent 行只有哨兵；缺失原授权记录时不能猜测机器人身份。
+      const deliverySource = { thread: group, inputId: row.message_id, generation: row.session_generation, scope: group };
+      const target = { kind: "group" as const, groupId: "200000001" };
+      state.storage.sql.exec("UPDATE inbound SET self_id='agent' WHERE message_id=?", row.message_id);
+      expect(await instance.validateDeliverySource(deliverySource, target)).toBe(true);
+      state.storage.sql.exec("UPDATE inbound SET agent_authority=NULL WHERE message_id=?", row.message_id);
+      expect(await instance.validateDeliverySource(deliverySource, target)).toBe(false);
     });
     // A different group member still speaks through the same session edge.
     await seed(group, input(3, "another member", 10000004, 200000001));
@@ -109,6 +116,9 @@ describe("agent communication MVP", () => {
     expect(seen.outputs[2]).toContain("agent_credentials_forbidden");
     expect(seen.outputs[3]).toContain("agent_file_access_denied");
     expect(await env.BRIDGE.getByName("napcat").deliveryList()).toHaveLength(2);
+    const history = await runInDurableObject(env.THREAD.getByName(group), (_instance, state) =>
+      state.storage.sql.exec("SELECT user_id, reply_to_id FROM messages WHERE is_self=1 AND message_id='90000001'").one());
+    expect(history).toEqual({ user_id: "10000000", reply_to_id: null });
   });
 
   it("queues a peer behind a busy thread and consumes it through the native runtime", async () => {
