@@ -18,6 +18,8 @@ export const MORE_KINDS = ["cloudflare_management", "web_search", "generate_imag
 export const LOGIN: Record<string, [string, string]> = { ok: ["已登录", "ok"], needed: ["需要登录", "warn"], error: ["凭据错误", "bad"], unconfigured: ["未配置", "neutral"] };
 export const CREDENTIAL: Record<string, string> = { oauth: "OAuth（CIMD）", static: "静态凭据", none: "无凭据" };
 export const ERRORS: Record<string, string> = {
+  cua_directory_unavailable: "暂时无法读取 Cua 设备目录，请检查节点连接后刷新。",
+  unknown_space: "设备已不在当前目录中，请刷新设备列表。",
   device_oauth_state: "授权请求已过期，请从当前标签页重新授权。",
   device_oauth_zone: "没有找到匹配的活动域名。请核对授权账户、部署域名或 DEVICE_TUNNEL_DOMAIN。",
   device_oauth_refresh_missing: "Cloudflare 未授予离线续期权限，请重新授权。",

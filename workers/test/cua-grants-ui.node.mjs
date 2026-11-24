@@ -94,6 +94,37 @@ test('每台设备可单独改名和恢复主机名，操作保留其他行待�
   ]);
 });
 
+test('目录仅含不支持的设备时说明原因，混合目录仍可选择有效设备并显示中文保存错误',async t => {
+  const page = mountDom(ADMIN_PAGE_HTML,{token:'test-admin'}), ui = await bundleModule('browser/cua-grants.ts');
+  const scope = 'group:12345', device = {id:'relay:device01',name:'测试机',os:'macos',status:'running',scopes:[]};
+  const directory = {configured:true,enabled:true,online:true,available:true,revision:'initial',
+    grants:[],threads:[{key:scope}],devices:[{...device,id:'local:unsupported'}]};
+  let rejection;
+  t.mock.method(globalThis,'fetch',async (path,init) => {
+    if (path === '/admin/cua/devices') return Response.json(directory);
+    assert.equal(path,'/admin/cua/grants');
+    assert.deepEqual(JSON.parse(init.body).spaces,[device.id]);
+    return Response.json({error:rejection.code},{status:rejection.status});
+  });
+  ui.initCuaGrants(); await ui.loadCuaGrants();
+  const byId = id => page.document.getElementById(id);
+  const select = byId('cua-grant-scope'), list = byId('cua-grant-devices'), status = byId('cua-grant-status');
+  select.value = scope; select.dispatchEvent(new page.window.Event('change'));
+  assert.match(status.textContent,/设备 ID 暂不支持分配/);
+  assert.equal(list.childElementCount,0);
+  assert.ok(byId('cua-grant-save').disabled);
+
+  directory.devices.push(device); await ui.loadCuaGrants();
+  assert.equal(list.childElementCount,1);
+  assert.equal(status.textContent,'');
+  for (rejection of [{code:'cua_directory_unavailable',status:503,message:/无法读取 Cua 设备目录/},
+    {code:'unknown_space',status:400,message:/设备已不在当前目录/}]) {
+    list.querySelector('input[type=checkbox]').checked = true;
+    await page.click(byId('cua-grant-save'));
+    assert.match(byId('status').textContent,rejection.message);
+  }
+});
+
 test('名称写入期间手动和自动刷新合并等待，保留待保存的勾选',async t => {
   const page = mountDom(ADMIN_PAGE_HTML,{token:'first-user'}), ui = await bundleModule('browser/cua-grants.ts');
   const scope = 'group:12345', space = 'relay:device01';

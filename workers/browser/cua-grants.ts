@@ -86,7 +86,7 @@ function addNameEditor(row: Device, title: HTMLElement, view: CuaDirectory) {
 function renderDevices() {
   const view = directory, scope = $('cua-grant-scope').value;
   const selected = view?.grants.find(row => row.scope === scope)?.spaces ?? [];
-  const records = (view?.devices ?? []).filter(row => Check(CuaDeviceId,row.id));
+  const records = view?.devices ?? [];
   const missing = selected.filter(id => !records.some(row => row.id === id));
   nameViews.clear();
   function deviceLine(id: string, title: HTMLElement, detail: string) {
@@ -131,8 +131,9 @@ export async function loadCuaGrants() {
   $('cua-grant-status').textContent = '正在读取设备目录和会话分配…';
   try {
     const data = await readApi(CuaDirectory,'GET','/admin/cua/devices',undefined,isCurrent);
-    for (const row of data.devices) row.defaultName ??= row.name;
-    directory = data;
+    const devices = data.devices.filter(row => Check(CuaDeviceId,row.id));
+    for (const row of devices) row.defaultName ??= row.name;
+    directory = {...data,devices};
     const choices = new Map(data.threads.map(t => [t.key,t.name ? t.name+' · '+t.key : t.key]));
     for (const row of data.grants) if (!choices.has(row.scope)) choices.set(row.scope,row.scope);
     select.replaceChildren(el('option',{value:'',text:'选择群聊或私聊'}),...[...choices].map(([value,text]) => el('option',{value,text})));
@@ -140,7 +141,8 @@ export async function loadCuaGrants() {
     $('cua-grant-status').textContent = !data.configured ? '尚未配置 Cua 反向 MCP 服务。' : !data.enabled ? 'Cua 服务已停用。'
       : !data.online ? 'Cua 节点离线，可撤销已有分配。' : data.error ? '设备目录读取失败，可撤销已有分配。'
       : !data.available ? '请在 Cua 服务中启用 list_spaces 目录。'
-      : !data.devices.length ? '控制节点尚未列出设备。' : '';
+      : !data.devices.length ? '控制节点尚未列出设备。'
+      : !devices.length ? '当前目录的设备 ID 暂不支持分配。' : '';
     renderDevices();
     if (select.value === prior && draft.size) {
       for (const input of $('cua-grant-devices').querySelectorAll<HTMLInputElement>('input[type=checkbox]')) {
