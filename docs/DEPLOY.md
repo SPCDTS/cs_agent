@@ -17,7 +17,7 @@ npm run check
 
 部署必须显式选择档案。复制 `workers/deployments/example.json` 为被 Git 忽略的 `my.local.json`，填写自己的 Worker 名称、PUBLIC_ORIGIN、routes 和 R2 桶；可在 vars 中补 Gmail 推送配置。`production.json` 只描述本仓库既有生产实例，CI 显式选择它，既有 Worker、R2 和 DO 数据身份保持不变。新部署不能直接沿用该档案。
 
-正式部署会为档案中的 PUBLIC_ORIGIN 登记或复用 Cloudflare 私有 OAuth 客户端。首次登记需提供部署账户的 `CLOUDFLARE_ACCOUNT_ID` 和含 OAuth Clients Write 权限的 `CLOUDFLARE_API_TOKEN`。已登记的实例可以把公开的 `DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID` 固定在档案 vars 中，后续发布可使用日常部署权限。生成的 `workers/wrangler.deploy.json` 含本次使用的 client ID。实例主人上线后在管理台同意资源权限。[设备接入与 Cloudflare 授权](DEVICE-MCP.md)
+正式部署会为档案中的 PUBLIC_ORIGIN 登记或复用 Cloudflare 私有 OAuth 客户端。首次登记需提供部署账户的 `CLOUDFLARE_ACCOUNT_ID` 和含 OAuth Clients Write 权限的 `CLOUDFLARE_API_TOKEN`。已登记的实例可以把公开的 `DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID` 固定在档案 vars 中，后续发布可使用日常部署权限。生成的 `workers/wrangler.deploy.json` 含本次使用的 client ID。实例主人可在管理台的 Cloudflare 账户管理面板同意资源权限。首次授权默认查找部署域名所属的活动 Zone；部署在 workers.dev 时，可用档案变量 `CLOUDFLARE_MANAGEMENT_DOMAIN` 指定自有 Zone 域名。设备接入另见 [Cua Spaces](DEVICE-MCP.md)。
 
 `npm run deploy -- deployments/my.local.json` 会合并基础配置生成被 Git 忽略的 `workers/wrangler.deploy.json`，然后调用 Wrangler。漏填档案或保留示例域名会在联网前失败。不要手改生成文件或删迁移。
 
@@ -67,6 +67,6 @@ HTTP 403 的 HTML 响应和 Cloudflare challenge 属于接入失败证据，不�
 
 ## 本地旧文件
 
-代码清理不删除既有 `data/`、`workspace/`、`napcat/`、`secrets/` 或其他 worktree。老 worktree 可能通过目录链接共享根 node_modules，不能直接递归删除这份共享缓存。新 checkout 安装 `workers/` 和 `runner/` 各自的依赖；不能共享其他 worktree 的 node_modules。
+代码清理不删除既有 `data/`、`workspace/`、`napcat/`、`secrets/` 或其他 worktree。老 worktree 可能通过目录链接共享根 node_modules，不能直接递归删除这份共享缓存。新 checkout 安装 `workers/` 的依赖；不能共享其他 worktree 的 node_modules。
 
-远程 Windows 环境通过管理台的 MCP 服务接入，配置见 [Windows MCP](WINDOWS-MCP.md)。旧 Sandbox 标签、远程开关和配对协议已移除。上线前先用旧版本完成或取消远程任务并停止旧连接器；新服务使用独立状态目录，不复用或删除旧持久数据。Cloudflare 资源由 v12 DO class rename 保留，部署时必须连同迁移发布。
+更新到 Cua 前先收尾旧设备任务，核对需要移除的 Tunnel 和 DNS。上线后管理员配置一次聚合 MCP，设备所有者在 Cua 中重新连接。详见[设备迁移](DEVICE-MCP.md)。Cloudflare 资源由 v12 DO class rename 保留，部署时必须连同迁移发布。

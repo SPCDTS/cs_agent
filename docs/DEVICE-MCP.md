@@ -1,97 +1,69 @@
-# 设备接入：默认命令行，可选桌面
+# 用 Cua 接入设备与临时环境
 
-设备客户端将本机命令行通过标准 MCP 提供给 cs-agent，支持 Windows、macOS 和 Linux。默认不安装 agent-desktop；只有配对时勾选桌面能力，才安装桌面组件。命令和桌面继续通过现有 Code Mode、MCP 工具选择和群授权使用。
+cs-agent 只登记一个名为 `cua` 的 MCP 服务。Cua Spaces 提供设备目录和临时环境，Cua Relay 连接已共享的机器，Cua Driver 提供目标系统上的桌面工具。cs-agent 管理会话能访问哪些 Space，以及哪些操作需要审批。
 
-## 管理员首次配置
+## 配置一次 Cua 控制节点
 
-部署后，在管理台的“模型与接入 → 添加设备与 Cloudflare 管理”点击“授权 Cloudflare”，选中设备域名所在的账户并同意。服务端使用 PKCE 交换授权码，沿部署域名向上查找活动 Zone，并用实例的 `OAUTH_STORE_KEY` 加密保存和续期令牌。授权被撤销或过期时，在同一处重新授权。若部署在 workers.dev，请先用 `DEVICE_TUNNEL_DOMAIN` 指定自有活动域名。已有设备的账户与域名在重新授权时保持绑定。
+选一台 Worker 能通过 HTTPS 访问的常在线机器。下面以 Linux 服务账户 `cua`、主目录 `/home/cua` 为例。该账户负责聚合多个设备的目录，持有 Cua 登录会话。使用独立服务账户可避免把它的套接字和账户凭据交给获准使用某台设备的群成员。
 
-主人私聊和主人网页可以查询 DNS 记录摘要、Tunnel 状态、Worker 和 R2 桶名称，也可以申请新增 A、AAAA、CNAME 记录、创建 R2 桶、按 URL 清缓存。后面三类变更会列出账户、域名和具体参数，在同一管理面板中批准后执行一次，申请十分钟有效。缓存、R2 和 Workers 元数据权限在 Cloudflare 同意页可选。模型只会收到资源摘要和申请编号。可在 Cloudflare 的已授权应用中撤销授权。
+1. 在控制节点安装 [Cua Spaces](https://cua.ai/download)。本文的聚合 MCP 已用 Cua CLI 0.31.0 验证。
+2. 以服务账户运行 `cua auth login --remote --no-onboarding`，在浏览器确认 Cua 账户。紧接着运行 `cua devices enroll` 登记这个控制节点。若出现一次性代码，在已获准的设备上用 `cua devices approve <代码>` 确认，再用 `cua spaces ls` 核对目录。
+3. 用服务管理器运行 `cua daemon start --socket /home/cua/.cua/cua.sock --loopback off --foreground`。使用已有 daemon 时可直接复用它的 Unix socket。这个 daemon 的 `/mcp` 返回 `cua-spaces`，能列出账户设备并在指定后端创建 Space。
+4. 在 HTTPS 入口校验专用 Bearer 凭据，只转发精确路径 `/mcp`。以下 Caddy 示例要求代理进程能访问同用户的 0600 socket。将示例域名改为实际域名，先在服务管理器中将 `CS_AGENT_CUA_TOKEN` 设置为密码管理器生成的高熵随机值，再启动代理。
 
-部署脚本在正式部署时按回调 URL 查找并复用私有客户端，首次登记使用部署账户的 `CLOUDFLARE_ACCOUNT_ID` 和具有 OAuth Clients Write 权限的 `CLOUDFLARE_API_TOKEN`。可把首次登记的公开 `DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID` 固定在部署档案的 vars 中，或设为同名 CI 变量，后续部署直接复用。离线生成配置及 dry-run 跳过登记。每个实例各自使用自己的回调域名。
-
-已有手工配置的实例也可继续使用以下 Worker secrets。域名使用该 Zone 的根域，例如 `example.com`；自动创建的设备地址为 `device-<随机 ID>.example.com`，避免多级域名证书问题。
-
-| Secret | 内容 |
-|---|---|
-| `DEVICE_TUNNEL_ACCOUNT_ID` | Cloudflare Account ID |
-| `DEVICE_TUNNEL_ZONE_ID` | 域名的 Zone ID |
-| `DEVICE_TUNNEL_DOMAIN` | 该 Zone 的根域名，不包含协议或路径 |
-| `DEVICE_TUNNEL_API_TOKEN` | 仅授予对应 Account 的 Cloudflare Tunnel Edit 和对应 Zone 的 DNS Edit |
-| `OAUTH_STORE_KEY` | 沿用实例现有的凭据加密密钥，不要重新生成或替换 |
-
-这一步由实例管理员完成一次，接入设备不需要 Cloudflare 账号或管理员 API Token。未配置时，管理页显示配置提示。现有 Hyper-V/WSB MCP 和桌面 MCP 不受影响。
-
-后台采用 Cloudflare 官方的[远程托管 Tunnel API](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel-api/)，为每台设备建立独立 Tunnel 和 DNS 记录。设备默认只开放 `/mcp`；启用桌面时，同一个 Tunnel 增加 `/desktop/mcp`，其余路径返回 404。两项能力使用不同的 MCP Bearer Token，Tunnel connector Token 不作为 MCP 调用凭据。
-
-## 接入设备
-
-1. 在 cs-agent 管理页进入“模型与接入”，展开“添加设备与 Cloudflare 管理”。填写名称，桌面选项默认不勾选，点击“生成配对链接”。
-2. 在待接入设备安装 Node.js 24 或以上版本，从同一页面下载 `cs-agent-device.cjs`。
-3. 在终端执行 `node cs-agent-device.cjs pair`，将配对链接粘贴到程序提示中。链接包含短期配对凭据，不要发到聊天、日志或仓库。
-4. 客户端自动准备 cloudflared、当前用户的登录自启动、MCP 服务并验证云端连接。默认目录是用户主目录下的 `AgentWork`，可以在配对时加 `--workdir <目录>`。
-5. 显示“设备已接入”后，可让 cs-agent 在该设备执行命令。默认只对主人开放；群会话需要在既有 MCP 群授权中明确选择设备服务和工具。
-
-配对有效期 30 分钟，第一次领取绑定到客户端生成并保存的随机 claim。相同客户端可以重试，另一客户端不能使用已领取的链接。未完成的设备可以在管理页“继续配对”；过期后会更新链接，但保留原 claim 绑定，需在原设备重试。原设备丢失时，撤销旧设备并新增。
-
-cloudflared 从 Cloudflare 官方 GitHub release 获取，校验对应 asset 的 SHA-256 和长度。桌面组件固定安装 `agent-desktop@1.3.0`，位于客户端私有目录，与系统全局安装分开。首次下载需要能访问 GitHub Releases；桌面选项还需要访问 npm。
-
-### 模型看到的设备名
-
-例如，把设备命名为 `Lab Mac` 后，模型可以调用 `tools.mcp_labmac_device_info({})`。命令行与可选桌面工具都使用同一个设备前缀。可在 Code Mode 用 `searchTools("Lab Mac")` 按原名查找。
-
-设备前缀取名称里的小写英文字母和数字，最多 32 个字符。同名设备中，首台保留原前缀，后续设备加上管理台可见的 UUID 前 8 位，例如 `labmac_a1b2c3d4`。短编号也相同时会延长。全中文或符号名称使用 `device_短编号`，仍可按登记名搜索。撤销后保留已分配的别名。每轮调用绑定到模型当时看到的工具契约，新一轮才会取得更新后的契约。
-
-### 持久 Windows VM
-
-在管理台为这台 VM 生成独立的配对链接。登录来宾中实际用于开发的 Windows 账户，在其中下载客户端，然后从下载目录打开 PowerShell。如果已有工作区，填入它在来宾磁盘上的实际路径，例如：
-
-```powershell
-node .\cs-agent-device.cjs pair --workdir "C:\AgentWork"
+```caddyfile
+cua.example.org {
+    @mcp {
+        path /mcp
+        header Authorization "Bearer {$CS_AGENT_CUA_TOKEN}"
+    }
+    handle @mcp {
+        reverse_proxy unix//home/cua/.cua/cua.sock {
+            header_up -Authorization
+            header_up Host localhost
+            flush_interval -1
+        }
+    }
+    handle {
+        respond 403
+    }
+}
 ```
 
-客户端以该用户身份在登录后运行。配对完成后，从 cs-agent 的主人会话调用该设备的 `device_info`，核对主机名、用户、PowerShell 和工作目录，再用 `shell_exec` 执行 `Get-Location` 核对路径。现有 VM 由宿主机 `env_*` 接入时，按[旧环境迁移步骤](WINDOWS-MCP.md#迁移已有宿主机-vm-环境)收尾。
+5. 打开 cs-agent「模型与接入 → MCP 与设备 → 个人设备 · Cua Spaces → 配置 Cua MCP」。保存服务地址（例 `https://cua.example.org/mcp`），把 `Authorization` 请求头设为 `Bearer <专用凭据>`，检测并启用所需工具。返回设备面板，点「刷新设备」。
+6. 核对目录中能看到 `list_spaces`、`list_tools` 和 `create_space`。若检测结果只有点击、输入等桌面动作，当前地址指向了单机 Driver，应将它改为控制节点的聚合入口。
 
-## 本机使用与恢复
+Cua 登录会话保存在控制节点，Worker 加密保存访问 HTTPS 入口的凭据。Cloudflare 账户管理通过管理台中单独的「Cloudflare 账户管理」授权，设备接入使用 Cua 账户。
 
-客户端配置、二进制、收据默认在 `~/.cs-agent-device`。其中包含设备凭据，不得分享或提交。Unix 目录使用 0700、凭据文件使用 0600；Windows 去除目录继承并授予当前用户和 SYSTEM。客户端不持有 cs-agent 管理口令或 Cloudflare 管理 Token。
+## 接入 Mac、Windows VM 或运行临时环境的机器
 
-| 命令 | 作用 |
-|---|---|
-| `node cs-agent-device.cjs status` | 查看本机命令服务、Shell、目录和桌面配置状态 |
-| `node cs-agent-device.cjs verify` | 重试云端连接检测与工具启用 |
-| `node cs-agent-device.cjs permissions` | 启动可选桌面组件的系统权限引导 |
-| `node cs-agent-device.cjs run` | 前台运行，供手动启动或排障 |
-| `node cs-agent-device.cjs install-service` | 安装或修复登录自启动，并启动服务 |
-| `node cs-agent-device.cjs remove-service` | 停止并移除登录自启动，保留配置、收据和工作区 |
+在 [Cua 设备管理](https://app.cua.ai/machines) 中添加计算机，或在目标机安装 Cua 后运行下列命令。持久 Windows VM 在来宾的交互用户会话内运行。设备主动连接 Relay，名称会出现在控制节点的目录中。
 
-所有命令可加 `--state-dir <目录>`。自启动名称按状态目录区分，多个目录不会覆盖彼此。服务会记录不含命令正文和凭据的运行事件到状态目录的 `service.log`。初始化失败保留配对 claim；重新运行 `pair` 可以继续同一设备，不会另建 Tunnel。
+```sh
+cua host setup --name "开发机" --share desktop
+cua host status
+```
 
-Windows 使用当前交互用户、Limited 权限的计划任务，隐藏启动；macOS 使用用户 LaunchAgent；Linux 使用 systemd 用户服务。默认都是登录后启动，不配置管理员运行、自动登录或系统级服务。Node.js 路径变化后需重新执行 `install-service`。Linux 没有 systemd 用户会话时可前台运行，或由已有进程管理器启动 `run`。
+`--share desktop` 会共享该用户的桌面、命令行与文件。通过 Cua 应用添加的机器若只开放了运行 Spaces，在 Computers 页面开启该机的桌面共享。macOS 需要在系统设置中授予屏幕录制和辅助功能权限。Windows 桌面需要用户登录并解锁。在准备承载临时环境的机器上使用 `cua host setup --name "构建机" --share spaces`，并为所需镜像安装 Cua 支持的容器或虚拟机运行时。操作系统、镜像与宿主运行时决定能创建哪种临时环境。[Cua 设备接入指南](https://cua.ai/docs/spaces/guides/add-a-computer)
 
-桌面组件需要已登录的交互会话及系统授权；可用 `permissions` 引导授权，再执行 `verify`。命令服务与桌面服务分别注册为 MCP 服务，桌面未就绪时已通过验证的命令能力仍保留。管理页的“已接入”表示配置和验证完成，不等同于设备当前在线；执行前可调用 `device_info` 探测。
+## 模型怎样使用
 
-管理页“撤销接入”先停用该设备的 MCP 服务和配对票据，再关闭该 Tunnel 的所有入口。关闭入口失败可再次点击重试；已发出的本机命令不会因此撤回，需先用 `shell_cancel` 或在本机停止。Tunnel 与 DNS 身份保留以便审计，后续可由 Cloudflare 管理员删除，不操作其他设备或项目的 Tunnel。
+下表使用 Cua 的原始工具名。模型在 Code Mode 目录中会看到形如 `mcp_cua_list_spaces_<契约摘要>` 的名字。增加设备只会在目录增加一张卡片。
 
-## Agent 可见的命令工具
+| 操作 | 调用与返回 |
+| --- | --- |
+| 找到设备 | `list_spaces({})` 返回允许访问的 Space，含显示名、完整 ID、系统、状态和 Cua 上报的能力与服务。使用目录中的完整 ID。 |
+| 查桌面能力 | `list_tools({space, service:"driver"})` 返回该设备的工具名。再传 `name:"list_windows"` 可读取匹配工具的完整参数契约。 |
+| 操作桌面 | 若目录列出 `list_windows`，调用 `call_tool({space, service:"driver", tool:"list_windows", arguments:{}})`。匹配参数和界面操作均以该设备 Driver 实际返回的契约为准。 |
+| 运行命令 | `space_bash({space, command:"hostname"})`。长任务使用 `space_job`，保存 Space 与作业 ID，按工具契约查状态、读取输出或取消。 |
+| 使用临时环境 | 主人通过 `create_space` 指定可用的宿主、镜像、类型与名称。取创建结果的 ID 操作，任务结束后用 `delete_space({space})` 回收这次创建的环境。超时后先查目录和状态，再决定如何继续。 |
 
-| 工具 | 行为 |
-|---|---|
-| `device_info` | 系统、架构、用户名、Shell、默认目录和持久化说明 |
-| `shell_exec` | 执行命令；通常等待最多 1 秒，短命令返回结果，长命令返回运行中收据 |
-| `shell_status` | 按 `requestId` 查询当前调用会话的状态和有界输出 |
-| `shell_cancel` | 请求取消当前调用会话的命令，继续查询确认状态 |
+群授权在「权限与运维 → MCP 群授权与审批」中设置。选择 `cua`、成员、工具和允许的完整 Space ID。群内的设备目录按 ID 过滤，桌面控制、Shell 和作业默认逐次审批。子任务继续受派发时的范围及当前授权约束。临时环境创建与删除仅开放给主人。
 
-Windows 默认 Windows PowerShell，macOS 默认 zsh，Linux 默认 bash。命令每次启动新 Shell，因此 `cd`、Shell 变量不跨调用保存；工具显式接受 `cwd`。本机环境按当前账户权限执行，默认目录不是文件访问隔离边界。文件、Git 缓存和 `node_modules` 都留在设备，不同步到 R2，不自动复制工作区，不因会话结束而删除文件。
+## 从旧设备服务切换
 
-同一设备的不同会话和子 agent 共享本机文件。任务收据按云端注入的调用 scope 隔离；不同 scope 不能查询或取消彼此的命令。最多同时执行 4 条命令，默认超时 120 秒，上限 20 分钟，输出总量上限 256 KiB。stdout、stderr、退出码、截断标记都会返回。
-
-每次操作必须生成 UUID `requestId`，重试保持 ID、命令、目录和超时一致。已受理操作不会自动重放；客户端异常重启后，未确认结果的命令标记 `unknown`，应先检查实际效果。终止命令采用操作系统进程树/进程组机制，不提供 WSB 级隔离，刻意脱离进程树的后台程序应由其自身服务机制管理。HTTP 断开不会取消任务。
-
-完成输出保留 7 天后在后续提交时归档，去重收据和命令指纹继续保留，最多 100,000 条；达到上限拒绝新任务，不通过删除旧去重记录重新执行历史请求。原始命令不写入收据数据库。
-
-## 构建与验证
-
-客户端源码在 `runner/src/device-*.ts`。管理页构建时将其打包为单个 CJS 文件，由 `/admin/device-client.cjs` 提供下载，生成文件不提交 Git。下载内容仅包含程序，不包含实例配置或凭据。
-
-运行 `npm run install:workers` 和 `npm run check`。设备 Shell 测试真实启动本机 Shell 和回环 MCP 服务；配对测试使用 workerd 的真实 Registry SQLite、合成凭据与模拟 Cloudflare/MCP 端点。CI 分别在 Linux、Windows 和 macOS 验证命令执行。真实云端 Tunnel、操作系统自启动和桌面授权需要在对应设备部署后验收。
+1. 升级前先完成或取消仍在运行的任务。记录旧设备与其 Tunnel、DNS 的对应关系。仍能使用旧管理台时，可在设备端迁移完毕后使用旧版「撤销接入」清理对应的云端资源。
+2. 在每台旧设备上用原来的客户端和登录账户执行 `node cs-agent-device.cjs remove-service`。自定义状态目录需加原先的 `--state-dir`。结束手动启动的旧进程，停用原有 Windows 宿主 runner。持久 VM、工作目录和项目文件继续保留。
+3. 部署新版后，Registry 首次初始化时清除旧配对表及其生成的 MCP 记录。原 `windows`、`desktop` 入口按服务 ID 和历史工具契约识别。检查管理台是否有自行改名的旧入口，确认后移除。旧授权不授予新服务。
+4. 若还留有旧 Cloudflare 资源，按迁移前的记录核对并删除对应的 `cs-agent-device-<UUID>` Tunnel 及 `device-<去除连字符的 UUID>.<域名>` DNS 记录。专用于这些 Tunnel 的旧 API Token 可在核实用途后撤销。
+5. 在 Cua 中重新连接设备，刷新目录，在主人会话对选定的设备运行 `hostname` 并读取 Driver 工具目录，再按需授予群权限。

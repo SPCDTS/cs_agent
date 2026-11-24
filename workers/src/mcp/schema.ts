@@ -21,7 +21,7 @@ const nodeSchema = Type.Object({
   items: optional(Type.Unknown()), additionalItems: optional(Type.Unknown()), contains: optional(Type.Unknown()),
   minItems: optional(natural), maxItems: optional(natural), uniqueItems: optional(Type.Boolean()),
   minLength: optional(natural), maxLength: optional(natural), pattern: optional(Type.String()),
-  format: optional(Type.Union(["date-time", "date", "time", "email", "hostname", "ipv4", "ipv6", "uri", "uri-reference", "uri-template", "json-pointer", "relative-json-pointer", "regex"].map(t => Type.Literal(t)))),
+  format: optional(Type.Union(["date-time", "date", "time", "email", "hostname", "ipv4", "ipv6", "uri", "uri-reference", "uri-template", "json-pointer", "relative-json-pointer", "regex", "uint16", "uint32", "uint64"].map(t => Type.Literal(t)))),
   minimum: optional(Type.Number()), maximum: optional(Type.Number()), exclusiveMinimum: optional(Type.Number()), exclusiveMaximum: optional(Type.Number()),
   multipleOf: optional(Type.Number({ exclusiveMinimum: 0 })),
   allOf: optional(listOfSchemas), anyOf: optional(listOfSchemas), oneOf: optional(listOfSchemas),
@@ -109,6 +109,15 @@ export function compileMcpSchema(input: unknown, limits: McpLimits): { schema: T
       if (active.has(value)) reject("cycle");
       if (!Check(nodeSchema, value)) reject(Object.keys(value).some(key => !Object.hasOwn(nodeSchema.properties, key)) ? "unknown_keyword" : "schema_invalid");
       const node = value;
+      // Rust/schemars 用 format 表示整数位宽。转成 JSON Schema 数值边界，避免 JS 舍入 64 位整数。
+      if (typeof node.format === "string" && ["uint16", "uint32", "uint64"].includes(node.format)) {
+        const types: (string | undefined)[] = Array.isArray(node.type) ? node.type : [node.type];
+        if (!types.includes("integer") || types.some(type => type !== "integer" && type !== "null")) reject();
+        const max = node.format === "uint16" ? 65535 : node.format === "uint32" ? 4294967295 : Number.MAX_SAFE_INTEGER;
+        node.minimum = Math.max(0, node.minimum ?? 0);
+        node.maximum = Math.min(max, node.maximum ?? max);
+        delete node.format;
+      }
       // 当前 SDK 协议不使用参数头注解；仅从模型 schema 删除元数据，保留业务数据中的同名字段。
       Reflect.deleteProperty(value, "$schema");
       Reflect.deleteProperty(value, "x-mcp-header");

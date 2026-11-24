@@ -4,14 +4,14 @@
 
 ## 环境
 
-通用检查需要 Node.js 24+ 和 npm。Windows runner 的原生检查需要 Windows；真实 Hyper-V/WSB 验证按对应环境说明单独进行。Cloudflare 容器镜像发布需要 Docker，日常 Worker 打包检查不构建镜像。
+通用检查需要 Node.js 24+ 和 npm。Cua 真机验证需要已连接的设备，见[设备接入](docs/DEVICE-MCP.md)。Cloudflare 容器镜像发布需要 Docker，日常 Worker 打包检查不构建镜像。
 
 ```sh
 npm run install:workers
 npm run check
 ```
 
-根目录命令检查 `workers/` 和 `runner/`，各自依赖由各自的 lockfile 固定；每个 worktree 独立安装依赖。
+根目录命令检查 `workers/`，依赖由该目录的 lockfile 固定；每个 worktree 独立安装依赖。
 
 日常单模块改动先运行 `npm run typecheck` 和相关测试，例如 `npm run test:related -- src/github/app.ts`；路径相对 `workers/`。也可直接指定测试文件：`npm test -- test/github-user-auth.test.ts`。相关测试根据静态 import 关系选择，涉及共享入口、DO 生命周期、配置或跨模块行为时运行完整 `npm run check`。纯说明文档无需运行代码测试。
 

@@ -46,15 +46,9 @@ Token 不通过聊天或模型工具参数接收，不回显。凭据使用现�
 
 本地 stdio 服务仍需本机程序与 HTTPS 桥接。此接入机制不会自动安装本机软件，也不会修改 CS2 Workshop 项目。
 
-## 设备命令行与可选桌面
+## Cua 设备与临时环境
 
-新设备可在“模型与接入 → 添加设备与 Cloudflare 管理”生成短期配对链接。轻量客户端默认提供本机命令行，agent-desktop 按需安装，自动配置独立 Tunnel 和 MCP 凭据。管理员首次配置、安装和恢复步骤见 [设备 MCP](DEVICE-MCP.md)。
-
-## Windows 远程环境
-
-持久 Hyper-V VM 在来宾内按[设备配对流程](DEVICE-MCP.md)接入，模型通过 `device_info` 和 `shell_*` 使用它。临时 WSB 使用宿主机的 `env_*` 服务，旧 VM 任务的收尾步骤见 [Windows MCP](WINDOWS-MCP.md)。Cloudflare Container 保留原生 coding，不迁移为 MCP。
-
-Windows runner 的固定 env_* 工具使用环境级授权：管理页群授权中的 environments 是 envId 清单，留空即不开放；environmentApproval 默认为 required，可明确设为 none 允许授权范围内的环境操作直接执行。两字段沿用现有 PUT /admin/mcp/access 和 mcp_access JSON 存储，不新增服务。固定工具名及宿主元数据协议见 [Windows MCP](WINDOWS-MCP.md)。这些名称由平台按环境协议识别；其他普通 MCP 工具继续按原工具权限与逐次审批策略执行。
+在「模型与接入 → MCP 与设备 → 个人设备 · Cua Spaces」登记一次聚合服务 `cua`。目录列出设备显示名与完整 Space ID。群授权按工具、成员和 Space ID 生效，未选择设备时群无权调用。持久 VM 与临时环境使用同一套工具。[设备接入与调用](DEVICE-MCP.md)
 
 ## 不开放入站端口的节点：反向 WebSocket
 
@@ -66,8 +60,8 @@ Windows runner 的固定 env_* 工具使用环境级授权：管理页群授权�
 
 - 收到 `{"session":"<uuid>","message":{...}}`：按 UUID 取得独立的 MCP Server 会话；首次 `initialize` 时创建。将 `message` 原样送交该会话的 SDK transport。响应或通知用相同 UUID 和相同信封格式发回；不同会话的 JSON-RPC id 可以重复，不要串用。
 - 收到 `{"session":"<uuid>","close":true}`：释放该会话。物理连接关闭时释放全部会话。再次连入会替换同一实例原连接；不要缓存或重发旧调用。节点不在线时探测返回 `reverse_offline`；已发出的写操作失去应答时，沿用 `outcome_unknown`，先核实结果。
-- 更换注册凭据会停用服务、清空已发现目录并隔离旧连接；用新凭据重连后重新探测及启用。现有 HTTP、OAuth 和设备 Tunnel 配对无需迁移。
+- 更换注册凭据会停用服务、清空已发现目录并隔离旧连接；用新凭据重连后重新探测及启用。
 
 可参考 `workers/test/mcp-reverse.test.ts` 中用标准 SDK Server 处理会话的可运行例子。
 
-**独立节点试用**：仓库自带仅返回固定问候的 Node 示例，无 shell 或文件权限。安装仓库依赖后，在节点环境安全注入 `REVERSE_MCP_URL`（完整 wss 注册地址）和 `REVERSE_MCP_TOKEN`（不含 Bearer 前缀，不要写进版本库或命令历史），运行 `node runner/scripts/reverse-mcp-example.ts`。保持进程开启，在管理页检测并启用 `hello`。断线后可重新启动示例；示例不自动重试。
+**独立节点试用**：仓库自带仅返回固定问候的 Node 示例，无 shell 或文件权限。安装仓库依赖后，在节点环境安全注入 `REVERSE_MCP_URL`（完整 wss 注册地址）和 `REVERSE_MCP_TOKEN`（不含 Bearer 前缀，不要写进版本库或命令历史），运行 `node workers/scripts/reverse-mcp-example.ts`。保持进程开启，在管理页检测并启用 `hello`。断线后可重新启动示例；示例不自动重试。

@@ -1,3 +1,4 @@
+import { initCua } from './cua';
 import { initContextMonitor } from "./context-monitor";
 import { initApp } from "./app";
 import { initConsole } from "./console";
@@ -9,7 +10,7 @@ import { initMemory } from "./memory";
 import { initAccess } from "./access";
 import { initWorkspace } from "./workspace";
 import { initMcp } from "./mcp";
-import { completeCloudflareLogin, initDevices } from './devices';
+import { completeCloudflareLogin, initCloudflare } from './cloudflare';
 import { initMcpServers } from "./mcp-servers";
 
 initConsole();
@@ -23,6 +24,7 @@ initAccess();
 initWorkspace();
 initMcp();
 initMcpServers();
-initDevices();
+initCloudflare();
+initCua();
 initApp();
 void completeCloudflareLogin();

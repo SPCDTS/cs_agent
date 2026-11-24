@@ -39,7 +39,7 @@ DeepSeek 和 GPT 的普通聊天、网页聊天都能调用同一个 `generate_i
 
 ## 联网与外部工具
 
-主 agent 和子 agent 使用当前模型的服务端联网搜索。GPT 使用已选 ChatGPT 账号的 `web_search`；DeepSeek Pro 使用 Responses API 的 `web_search`；Flash 使用 `deepseek_web_search`，与普通工具混用时至少开启低强度思考。是否搜索由模型判断；管理台请求详情显示实际发生的调用。后台提取与上下文压缩不启用搜索。`web_page` 仍可读取指定 URL。管理员在管理台的「模型与接入」配置 MCP 服务、凭据与工具白名单。`mcp.json` 只用于首次初始化 Registry，默认服务目录为空；升级不会覆盖已经保存的服务。远程执行环境由各自的 MCP 服务提供，Windows 的 VM 和 WSB 接入见 [Windows MCP](../docs/WINDOWS-MCP.md)。OAuth 登录、目录刷新、资源读取、群授权和逐次审批见 [云端功能与契约](../docs/CLOUD-PARITY.md#4-mcp子-agent-能力委派与群审批契约)。
+主 agent 和子 agent 使用当前模型的服务端联网搜索。GPT 使用已选 ChatGPT 账号的 `web_search`；DeepSeek Pro 使用 Responses API 的 `web_search`；Flash 使用 `deepseek_web_search`，与普通工具混用时至少开启低强度思考。是否搜索由模型判断；管理台请求详情显示实际发生的调用。后台提取与上下文压缩不启用搜索。`web_page` 仍可读取指定 URL。管理员在管理台的「模型与接入」配置 MCP 服务、凭据与工具白名单。`mcp.json` 只用于首次初始化 Registry，默认服务目录为空；升级不会覆盖已经保存的服务。个人设备、持久 VM 和临时环境接入同一个 [Cua Spaces MCP](../docs/DEVICE-MCP.md)。OAuth 登录、目录刷新、资源读取、群授权和逐次审批见 [云端功能与契约](../docs/CLOUD-PARITY.md#4-mcp子-agent-能力委派与群审批契约)。
 
 CS2 Workshop 是外部项目。此仓库的 `scripts/workshop-local.*` 只维护连接它的本机 MCP 与 Cloudflare Tunnel；录制、合成、投稿和资源状态由 Workshop 自己管理，见 [本机接入](../docs/WORKSHOP-LOCAL.md)。
 

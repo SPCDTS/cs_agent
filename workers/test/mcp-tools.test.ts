@@ -15,10 +15,10 @@ import { fakeRemote, login, sampleTools, ACCESS } from "./mcp-helpers";
 import { input } from "./helpers";
 
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
-function scriptedModel(steps: { name: string; args: JsonObject; beforeResponse?: () => Promise<void> }[]) {
+function scriptedModel(steps: { name: string; args: JsonObject }[]) {
   const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
   const offers: string[] = [], sections: string[] = [], outputs: string[] = [], captured = new Set<string>();
-  const respond: FauxResponseFactory = async transcript => {
+  const respond: FauxResponseFactory = transcript => {
     faux.setResponses([respond]);
     for (const message of transcript.messages) {
       if (message.role === "system") {
@@ -30,7 +30,6 @@ function scriptedModel(steps: { name: string; args: JsonObject; beforeResponse?:
       }
     }
     const next = steps.shift();
-    await next?.beforeResponse?.();
     return next ? fauxAssistantMessage(fauxToolCall(next.name, next.args), { stopReason: "toolUse" }) : fauxAssistantMessage("done");
   };
   faux.setResponses([respond]);
@@ -64,41 +63,6 @@ describe("MCP in pi-durable and inline QuickJS", () => {
     expect(JSON.parse(String(calls[0].detail))).toMatchObject({ server: "notion", tool: name, result: "ok", ms: expect.any(Number), inputBytes: expect.any(Number), outputBytes: expect.any(Number) });
     for (const secret of [ACCESS, "private-query", "service-result"]) expect(JSON.stringify(result.events)).not.toContain(secret);
     expect(JSON.stringify(result.events)).toContain("unknown_keyword");
-  });
-  it("uses the device alias for discovery and pins its contract before the model replies", async () => {
-    const id = "11111111-1111-4111-8111-111111111111", server = "device-" + id;
-    const endpoint = "https://fixture.example.test/mcp", remote = fakeRemote(endpoint);
-    const tool = { name: "device_info", inputSchema: { type: "object" as const }, description: "查询设备" };
-    remote.state.tools = [tool];
-    await runInDurableObject(env.REGISTRY.getByName("main"), async (registry, state) => {
-      state.storage.sql.exec("INSERT INTO devices(id,name,desktop,state,created,expires,pairing_hash,secret) VALUES(?,?,0,'ready',1,2,'','')", id, "Lab Mac");
-      const record = registry.mcpServerPut({ id: server, url: endpoint, auth: "none" }, "absent");
-      const probe = registry.mcpServerProbe(server, record.revision, { tools: [tool] });
-      registry.mcpServerActivate(server, probe.revision, { allow: [tool.name], readOnly: [tool.name] });
-    });
-    await runInDurableObject(env.THREAD.getByName("owner"), async (instance, state) => {
-      const thread = threadWithBindings(instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
-      const alias = "mcp_labmac_device_info";
-      const call = { name: "codemode", args: { code: `text((await tools.${alias}({})).content[0].text)` } };
-      const seen = scriptedModel([refreshStep, { name: "codemode", args: { code: `
-        text(ALL_TOOLS.filter(t => t.name === "${alias}").length);
-        text((await searchTools("Lab Mac", {namespace:"device/labmac/shell"}))[0].name);
-        text(await describeTool("${alias}"));
-        text((await describeNamespace("device/labmac/shell")).tools);
-        ${call.args.code}` } }, { ...call, beforeResponse: async () => {
-          remote.state.tools = [{ ...tool, inputSchema: { type: "object", properties: { detail: { type: "boolean" } } } }];
-          await thread.refreshMcp();
-        } }, call]);
-      await thread.submit(input(1, "检查设备工具", 10000001));
-      expect(seen.sections.join("\n")).toContain("device/labmac/shell");
-      expect(seen.outputs[1]).toContain("1");
-      expect(seen.outputs[1]).toContain(alias);
-      expect(seen.outputs[1]).toContain("查询设备");
-      expect(seen.outputs[1]).toContain("service-result:");
-      expect(seen.outputs[2]).not.toContain("service-result:");
-      expect(seen.outputs[3]).toContain("service-result:");
-      expect(remote.state.calls).toBe(2);
-    });
   });
   it("rechecks the current sender on every nested business call after ownership changes", async () => {
     const remote = fakeRemote(); await login();

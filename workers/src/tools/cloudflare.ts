@@ -2,7 +2,7 @@ import { Type } from 'typebox';
 import { defineExtension, defineTool, type ToolExecutionApi } from '@earendil-works/pi-durable';
 import type { Context } from '@earendil-works/chord/context';
 import type { Env } from '../env';
-import { CloudflareChange, CloudflareInventory } from '../devices/contracts';
+import { CloudflareChange, CloudflareInventory } from '../cloudflare/contracts';
 
 type Management = Pick<ReturnType<Env['REGISTRY']['getByName']>, 'cloudflareInventory' | 'cloudflarePropose'>;
 export function createCloudflareExtension(allowed: (api: ToolExecutionApi, context: Context) => Promise<boolean>, registry: () => Management,

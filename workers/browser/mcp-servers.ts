@@ -1,4 +1,4 @@
-import { serviceLabel } from "./device-label";
+import { CUA_SERVER, cuaTools, cuaReadOnly } from '../src/cua/spaces';
 import { $, ApiError, api, el, fail, loadOverview, readToken, show } from "./app";
 import { Check } from "typebox/value";
 import { readApi } from "./api";
@@ -22,8 +22,10 @@ export function mcpServerRender(id:string){
   $("mcp-server-state").textContent=server?(server.enabled?"已启用":"尚未启用")+(server.credential.kind==="managed"?(record?.credentialSet?" · 已保存凭据":" · 等待凭据"):""):"填写新服务的地址与认证方式。";
   const list=$("mcp-server-tools");list.replaceChildren();
   if(server)for(const tool of record?.discovered||[]){
-    const enabled=el("input",{type:"checkbox","data-tool":tool.name});enabled.checked=server.tools.allow.includes(tool.name);
+    if (id === CUA_SERVER && !cuaTools.some(name => name === tool.name)) continue;
+    const enabled=el("input",{type:"checkbox","data-tool":tool.name});enabled.checked=server.tools.allow.includes(tool.name) || (id===CUA_SERVER && !server.enabled && !server.tools.allow.length);
     const readonly=el("input",{type:"checkbox","data-readonly":tool.name});readonly.checked=(server.tools.readOnly??[]).includes(tool.name);
+    if (id === CUA_SERVER) { readonly.checked = cuaReadOnly.includes(tool.name); readonly.disabled = true; }
     list.append(el("div",{className:"source"},[el("div",{className:"row"},[el("label",{className:"row"},[enabled,el("strong",{text:tool.name})]),el("label",{className:"row"},[readonly,el("span",{text:"确认为只读"})])]),
       el("div",{className:"muted small",text:tool.description})]));
   }
@@ -33,7 +35,7 @@ export async function loadMcpServers(selected=mcpServers.selected){
   if(!readToken())return;const version=++mcpServers.loading,epoch=cs.epoch;
   const data=await readApi(McpServersSchema,"GET","/admin/mcp/servers");if(version!==mcpServers.loading||epoch!==cs.epoch)return;
   mcpServers.rows=data.servers;const select=$("mcp-server-select");
-  select.replaceChildren(el("option",{value:"",text:"新增服务"}),...data.servers.map(row=>el("option",{value:row.server.id,text:serviceLabel(row.server.id,row.device),title:row.server.id})));
+  select.replaceChildren(el("option",{value:"",text:"新增服务"}),...data.servers.map(row=>el("option",{value:row.server.id,text:row.server.id})));
   mcpServerRender(selected);
 }
 export async function mcpServerAction(action:ServerAction){

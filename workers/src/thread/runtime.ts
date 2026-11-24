@@ -409,7 +409,6 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     async refresh => { await mcp.syncConfig(await host.env.REGISTRY.getByName("main").mcpConfig()); if (refresh) await mcp.refreshAll(); },
     change => host.audit("mcp_management", { ...change, source: "agent" })));
   const codemode = installCodemode(registry, {
-    catalog: () => harness,
     allowed: async (api, callContext) => await codingAllowed(api, callContext) || await agentFileAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext)
       || (memory.ns === "owner" && await ownerMayManage(api, callContext)),
   });

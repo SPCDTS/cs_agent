@@ -42,8 +42,7 @@ type ServerInput = Static<typeof Server>;
 export type McpServerConfig = ServerInput & { enabled: boolean; transport: ServerInput["transport"] & { headers: Record<string, string>; secretHeaders: Record<string, string> };
   resourceAllow: string[]; tools: { allow: string[]; eventAllow: string[]; readOnly?: string[] } };
 export type OAuthServer = McpServerConfig & { credential: Extract<ServerInput["credential"], { kind: "oauth" }> };
-export type DeviceToolLabel = { alias: string; name: string };
-export type McpConfig = { deviceLabels?: Record<string, DeviceToolLabel>; version: 1; enabled: boolean; servers: McpServerConfig[]; limits: McpLimits };
+export type McpConfig = { version: 1; enabled: boolean; servers: McpServerConfig[]; limits: McpLimits };
 
 export function httpsUrl(value: string): URL {
   const url = new URL(value);

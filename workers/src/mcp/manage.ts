@@ -1,3 +1,4 @@
+import { CUA_SERVER, cuaTools } from '../cua/spaces';
 import { Type, type Static } from "typebox";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord/context";
@@ -54,7 +55,11 @@ export async function manageMcp(env: Env, input: McpManageRequest) {
       let connection: McpConnection | undefined;
       try {
         connection = await McpConnection.open(record.server, env, MCP_CONFIG.limits, AbortSignal.timeout(MCP_CONFIG.limits.connectMs), () => {});
-        const tools = await connection.listTools(AbortSignal.timeout(MCP_CONFIG.limits.connectMs));
+        const catalog = await connection.listTools(AbortSignal.timeout(MCP_CONFIG.limits.connectMs));
+        const tools = input.id === CUA_SERVER ? catalog.filter(tool => cuaTools.some(name => name === tool.name)) : catalog;
+        if (input.id === CUA_SERVER && !tools.some(tool => tool.name === 'list_spaces')) {
+          return { status: 'unavailable', code: 'cua_directory_missing', message: '请填写 Cua daemon 聚合 MCP 的地址。该入口应提供 list_spaces。' };
+        }
         return { status: "ready", ...await registry.mcpServerProbe(input.id, input.expectedRevision, { tools }) };
       } catch (error) {
         const setup = setupFailure(error);

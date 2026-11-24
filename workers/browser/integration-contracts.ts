@@ -2,8 +2,6 @@ import { Type, type Static } from "typebox";
 import { MaintenanceOverrideSchema, OpsSettingsSchema, SendLimitsSchema, type MaintenanceOverride } from "../src/settings-schema";
 export { MaintenanceOverrideSchema, SendLimitsSchema, type MaintenanceOverride };
 
-import { DeviceService } from "../src/devices/contracts";
-
 const strings = () => Type.Array(Type.String());
 const nullableString = () => Type.Union([Type.String(), Type.Null()]);
 const nullableNumber = () => Type.Union([Type.Number(), Type.Null()]);
@@ -33,7 +31,6 @@ export type WorkspaceChild = Static<typeof WorkspaceChildSchema> & { thread: str
 export const WorkspaceMergedSchema = Type.Object({ manifest: ManifestSchema });
 
 export const McpServerRecordSchema = Type.Object({
-  device: Type.Optional(DeviceService),
   server: Type.Object({ id: Type.String(), enabled: Type.Boolean(),
     transport: Type.Object({ kind: Type.Optional(Type.String()), url: Type.String(), headers: Type.Record(Type.String(), Type.String()) }),
     credential: Type.Object({ kind: Type.String(), scope: Type.Optional(Type.String()) }),

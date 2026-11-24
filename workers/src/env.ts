@@ -3,11 +3,8 @@ export interface Env extends Omit<Cloudflare.Env, "MODEL_PROVIDER" | "MODEL_ID" 
   PUBLIC_ORIGIN: string;
   /** JSON 有向会话对，默认关闭；独立于 QQ 发送授权。 */
   AGENT_COMMUNICATION_EDGES?: string;
+  CLOUDFLARE_MANAGEMENT_DOMAIN?: string;
   DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID?: string;
-  DEVICE_TUNNEL_ACCOUNT_ID?: string;
-  DEVICE_TUNNEL_ZONE_ID?: string;
-  DEVICE_TUNNEL_DOMAIN?: string;
-  DEVICE_TUNNEL_API_TOKEN?: string;
   // Pub/Sub 推送的服务账号邮箱与 Gmail watch 的 topic；为空时只靠 Cron 轮询
   GMAIL_PUBSUB_SERVICE_ACCOUNT?: string;
   GMAIL_PUBSUB_TOPIC?: string;

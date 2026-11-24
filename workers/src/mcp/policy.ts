@@ -1,4 +1,5 @@
-import { EnvIdsSchema, isEnvironmentTool, noEnvironments, type EnvironmentAccess } from './environments';
+import { CUA_SERVER, SpaceId, isCuaTargetTool } from '../cua/spaces';
+import { EnvIdsSchema, noEnvironments, type EnvironmentAccess } from './environments';
 import type { SqliteDatabase } from "@earendil-works/chord/sqlite";
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
 import { Type, type Static } from "typebox";
@@ -92,6 +93,8 @@ export class McpPolicyStore {
   await this.initialize();
   const server = this.config.servers.find(s => s.enabled && s.id === serverId);
   if (!/^group:[1-9][0-9]{0,19}$/.test(scope) || !server || !Check(GrantInput, input)
+    || (serverId === CUA_SERVER && (input.tools.some(name => !isCuaTargetTool(serverId, name))
+      || input.environments?.some(id => !Check(SpaceId, id)) || input.resourceAllow.length > 0))
     || input.tools.some(name => !server.tools.allow.includes(name))
     || input.resourceAllow.some(prefix => !server.resourceAllow.some(allowed => prefix.startsWith(allowed)))) throw new McpPolicyError("invalid");
   return this.db.transaction(async tx => {
@@ -125,7 +128,7 @@ export class McpPolicyStore {
  }
  async requiresApproval(authority: McpAuthority, server: McpServerConfig, tool: string): Promise<boolean> {
   if (authority.owner && authority.kind !== "agent") return false;
-  if (!isEnvironmentTool(tool)) return true;
+  if (!isCuaTargetTool(server.id, tool)) return true;
   return (await this.grant(authority.scope, server.id))?.environmentApproval !== 'none';
  }
  async resourcePrefixes(authority: McpAuthority, server: McpServerConfig): Promise<string[]> {

@@ -4,7 +4,7 @@ import type { SqliteDatabase } from "@earendil-works/chord/sqlite";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import type { DeviceToolLabel, McpLimits, McpServerConfig } from "./config";
+import type { McpLimits, McpServerConfig } from "./config";
 import { compileMcpSchema, McpSchemaError } from "./schema";
 import { digest, jsonBytes, serverDigest, toolNames, type CatalogIdentity } from "./names";
 
@@ -13,7 +13,7 @@ export const MCP_CATALOG_SCHEMA = `CREATE TABLE IF NOT EXISTS mcp_catalog (
   schema_json TEXT NOT NULL, digest TEXT NOT NULL, updated_at INTEGER NOT NULL,
   PRIMARY KEY(server_id, tool_name));`;
 export type CatalogTool = { name: string; description: string; inputSchema: JsonObject; outputSchema?: JsonObject };
-export type Catalog = CatalogIdentity & { tools: CatalogTool[]; device?: DeviceToolLabel };
+export type Catalog = CatalogIdentity & { tools: CatalogTool[] };
 const Stored = Type.Object({ name: Type.String({ minLength: 1, maxLength: 256 }), description: Type.String(),
   inputSchema: Type.Record(Type.String(), Type.Unknown()), outputSchema: Type.Optional(Type.Record(Type.String(), Type.Unknown())) }, { additionalProperties: false });
 const ownerScope = digest(["owner-private", "owner"]);

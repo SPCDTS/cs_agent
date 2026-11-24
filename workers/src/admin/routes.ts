@@ -1,3 +1,4 @@
+import { CUA_ROUTES } from './cua-routes';
 import { readBounded, WebhookError, MAX_CONFIG_BYTES } from "../github/model";
 import { readAdminCursor } from "./pagination";
 import { healthReport } from "./health";
@@ -5,7 +6,7 @@ import { threadView, workspaceView } from "./read-views";
 import { ADMIN_PAGE_SIZE } from "./pagination";
 import { workspaceRoutes } from "./workspace-routes";
 import { createMcpAdminRoutes } from "./mcp-routes";
-import { DEVICE_ROUTES } from './devices-routes';
+import { CLOUDFLARE_ROUTES } from './cloudflare-routes';
 import { MCP_SERVER_ROUTES } from "./mcp-servers-routes";
 import { accessRoutes } from "./access-routes";
 import { createMemoryAdminRoutes } from "./memory-routes";
@@ -147,7 +148,8 @@ const SECRET_NAMES = ["ADMIN_TOKEN", "NAPCAT_TOKEN", "QQ_OWNER", "QQ_ALLOW_USERS
 export const ADMIN_ROUTES: AdminRoute[] = [
   { method: "GET", path: "/admin/health", handle: async ({ env }) => json(await healthReport(env)) },
   ...MCP_SERVER_ROUTES,
-  ...DEVICE_ROUTES,
+  ...CLOUDFLARE_ROUTES,
+  ...CUA_ROUTES,
   ...accessRoutes(),
   ...workspaceRoutes({forThread:async(thread,ctx)=>{
     const stub=ctx.env.THREAD.getByName(thread), view=workspaceView(ctx.env,thread);
@@ -240,7 +242,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     const unavailable = () => ({ error: "unavailable" as const });
     // 定时与事件只给总览卡片一行小字，任一个 DO 出错都不能拖垮整页。
     const [status, list, model, accounts, counts, schedule, events] = await Promise.all([
-      bridge.status(), bridge.threadList(), registry.modelStatus(), registry.status(true), owner.mcpToolCounts().catch(() => null),
+      bridge.status(), bridge.threadList(), registry.modelStatus(), registry.status(), owner.mcpToolCounts().catch(() => null),
       env.SCHEDULE.getByName("main").status().catch(unavailable), env.EVENTS.getByName("main").health().catch(unavailable),
     ]);
     const { threads: _keys, sendRules, ...connection } = status;

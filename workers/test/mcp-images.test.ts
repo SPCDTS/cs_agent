@@ -82,17 +82,13 @@ describe("MCP images reach the model through Code Mode", () => {
   });
 
   it("preserves images through parent MCP, child RPC adapter and child QuickJS", async () => {
-    const endpoint = "https://desktop.example.test/mcp", id = "device-11111111-1111-4111-8111-111111111111-desktop";
-    const remote = fakeRemote(endpoint); await env.THREAD.getByName("owner").syncAdminView("owner");
-    remote.state.tools = [{ name: "desktop_capture", inputSchema: { type: "object" }, outputSchema: schema }];
-    const server = { ...MCP_CONFIG.servers[0]!, id, credential: { kind: "none" as const },
-      transport: { ...MCP_CONFIG.servers[0]!.transport, url: endpoint }, tools: { allow: ["desktop_capture"], eventAllow: [] } };
-    const config = { ...MCP_CONFIG, servers: [server], deviceLabels: { [id]: { alias: "labpc", name: "Lab PC" } } };
+    const remote = fakeRemote(); await login(); await env.THREAD.getByName("owner").syncAdminView("owner");
+    remote.state.tools[1] = { name: "notion-fetch", inputSchema: { type: "object" }, outputSchema: schema };
     remote.state.toolResult = { content: [image], structuredContent: metadata };
     await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
       const db = new DurableObjectSqliteDatabase(state.storage); await db.exec(MCP_CATALOG_SCHEMA);
-      const mcp = new ThreadMcp(db, env, createRegistry(), async () => authority, config); await mcp.refreshAll();
-      const snapshot = await mcp.captureCapabilities(authority, [{ server: id, tools: ["desktop_capture"] }]);
+      const mcp = new ThreadMcp(db, env, createRegistry(), async () => authority); await mcp.refreshAll();
+      const snapshot = await mcp.captureCapabilities(authority, [{ server: "notion", tools: ["notion-fetch"] }]);
       const child = { ...authority, kind: "subagent" as const, subagentId: "image-child" };
       const host = createSubagentCapabilityHost({
         validateSubagentAccess: async () => ({ authority, capabilities: { mcp: snapshot } }),
@@ -100,7 +96,7 @@ describe("MCP images reach the model through Code Mode", () => {
       });
       const registry = createRegistry();
       const delegated = installDelegatedCapabilities(registry, host, "image-child", { mcp: snapshot });
-      const seen = model([`const result = await tools.mcp_labpc_desktop_capture({}); ${show}`]);
+      const seen = model([screen]);
       const storage = await openDurableObjectSqliteStorage(state.storage, { prefix: "image_child_" });
       const harness = await Harness.open(storage, { models: seen.create(), registry }, BACKGROUND_CONTEXT);
       try {
@@ -110,7 +106,6 @@ describe("MCP images reach the model through Code Mode", () => {
         expect(remote.state.calls).toBe(1);
         expect(seen.images).toEqual([image]);
         expect(seen.texts.join("\n")).toContain(JSON.stringify(metadata));
-        expect(seen.sections.join("\n")).toContain("device/labpc/desktop");
         expect(seen.sections.join("\n")).toContain("image(block)");
       } finally { await harness.close(BACKGROUND_CONTEXT); await delegated.close(); await mcp.close(); }
     });

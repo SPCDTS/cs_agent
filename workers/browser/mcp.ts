@@ -1,10 +1,9 @@
-import { serviceLabel } from "./device-label";
-import { isEnvironmentTool } from "../src/mcp/environments";
+import { CUA_SERVER, isCuaTargetTool } from "../src/cua/spaces";
 import { $, api, el, fail, readToken, show, time } from "./app";
 import { readApi } from "./api";
 import { McpServersSchema, McpAccessSchema, McpApprovalsSchema, McpThreadsSchema, McpDecisionSchema, type McpGrant, type McpApproval, type McpToolResult } from "./integration-contracts";
 import { listInputs, paginateChildren } from "./pagination";
-type UiServer = {id:string;label:string;tools:string[];readOnly:string[];resourceAllow:string[];revision?:string};
+type UiServer = {id:string;tools:string[];readOnly:string[];resourceAllow:string[];revision?:string};
 export let mcpUiServers: UiServer[] = [];
 export const mcpUi: {revision:string;approvals:McpApproval[];version:number;loaded:boolean} = { revision: "none", approvals: [], version: 0, loaded: false };
 export const mcpUiNode = $;
@@ -20,11 +19,12 @@ export function mcpUiResult(result:McpToolResult|undefined) {
 export function mcpUiTools(grant:McpGrant|null) {
   const selection = mcpUiSelection(), server = mcpUiServers.find(item => item.id === selection.server);
   const list = mcpUiNode("mcp-access-tools"); list.replaceChildren();
-  mcpUiNode("mcp-access-environment-fields").hidden = !server?.tools.some(isEnvironmentTool);
+  mcpUiNode("mcp-access-environment-fields").hidden = !server?.tools.some(name => isCuaTargetTool(server.id, name));
   for (const name of server ? server.tools : []) {
+    if (selection.server === CUA_SERVER && !isCuaTargetTool(selection.server, name)) continue;
     const checkbox = el("input", { type: "checkbox", value: name }); checkbox.checked = !!grant && grant.tools.includes(name);
     list.append(el("label", { className: "row", style: "gap:5px" }, [checkbox, el("span", { className: "mono", text: name }),
-      el("span", { className: "small muted", text: (server?.readOnly??[]).includes(name) ? "只读" : isEnvironmentTool(name) ? "按环境审批设置" : "成员逐次审批" })]));
+      el("span", { className: "small muted", text: (server?.readOnly??[]).includes(name) ? "只读" : isCuaTargetTool(selection.server, name) ? "按环境审批设置" : "成员逐次审批" })]));
   }
   paginateChildren(list,{key:"mcp-access-tools:"+selection.scope+":"+selection.server});
 }
@@ -54,7 +54,7 @@ export function mcpUiApprovals() {
       el("button", { className: "btn danger", type: "button", text: "拒绝", onclick: event => { if(event.currentTarget instanceof HTMLButtonElement)void mcpUiDecide(row, "reject", event.currentTarget); } }),
     ]) : null;
     list.append(el("article", { className: "source" }, [
-      el("div", { className: "row" }, [el("strong", { text: (mcpUiServers.find(server => server.id === row.server_id)?.label ?? row.server_id) + " · " + row.tool_name,title:row.server_id }), el("span", { className: "pill neutral", text: row.status })]),
+      el("div", { className: "row" }, [el("strong", { text: row.server_id + " · " + row.tool_name }), el("span", { className: "pill neutral", text: row.status })]),
       el("div", { className: "muted small", text: "申请人 " + row.actor + " · " + row.scope + " · 代次 " + row.generation + " · 来源 " + row.reply_channel +
         " · 创建 " + time(row.created_at) + " · 到期 " + time(row.expires_at) }),
       exact, actions,
@@ -71,8 +71,8 @@ export async function mcpUiLoad() {
     const data = await readApi(McpServersSchema,"GET", "/admin/mcp/servers");
     if (version !== mcpUi.version) return;
     const select = mcpUiNode("mcp-access-server"), selected = select.value;
-    mcpUiServers = data.servers.filter(row => row.server.enabled).map(({server,device}) => ({id:server.id, label:serviceLabel(server.id,device), tools:server.tools.allow, readOnly:server.tools.readOnly??[], resourceAllow:server.resourceAllow, revision:server.access.revision}));
-    select.replaceChildren(...mcpUiServers.map(server => el("option", {value:server.id,text:server.label,title:server.id})));
+    mcpUiServers = data.servers.filter(row => row.server.enabled).map(({server}) => ({id:server.id, tools:server.tools.allow, readOnly:server.tools.readOnly??[], resourceAllow:server.resourceAllow, revision:server.access.revision}));
+    select.replaceChildren(...mcpUiServers.map(server => el("option", {value:server.id,text:server.id})));
     if(mcpUiServers.some(server=>server.id===selected))select.value=selected;
     const selection = mcpUiSelection();
     if(!selection.server){mcpUiGrant(null);mcpUiNode("mcp-access-note").textContent="请先在模型与连接页启用 MCP 服务。";return;}

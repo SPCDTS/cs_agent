@@ -1,3 +1,4 @@
+import { CUA_SERVER, cuaTools, cuaReadOnly } from '../cua/spaces';
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { ListToolsResultSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -63,7 +64,7 @@ export class McpServerStore {
     return server.enabled && serverDigest(server) === digest;
   }
   put(input: ServerSetupInput, expected: string) {
-    if (!Check(ServerSetup, input)) throw new McpSetupError("invalid");
+    if (!Check(ServerSetup, input) || (input.id === CUA_SERVER && ("transport" in input || input.auth !== "token"))) throw new McpSetupError("invalid");
     const previous = this.sql.exec<Row>("SELECT * FROM mcp_servers WHERE id=?", input.id).toArray()[0];
     if ((previous?.revision ?? "absent") !== expected) throw new McpSetupError("conflict");
     if (!previous && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM mcp_servers").one().n >= 64) throw new McpSetupError("invalid");
@@ -86,6 +87,7 @@ export class McpServerStore {
   }
   activate(id: string, expected: string, input: ServerSelectionInput) {
     if (!Check(ServerSelection, input)) throw new McpSetupError("invalid");
+    if (id === CUA_SERVER && (input.allow.some(tool => !cuaTools.some(name => name === tool)) || input.readOnly?.some(tool => !cuaReadOnly.includes(tool)) || input.resourceAllow?.length)) throw new McpSetupError("invalid");
     const row = this.row(id, expected), server = this.parse(row);
     if (!row.discovered) throw new McpSetupError("probe_required");
     const tools: Tool[] = ListToolsResultSchema.parse(JSON.parse(row.discovered)).tools;
