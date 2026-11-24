@@ -43,10 +43,13 @@ async function directoryNode(onQuery?: (name:string) => void | Promise<void>) {
         if (params.name === 'space_bash') return {content:[{type:'text',text:'mac-fixture.local'}]};
         if (params.name === 'call_tool' && params.arguments?.tool === 'get_window_state')
           return {content:[{type:'image',mimeType:'image/png',data:windowPng}]};
-        if (params.name === 'call_tool') return {content:[{type:'text',text:JSON.stringify({windows:[{pid:121,window_id:5,title:'测试窗口'}]})}]};
+        if (params.name === 'call_tool') {
+          const windowId = params.arguments?.space === second ? Number.MAX_SAFE_INTEGER : 5;
+          return {content:[{type:'text',text:JSON.stringify({windows:[{pid:121,window_id:windowId,title:'测试窗口'}]})}]};
+        }
         const data = params.name === 'list_tools' ? {service:'driver', tools:[{name:'inspect',description:'查看窗口',inputSchema:{type:'object'}}]} : [
-          {id:device,name:'fixture-a',display_name:'测试设备',os:'windows',phase:'ready',power_state:'stopped',labels:{private:'sensitive'}},
-          {id:second,name:'fixture-b'},
+          {id:device,name:'fixture-a',display_name:'测试设备',os:'macos',phase:'ready',power_state:'stopped',labels:{private:'sensitive'}},
+          {id:second,name:'fixture-b',os:'windows'},
         ];
         return {content:[{type:'text',text:JSON.stringify(data)}]};
       });
@@ -70,7 +73,7 @@ it('管理员从反向节点取得精简目录，私聊与群使用独立分配�
   const {ws,registry,ready,accessRevision} = await directoryNode();
   const view = await (await admin('devices')).json<CuaDirectory>();
   expect(view).toMatchObject({configured:true,online:true,enabled:true,available:true,
-    devices:[{id:device,name:'fixture-a',os:'windows',status:'stopped',scopes:[]},{id:second}]});
+    devices:[{id:device,name:'fixture-a',os:'macos',status:'stopped',scopes:[]},{id:second,os:'windows'}]});
   expect(JSON.stringify(view)).not.toContain('sensitive');
   const update = (key:string,spaces:string[],revision:string) => admin('grants',{scope:key,spaces,expectedRevision:revision});
   expect((await update(scope,['local:desktop'],view.revision)).status).toBe(400);
@@ -208,6 +211,7 @@ it('获配会话与子任务的设备读取仅限连续有效的分配，撤权�
         expect((await call(list,{},child,true)).structuredOutput).toMatchObject({spaces:[{id:device}]});
         const windows = (space:string, args:object) => ({space,service:'driver',tool:'list_windows',arguments:args});
         expect((await call(windowTool,windows(device,{pid:121}),child,true)).structuredOutput).toEqual({windows:[{pid:121,window_id:5,title:'测试窗口'}]});
+        expect((await call(windowTool,windows(second,{pid:121}))).structuredOutput).toEqual({windows:[{pid:121,window_id:Number.MAX_SAFE_INTEGER,title:'测试窗口'}]});
         const before = requests;
         expect((await call(tools,{space:second,service:'driver'},child,true)).isError).toBe(true);
         expect((await call(list,{}, {...who,kind:'agent'})).isError).toBe(true);

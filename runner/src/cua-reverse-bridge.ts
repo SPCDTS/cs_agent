@@ -34,7 +34,7 @@ const bridgeTools: Record<string,Tool> = {
       required:['space','command'],additionalProperties:false}, annotations:{readOnlyHint:true},
   },
   call_tool: {
-    name:'call_tool', description:'调用 macOS Driver。list_windows 返回可选窗口的 PID 和窗口 ID，可按 app 或 pid 筛选。get_window_state 用这两个 ID 获取指定窗口的 PNG。',
+    name:'call_tool', description:'在 macOS 或 Windows 上用 list_windows 查询窗口，可按 app 或 pid 筛选。在 macOS 上用 get_window_state 和选中窗口的 PID、窗口 ID 获取 PNG。',
     inputSchema:{type:'object',properties:{
       space:spaceProperty, service:{type:'string',enum:['driver']}, tool:{type:'string',enum:['list_windows','get_window_state']},
       arguments:{type:'object',properties:{app:{type:'string',minLength:1,maxLength:128},pid:{type:'integer',minimum:1,maximum:0x7fffffff},
@@ -121,7 +121,7 @@ function validToolArgs(name: string, args: Record<string, unknown>): boolean {
 }
 
 function positiveInteger(value: unknown, maximum: number): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= maximum;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= maximum;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -223,16 +223,19 @@ class DirectorySession {
       if (params.name === 'space_bash')
         return hostnameResult(await this.call('space_bash',{space,command:'hostname',timeout:5},signal));
       if (params.name === 'call_tool') {
-        if (matching[0]!.os !== 'macos')
+        const os = matching[0]!.os;
+        if (args.tool === 'get_window_state' && os !== 'macos')
           throw new McpError(ErrorCode.InvalidParams,'此设备尚未提供经验证的精确窗口截图。',{reason:'window_screenshot_unsupported'});
-        return this.windowTool(space,args.tool as string,args.arguments as Record<string,unknown>,signal);
+        if (os !== 'macos' && os !== 'windows')
+          throw new McpError(ErrorCode.InvalidParams,'此设备不支持窗口查询。',{reason:'window_list_unsupported'});
+        return this.windowTool(os,space,args.tool as string,args.arguments as Record<string,unknown>,signal);
       }
       const directory = driverDirectory(await this.readDirectory('list_tools',args,signal));
       return {content:[{type:'text',text:JSON.stringify(directory)}]};
     });
   }
 
-  private async windowTool(space: string, name: string, input: Record<string,unknown>, signal: AbortSignal): Promise<CallToolResult> {
+  private async windowTool(os: 'macos'|'windows', space: string, name: string, input: Record<string,unknown>, signal: AbortSignal): Promise<CallToolResult> {
     const {tools} = driverDirectory(await this.readDirectory('list_tools',{space,service:'driver',name:'window'},signal));
     const supports = (name: string, keys: string[]) => {
       const matches = tools.filter(tool => tool.name === name);
@@ -245,8 +248,9 @@ class DirectorySession {
       if (!supports('list_windows',Object.keys(input))) throw new McpError(ErrorCode.InvalidParams,'设备不支持该窗口查询。');
       const {windows} = (await callDriver(name,input)).structuredContent ?? {};
       if (!Array.isArray(windows) || windows.length > 1024) throw invalidDirectory();
+      const maxWindowId = os === 'windows' ? Number.MAX_SAFE_INTEGER : 0xffffffff;
       const rows = windows.map(row => {
-        if (!isRecord(row) || !positiveInteger(row.pid,0x7fffffff) || !positiveInteger(row.window_id,0xffffffff)
+        if (!isRecord(row) || !positiveInteger(row.pid,0x7fffffff) || !positiveInteger(row.window_id,maxWindowId)
             || (input.pid !== undefined && row.pid !== input.pid)) throw invalidDirectory();
         const title = typeof row.title === 'string' ? row.title.slice(0,128) : '';
         return {pid:row.pid,window_id:row.window_id,title};

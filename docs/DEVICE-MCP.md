@@ -7,11 +7,11 @@ cs-agent 通过名为 `cua` 的反向 MCP 访问自托管的 Cua Spaces。设备
 | `list_spaces` | 返回当前会话可见的设备卡 | 主人及获分配设备的会话 |
 | `list_tools` | 传入 `space` 和 `service=driver`，可用 `name` 筛选 Driver 工具并查看参数 | 同上 |
 | `space_bash` | 传入 `space` 和固定命令 `hostname`，返回设备主机名 | 主人、已获设备分配的群聊或私聊，以及在该授权范围内派出的子任务 |
-| `call_tool` | 传入 `space`、`service=driver`、`tool` 与 `arguments`。用 `list_windows` 查 macOS 窗口，再用 `get_window_state` 获取指定窗口的一张 PNG | 同上 |
+| `call_tool` | 传入 `space`、`service=driver`、`tool` 与 `arguments`。用 `list_windows` 列出 macOS 或 Windows 窗口。在 macOS 上还可用 `get_window_state` 获取指定窗口的一张 PNG | 同上 |
 
 后两项沿用 Cua 原生工具名。桥只接受表中列出的命令和 Driver 操作。在控制机给目标设备启用读取路由后，还需在管理台为 `cua` 启用对应工具。此时已有的会话分配也允许读取该设备主机名、窗口列表或截图。启用前请核对获分配的群聊与私聊。被动事件及 agent 回合拒绝这些操作，定时任务也不能读取主机名或窗口。
 
-例如，模型可对选定的 Space 调用 `call_tool`，将 `tool` 设为 `list_windows`，`arguments` 传 `{"app":"TextEdit"}`、`{"pid":1234}` 或空对象。然后用同一 Space 调用 `get_window_state`，把选中行的 `pid` 与 `window_id` 原样放入 `arguments`。截图前后均会核验窗口归属，长边最多 768 像素。窗口关闭或系统拒绝抓取时返回错误。Worker 将图片写入当前会话的私有媒体库。回复需要带图时，将结果中的 `structuredContent.imageId` 放入 `send_message.images`。
+例如，模型可对选定的 Space 调用 `call_tool`，将 `tool` 设为 `list_windows`，`arguments` 传 `{"app":"TextEdit"}`、`{"pid":1234}` 或空对象。如需截取 Mac 窗口，用同一 Space 调用 `get_window_state`，把选中行的 `pid` 与 `window_id` 原样放入 `arguments`。截图前后均会核验窗口归属，长边最多 768 像素。窗口关闭或系统拒绝抓取时返回错误。Worker 将图片写入当前会话的私有媒体库。回复需要带图时，将结果中的 `structuredContent.imageId` 放入 `send_message.images`。
 
 ## 控制端与设备
 
@@ -36,7 +36,7 @@ cs-agent 通过名为 `cua` 的反向 MCP 访问自托管的 Cua Spaces。设备
 3. 仅向一个测试会话分配设备 B。核对会话与该会话派出的子任务均能查询 B，已启用的主机名与窗口读取也仅作用于 B。直接指定 A 或请求其他命令应被拒。派发子任务后撤销 B，再核对其下一次调用被拒。
 4. 暂停 `cua`，核对分配仍在、设备调用被拒、管理员仍可撤回。恢复并重新查询。轮换桥凭据后，核对旧分配已清空，再按完整 ID 分配并验证访问。最后复查普通 MCP、QQ 收发及 WSB。
 
-公网 443 上的自托管 Relay 已用临时设备验过注册、目录查询和重连。生产切换时还需按上述步骤核对目标 Worker 上的会话分配、撤销和图片投递。Windows 真机列为本轮未覆盖项，本次发布无需等待该项。
+公网 443 上的自托管 Relay 已用临时设备验过注册、目录查询和重连。生产切换时还需按上述步骤核对目标 Worker 上的会话分配、撤销和图片投递。Windows 窗口枚举已核对上游契约，并用合成响应覆盖。本轮未做 Windows 真机测试。
 
 ## 从旧设备服务切换
 

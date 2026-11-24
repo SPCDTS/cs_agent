@@ -47,7 +47,7 @@ const driverDirectory = Type.Object({service:Type.Literal('driver'), tools:toolL
 const spacesOutput = Type.Object({spaces:Type.Array(Card)});
 const toolsOutput = Type.Object({tools:toolList});
 const hostnameOutput = Type.Object({hostname:Type.String()});
-const windowsOutput = Type.Object({windows:Type.Array(Type.Object({pid,window_id:windowId,title:Type.String({maxLength:128})},
+const windowsOutput = Type.Object({windows:Type.Array(Type.Object({pid,window_id:Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER}),title:Type.String({maxLength:128})},
   {additionalProperties:false}),{maxItems:1024})},{additionalProperties:false});
 const imageOutput = Type.Object({imageId:Type.String({pattern:'^[a-f0-9]{64}$'})});
 export function cuaOutput(server:string, name:string) {

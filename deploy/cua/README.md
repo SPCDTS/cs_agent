@@ -1,6 +1,6 @@
 # Cua 设备目录部署
 
-这套模板默认让 cs-agent 读取已登记设备及其 Driver 工具清单，可按设备开放主机名、Mac 窗口列表和单窗口截图。启用后，主人与获分配该设备的会话及其获授权子任务可以执行这些读取。控制机需有 Linux、支持 `LoadCredential` 的 systemd、Caddy 2 和 Node.js 24。上游 `cua-sdk-v0.31.0` 对应的 CLI 与 daemon 为 0.31.0，同一提交的 `cua-relay` 和设备端 `cua-spacesd` 为 0.17.2。示例域名和机器 ID 需按本次接入填写。[Cua 固定版本](https://github.com/trycua/cua/tree/78fe31378569aab57ddb5131a08fc90fc3c6fbb9) [spacesd 版本](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua-spacesd/VERSION)
+这套模板默认让 cs-agent 读取已登记设备及其 Driver 工具清单，可按设备开放主机名、macOS 与 Windows 窗口列表，以及 macOS 单窗口截图。启用后，主人与获分配该设备的会话及其获授权子任务可以执行这些读取。控制机需有 Linux、支持 `LoadCredential` 的 systemd、Caddy 2 和 Node.js 24。上游 `cua-sdk-v0.31.0` 对应的 CLI 与 daemon 为 0.31.0，同一提交的 `cua-relay` 和设备端 `cua-spacesd` 为 0.17.2。示例域名和机器 ID 需按本次接入填写。[Cua 固定版本](https://github.com/trycua/cua/tree/78fe31378569aab57ddb5131a08fc90fc3c6fbb9) [spacesd 版本](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua-spacesd/VERSION)
 
 ## 规划设备身份
 
@@ -100,10 +100,10 @@ http://127.0.0.1:18281 {
 | Cua MCP 工具与参数 | 设备原生接口 | 结果 |
 | --- | --- | --- |
 | `space_bash` 传入 `space` 和 `command="hostname"` | `ProcessService/StartProcess`，固定运行 `hostname`，5 秒超时 | 校验正常退出后返回主机名 |
-| `call_tool` 传入 `space`、`service="driver"`、`tool="list_windows"` 和 `arguments` | `DriverService/CallTool`，可在 `arguments` 中传应用名 `app`、进程号 `pid` 或留空对象 | 返回可供选择的 Mac 窗口及其 PID、窗口 ID |
-| 同一 `call_tool` 传入 `tool="get_window_state"`，`arguments` 传选中行的 `pid` 和 `window_id` | `DriverService/CallTool`，按两个 ID 读取该窗口，再以相同 PID 调用 `list_windows` 复核归属 | 返回该窗口的单张 PNG |
+| `call_tool` 传入 `space`、`service="driver"`、`tool="list_windows"` 和 `arguments` | `DriverService/CallTool`，可在 `arguments` 中传应用名 `app`、进程号 `pid` 或留空对象 | 返回 macOS 或 Windows 上匹配的窗口及其 PID、窗口 ID |
+| 同一 `call_tool` 传入 `tool="get_window_state"`，`arguments` 传选中行的 `pid` 和 `window_id` | `DriverService/CallTool`，按两个 ID 读取该窗口，再以相同 PID 调用 `list_windows` 复核归属 | 返回指定 macOS 窗口的单张 PNG |
 
-先在管理台核对已获分配的群聊和私聊，再为 `cua` 重新检测并启用所需的 `space_bash` 或 `call_tool`。已有分配对新启用的读取工具同时生效。测试截图时，在对话里选定设备与专用测试窗口，让模型先列出窗口再按返回的 ID 截图。设备的登录用户需已允许系统录制。返回的 `structuredContent.imageId` 可用于本会话的 `send_message.images`。关闭窗口后重复请求应返回错误。被动事件、agent 回合及定时任务不能执行这些读取。Windows 设备目前只支持本节的主机名读取协议，本轮未做 Windows 真机测试。
+先在管理台核对已获分配的群聊和私聊，再为 `cua` 重新检测并启用所需的 `space_bash` 或 `call_tool`。已有分配对新启用的读取工具同时生效。测试截图时，在对话里选定 Mac 与专用测试窗口，让模型先列出窗口再按返回的 ID 截图。设备的登录用户需已允许系统录制。返回的 `structuredContent.imageId` 可用于本会话的 `send_message.images`。关闭窗口后重复请求应返回错误。被动事件、agent 回合及定时任务不能执行这些读取。Windows 窗口列表依据固定版本的 Driver 契约和合成响应测试验证，本轮未做 Windows 真机测试。Windows Driver 的截图路径可能回退到读取桌面像素，cs-agent 仅在 macOS 开放单窗口截图。[Windows Driver 的截图回退](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua-driver/rust/crates/platform-windows/src/capture.rs#L645-L675)
 
 要恢复设备的目录模式，移除该回环站点的 `import device-inspection`，校验后重新加载 Caddy。
 

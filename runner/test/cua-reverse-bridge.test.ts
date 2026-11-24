@@ -225,6 +225,7 @@ test('设备读取只用登记目标、固定命令和同一进程的精确窗�
   const meta = {pid,window_id,screenshot_frame_valid:true,screenshot_width:1,screenshot_height:1,window_title:'private title'};
   let capture: CallToolResult = {content:[png,{type:'text',text:'private title'}],structuredContent:meta};
   let host = 'mbp14.local\n[exit 0]', os = 'macos', matched = true, screenshotSupported = true;
+  let hwnd = Number.MAX_SAFE_INTEGER, windowsPid = pid;
   const captureArguments = {pid,window_id,include_accessibility_tree:false,include_screenshot:true,display_only:true,
     screenshot_format:'png',max_dimension:768};
   const seen: string[] = [];
@@ -250,6 +251,12 @@ test('设备读取只用登记目标、固定命令和同一进程的精确窗�
         ]});
       case 'call_tool': {
         if (args?.tool === 'list_windows') {
+          if (os === 'windows') {
+            const filter = args.arguments as {pid?:number;app?:string};
+            const records = filter.app === 'absent' ? [] : [{window_id:hwnd,pid:windowsPid,app_name:'notepad.exe',
+              title:'Windows fixture',bounds:{x:10,y:20,width:600,height:300},layer:0,z_index:0,is_on_screen:true,minimized:false}];
+            return {content:[{type:'text',text:'private foreground app'}],structuredContent:{windows:records,current_space_id:null,_legacy_windows:records}};
+          }
           if ((args.arguments as {app?:string}).app) {
             assert.deepEqual(args,driverArgs('list_windows',{app:'Test'}));
             return {content:[],structuredContent:{windows:[{pid,window_id,title:'Fixture window',unrelated:'private'}]}};
@@ -295,9 +302,23 @@ test('设备读取只用登记目标、固定命令和同一进程的精确窗�
   const snap = () => call('call_tool',windowArgs());
   os = 'windows';
   assert.equal((await snap()).error.data.reason,'window_screenshot_unsupported');
+  assert.ok(!seen.includes('call_tool'));
+  const windows = (filter:object) => call('call_tool',driverArgs('list_windows',filter));
+  for (const filter of [{},{pid},{app:'notepad'}]) {
+    const result = (await windows(filter)).result;
+    assert.deepEqual(result,{content:[{type:'text',text:JSON.stringify({windows:[{pid,window_id:hwnd,title:'Windows fixture'}]})}]});
+  }
+  assert.deepEqual(JSON.parse((await windows({app:'absent'})).result.content[0].text),{windows:[]});
+  hwnd = Number.MAX_SAFE_INTEGER + 1;
+  assert.equal((await windows({})).error.data.reason,'directory_invalid');
+  hwnd = window_id; windowsPid = pid + 1;
+  assert.equal((await windows({pid})).error.data.reason,'directory_invalid');
+  os = 'linux';
+  assert.equal((await windows({})).error.data.reason,'window_list_unsupported');
+  const driverCallCount = seen.filter(name => name === 'call_tool').length;
   os = 'macos'; screenshotSupported = false;
   assert.equal((await snap()).error.data.reason,'window_screenshot_unsupported');
-  assert.ok(!seen.includes('call_tool'));
+  assert.equal(seen.filter(name => name === 'call_tool').length,driverCallCount);
   screenshotSupported = true;
   const found = await call('call_tool',driverArgs('list_windows',{app:'Test'}));
   assert.deepEqual(JSON.parse(found.result.content[0].text),{windows:[{pid,window_id,title:'Fixture window'}]});

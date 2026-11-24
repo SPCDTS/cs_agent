@@ -46,7 +46,7 @@ export class ThreadMcp {
       sections: [section("mcp-policy", () => {
         const visible = this.entries.has("cua") && (this.scope === "owner" || !!this.config.cuaSpaces?.length);
         const directory = visible ? " Cua 的 list_spaces 返回 structuredContent.spaces。用完整设备 ID 和 service=driver 调用 list_tools；用 name 筛选工具并读取参数契约。" : "";
-        const inspect = visible ? " 已启用的 space_bash 接受 command=hostname。用 call_tool 的 service=driver 和 tool=list_windows 发现窗口，再传 tool=get_window_state、arguments={pid,window_id} 获取截图。structuredContent.imageId 可用于 send_message.images。" : "";
+        const inspect = visible ? " 已启用的 space_bash 接受 command=hostname。在 macOS 和 Windows 上用 call_tool 的 service=driver、tool=list_windows 查询窗口。macOS 可传 tool=get_window_state、arguments={pid,window_id} 获取截图。structuredContent.imageId 可用于 send_message.images。" : "";
         return MCP_RULE + MCP_RESULT_INSTRUCTIONS + directory + inspect;
       })],
       tools: [
