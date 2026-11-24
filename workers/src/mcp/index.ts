@@ -242,10 +242,12 @@ export class ThreadMcp {
           if (!recipient || callerScope(recipient) !== scope || !await this.current(entry) || !cuaQueryAllowed(tool.name, owned, effective)) {
             classification = 'denied'; return mcpFailure(classification);
           }
-          const result = await cuaResult(tool.name,remote,effective,this.config.limits,this.env,authority.scope);
-          if (tool.name === 'get_window_screenshot') {
-            const target = await authorized();
-            if (!target || callerScope(target) !== scope || !await this.current(entry)) { classification = 'denied'; return mcpFailure(classification); }
+          const result = await cuaResult(tool.name,remote,effective,this.config.limits,this.env,authority.scope,revision);
+          if (tool.name === 'list_spaces' || tool.name === 'get_window_screenshot') {
+            // 读取别名和保存截图需要额外的存储请求。发布结果前按最新会话和设备授权收口。
+            const latest = await assigned(), target = await authorized();
+            if (!target || callerScope(target) !== scope || !await this.current(entry) ||
+                (latest && effective?.some(id => !latest.includes(id)))) { classification = 'denied'; return mcpFailure(classification); }
           }
           classification = result.isError ? 'result_rejected' : 'ok';
           return result;

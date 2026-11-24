@@ -422,6 +422,8 @@ tr:last-child td{border-bottom:0}
 
 /* 来源 / GitHub / 工作区 */
 .source{border:1px solid var(--border);border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:10px;background:var(--surface)}
+#cua-grant-devices .source{flex-direction:row;align-items:center;justify-content:space-between;flex-wrap:wrap}
+#cua-grant-devices small{overflow-wrap:anywhere}
 .source summary{cursor:pointer;font-size:13px;font-weight:500;color:var(--teal)}
 .source .field{flex:1 1 150px;min-width:0}
 .github-check{display:inline-flex!important;align-items:center;justify-content:flex-start;gap:6px;margin:4px 12px 4px 0;max-width:100%}

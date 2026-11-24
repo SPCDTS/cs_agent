@@ -1,5 +1,5 @@
 import { Check } from 'typebox/value';
-import { CuaDeviceId, CuaGrantInput, CuaScope, cuaCards, type CuaCard } from '../cua/contracts';
+import { CuaDeviceId, CuaGrantInput, CuaNameInput, CuaScope, cuaCards, deviceAlias, type CuaCard } from '../cua/contracts';
 import type { Env } from '../env';
 import { McpConnection } from '../mcp/connection';
 import { MCP_CONFIG } from '../mcp/config';
@@ -39,6 +39,7 @@ export const CUA_ROUTES: AdminRoute[] = [
     const registry = env.REGISTRY.getByName('main');
     const [before,threads] = await Promise.all([registry.cuaGrantsList(),env.BRIDGE.getByName('napcat').threadList()]);
     const view = await directory(env);
+    const names: Record<string,string> = view.revision ? await registry.cuaNames(view.devices.map(row => row.id),view.revision) : {};
     const after = await registry.cuaGrantsList();
     if (before.revision !== after.revision) throw new HttpError(409,'conflict');
     const scopesByDevice = new Map<string,string[]>();
@@ -48,8 +49,20 @@ export const CUA_ROUTES: AdminRoute[] = [
       else scopesByDevice.set(id,[grant.scope]);
     }
     return adminJson({configured:view.configured,enabled:view.enabled,online:view.online,available:view.available,error:view.error,...after,
-      devices:view.devices.map(row => ({...row,scopes:scopesByDevice.get(row.id) ?? []})),
+      devices:view.devices.map(row => {
+        const alias = deviceAlias(names,row.id);
+        return {...row,defaultName:row.name,alias,name:alias ?? row.name,scopes:scopesByDevice.get(row.id) ?? []};
+      }),
       threads:threads.filter(row => Check(CuaScope,row.key)).map(({key,name}) => ({key,name}))});
+  }},
+  {method:'PUT',path:'/admin/cua/name',handle:async ({env,request}) => {
+    const input = await readAdminBody(request,CuaNameInput,{maxBytes:2048});
+    const view = await directory(env);
+    if (!view.available || !view.revision) throw new HttpError(503,'cua_directory_unavailable');
+    if (!view.devices.some(device => device.id === input.space)) throw new HttpError(400,'unknown_space');
+    const result = await env.REGISTRY.getByName('main').cuaRename(input,view.revision);
+    if (result.status !== 'ok') throw new HttpError(result.status === 'conflict' ? 409 : 400,result.status);
+    return adminJson({name:result.name});
   }},
   {method:'PUT',path:'/admin/cua/grants',handle:async ({env,request}) => {
     const input = await readAdminBody(request,CuaGrantInput,{maxBytes:32768});

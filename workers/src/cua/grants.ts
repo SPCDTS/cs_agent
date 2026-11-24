@@ -1,5 +1,5 @@
 import { Check } from 'typebox/value';
-import { CuaGrantInput, CuaScope, type CuaGrantList } from './contracts';
+import { CuaGrantInput, CuaNameInput, CuaScope, type CuaGrantList } from './contracts';
 
 /** 配置和授权共用 Registry SQLite。连接变化与清退旧授权在同一次 SQL 写入中生效。 */
 export class CuaGrants {
@@ -10,6 +10,12 @@ export class CuaGrants {
       scope TEXT NOT NULL, space_id TEXT NOT NULL, server_revision TEXT NOT NULL, updated_at INTEGER NOT NULL,
       PRIMARY KEY(scope,space_id));
       CREATE INDEX IF NOT EXISTS cua_device_grants_space ON cua_device_grants(space_id);
+      CREATE TABLE IF NOT EXISTS cua_device_names (space_id TEXT PRIMARY KEY, name TEXT NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS cua_names_on_replacement AFTER UPDATE OF config ON mcp_servers
+      WHEN NEW.id='cua' AND json_extract(OLD.config,'$.credential.revision') IS NOT json_extract(NEW.config,'$.credential.revision')
+      BEGIN DELETE FROM cua_device_names; END;
+      CREATE TRIGGER IF NOT EXISTS cua_names_on_delete AFTER DELETE ON mcp_servers WHEN OLD.id='cua'
+      BEGIN DELETE FROM cua_device_names; END;
       INSERT OR IGNORE INTO mcp_server_meta VALUES('cua_grants_revision',lower(hex(randomblob(16))));
       CREATE TRIGGER IF NOT EXISTS cua_grants_on_update AFTER UPDATE OF config ON mcp_servers
       WHEN NEW.id='cua' AND (json_extract(OLD.config,'$.access.revision') IS NOT json_extract(NEW.config,'$.access.revision')
@@ -29,6 +35,27 @@ export class CuaGrants {
     return this.storage.sql.exec<{revision:string}>(`SELECT json_extract(config,'$.access.revision') AS revision
       FROM mcp_servers WHERE id='cua' AND json_extract(config,'$.enabled')=1 AND secret IS NOT NULL
         AND json_extract(config,'$.transport.kind')='reverse-websocket'`).toArray()[0]?.revision;
+  }
+
+  names(ids: string[], serverRevision: string) {
+    if (!ids.length || this.active() !== serverRevision) return {};
+    const rows = this.storage.sql.exec<{space_id:string; name:string}>(`SELECT space_id,name FROM cua_device_names
+      WHERE space_id IN (SELECT value FROM json_each(?))`,JSON.stringify(ids));
+    return Object.fromEntries(Array.from(rows,row => [row.space_id,row.name])) as Record<string,string>;
+  }
+
+  rename(input: CuaNameInput, verifiedRevision: string) {
+    if (!Check(CuaNameInput,input)) return {status:'invalid' as const};
+    return this.storage.transactionSync(() => {
+      const sql = this.storage.sql;
+      const current = sql.exec<{name:string}>('SELECT name FROM cua_device_names WHERE space_id=?',input.space).toArray()[0]?.name ?? '';
+      if (this.active() !== verifiedRevision || this.revision() !== input.expectedRevision || current !== input.expectedName)
+        return {status:'conflict' as const};
+      const name = input.name.trim();
+      if (name) sql.exec('INSERT INTO cua_device_names VALUES(?,?) ON CONFLICT(space_id) DO UPDATE SET name=excluded.name',input.space,name);
+      else sql.exec('DELETE FROM cua_device_names WHERE space_id=?',input.space);
+      return {status:'ok' as const,name};
+    });
   }
 
   assigned(scope: string, serverRevision: string): string[] {

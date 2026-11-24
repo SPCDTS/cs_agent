@@ -1,6 +1,6 @@
 # Cua 设备目录部署
 
-这套模板默认让 cs-agent 读取已登记设备及其 Driver 工具清单，可按设备启用主人交互回合的主机名读取和 Mac 单窗口截图。控制机需有 Linux、支持 `LoadCredential` 的 systemd、Caddy 2 和 Node.js 24。上游 `cua-sdk-v0.31.0` 对应的 CLI 与 daemon 为 0.31.0，同一提交的 `cua-relay` 和设备端 `cua-spacesd` 为 0.17.2。示例域名、机器 ID 和展示名均需按本次接入填写。[Cua 固定版本](https://github.com/trycua/cua/tree/78fe31378569aab57ddb5131a08fc90fc3c6fbb9) [spacesd 版本](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua-spacesd/VERSION)
+这套模板默认让 cs-agent 读取已登记设备及其 Driver 工具清单，可按设备启用主人交互回合的主机名读取和 Mac 单窗口截图。控制机需有 Linux、支持 `LoadCredential` 的 systemd、Caddy 2 和 Node.js 24。上游 `cua-sdk-v0.31.0` 对应的 CLI 与 daemon 为 0.31.0，同一提交的 `cua-relay` 和设备端 `cua-spacesd` 为 0.17.2。示例域名和机器 ID 需按本次接入填写。[Cua 固定版本](https://github.com/trycua/cua/tree/78fe31378569aab57ddb5131a08fc90fc3c6fbb9) [spacesd 版本](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua-spacesd/VERSION)
 
 ## 规划设备身份
 
@@ -44,15 +44,14 @@ cua-spacesd join --relay wss://relay.example.org \
 
 每台设备使用自己的 `registration.token` 和 `device.token`。join 会向 `/relay/v1/connect` 发起 WebSocket 握手，携带 `X-Cua-Machine-Id` 和注册 Bearer。设备原生 HTTP MCP 可关闭，Driver 目录查询使用 gRPC。[官方 join 参数](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua-spacesd/crates/cua-spacesd/src/main.rs#L334-L389) [官方注册协议](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua-spacesd/crates/cua-relay/src/lib.rs#L24-L39)
 
-在控制机写入 `/etc/cs-agent/cua/spaces/18281.env`。DISPLAY_NAME 可带空格。设备令牌需与相应机器的 `device.token` 相同。
+在控制机写入 `/etc/cs-agent/cua/spaces/18281.env`。设备令牌需与相应机器的 `device.token` 相同。
 
 ```ini
 MACHINE_ID=computer-alpha
-DISPLAY_NAME="工作用 Mac"
 CUA_ENV_TOKEN=<设备专属令牌>
 ```
 
-运行 `systemctl start cua-directory-register@18281`，仅在设备已加入且能力握手成功后登记该条目。第二台设备使用另一份文件和端口。到 cs-agent「权限与运维」→「Cua 设备分配」，点「刷新设备与分配」，选择群聊或私聊，核对设备名与完整 Space ID，勾选该设备并点击「保存分配」。会话可列出已分配设备并查看其 Driver 工具清单。列表中的状态反映 Cua 最近的握手结果。
+运行 `systemctl start cua-directory-register@18281`，仅在设备已加入且能力握手成功后登记该条目。Cua 默认采用 `GetCapabilities.hostname` 作为设备卡名称。旧版曾显式指定名称时，安装新版 register unit、运行 `systemctl daemon-reload`，然后对仍在线的设备重新执行同一个 register 服务即可刷新名称。Space ID 和配对凭据保持有效。第二台设备使用另一份文件和端口。到 cs-agent「权限与运维」→「Cua 设备分配」，点「刷新设备与分配」，选择群聊或私聊，核对设备名与完整 Space ID，勾选该设备并点击「保存分配」。会话可列出已分配设备并查看其 Driver 工具清单。列表中的状态反映 Cua 最近的握手结果。管理台可另设显示名（支持中文），清除显示名后恢复设备默认名称。模型按完整 Space ID 调用设备。
 
 ## 为一台测试设备启用主机名与窗口读取
 

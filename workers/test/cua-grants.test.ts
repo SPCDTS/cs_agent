@@ -64,7 +64,7 @@ it('管理员从反向节点取得精简目录，私聊与群使用独立分配�
   const {ws,registry,ready,accessRevision} = await directoryNode();
   const view = await (await admin('devices')).json<CuaDirectory>();
   expect(view).toMatchObject({configured:true,online:true,enabled:true,available:true,
-    devices:[{id:device,name:'测试设备',os:'windows',status:'stopped',scopes:[]},{id:second}]});
+    devices:[{id:device,name:'fixture-a',os:'windows',status:'stopped',scopes:[]},{id:second}]});
   expect(JSON.stringify(view)).not.toContain('sensitive');
   const update = (key:string,spaces:string[],revision:string) => admin('grants',{scope:key,spaces,expectedRevision:revision});
   expect((await update(scope,['local:desktop'],view.revision)).status).toBe(400);
@@ -96,6 +96,32 @@ it('停用并重新启用同一个节点使旧授权版本永久失效，重复�
   expect((await registry.mcpConfig(scope)).cuaSpaces).toEqual([]);
   ws.close(1000);
   expect(() => cuaCards({content:[{type:'text',text:JSON.stringify([{id:device,name:'A'},{id:device,name:'B'}])}]})).toThrow('ambiguous');
+});
+
+it('设备改名保留 ID 和已有分配，过时的改名不能覆盖新名称，清空后跟随默认名称',async () => {
+  const {ws,registry,ready,accessRevision} = await directoryNode();
+  const devices = async () => (await admin('devices')).json<CuaDirectory>();
+  try {
+    const first = await devices();
+    const grant = await (await admin('grants',{scope,spaces:[device],expectedRevision:first.revision})).json<{revision:string}>();
+    const rename = (expectedName:string,name:string,authorized = true,space = device) => admin('name',{
+      space,name,expectedName,expectedRevision:grant.revision,
+    },authorized);
+    expect((await rename('','测试 Mac',false)).status).toBe(401);
+    expect((await rename('','测试 Mac',true,'direct:unknown.test:80')).status).toBe(400);
+    expect((await rename('','测试\nMac')).status).toBe(400);
+    expect(await (await rename('',' 测试 Mac ')).json()).toEqual({name:'测试 Mac'});
+    const renamed = await devices();
+    expect(renamed.devices[0]).toMatchObject({id:device,defaultName:'fixture-a',name:'测试 Mac',alias:'测试 Mac',scopes:[scope]});
+    expect(renamed.revision).toBe(grant.revision);
+    expect(await registry.cuaAssigned(scope,accessRevision)).toEqual([device]);
+    expect((await rename('','旧标签')).status).toBe(409);
+    expect((await rename('测试 Mac','')).status).toBe(200);
+    expect((await devices()).devices[0]?.name).toBe('fixture-a');
+    expect((await rename('','个人电脑')).status).toBe(200);
+    await registry.mcpCredentialPut(id,ready.revision,{Authorization:'Bearer '+'r'.repeat(43)});
+    expect(await registry.cuaNames([device],accessRevision)).toEqual({});
+  } finally { ws.close(1000); }
 });
 
 it('私聊主模型与子任务的目录使用实时授权，撤权中的 Driver 响应无法回传',async () => {

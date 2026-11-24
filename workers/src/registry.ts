@@ -22,7 +22,7 @@ import type { Change, CloudflareInventory } from './cloudflare/contracts';
 import { CloudflareGrant } from './cloudflare/cloudflare';
 import { retirePairedDevices } from './mcp/retire-paired-devices';
 import { CuaGrants } from './cua/grants';
-import type { CuaGrantInput } from './cua/contracts';
+import type { CuaGrantInput, CuaNameInput } from './cua/contracts';
 import type { Static } from 'typebox';
 import { connectionDigest } from "./mcp/names";
 
@@ -127,6 +127,8 @@ export class RegistryDO extends DurableObject<Env> {
   }
   cuaAssigned(scope:string, serverRevision:string) { return MCP_CONFIG.enabled ? this.cuaGrants.assigned(scope,serverRevision) : []; }
   cuaGrantsList() { return this.cuaGrants.list(); }
+  cuaNames(ids:string[],serverRevision:string) { return this.cuaGrants.names(ids,serverRevision); }
+  cuaRename(input:CuaNameInput,verifiedRevision:string) { return this.cuaGrants.rename(input,verifiedRevision); }
   cuaGrantsPut(input:CuaGrantInput, verifiedRevision?:string) { return this.cuaGrants.replace(input,verifiedRevision); }
   mcpServersList() { return this.mcpServers.list(); }
   mcpServerGet(id: string) { return this.mcpServers.get(id); }

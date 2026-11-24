@@ -8,7 +8,7 @@ import { boundedJson } from '../mcp/schema';
 import { mcpFailure } from '../mcp/result';
 import { MediaRepository } from '../media/repository';
 import type { Env } from '../env';
-import { Card, CuaDeviceId, CuaScope, cuaCards } from './contracts';
+import { Card, CuaDeviceId, CuaScope, cuaCards, deviceAlias } from './contracts';
 
 export const cuaDirectoryTools = ['list_spaces', 'list_tools'] as const;
 export function isCuaInspection(name: string) { return name === 'get_hostname' || name === 'get_window_screenshot'; }
@@ -49,7 +49,7 @@ export function cuaOutput(server:string, name:string) {
   if (name === 'get_window_screenshot') return Type.Object({imageId:Type.String({pattern:'^[a-f0-9]{64}$'})});
 }
 export async function cuaResult(tool: string, remote: CallToolResult, spaces: string[] | undefined, limits: McpLimits,
-  env: Env, scope: string): Promise<ToolExecutionResult> {
+  env: Env, scope: string, revision: string): Promise<ToolExecutionResult> {
   if (remote.isError) return mcpFailure('cua_unavailable');
   try {
     if (isCuaInspection(tool)) {
@@ -70,7 +70,11 @@ export async function cuaResult(tool: string, remote: CallToolResult, spaces: st
       return {structuredOutput:{imageId:asset.id}, output:[{type:'image',mimeType:'image/png',data:block.data}]};
     }
     let directory;
-    if (tool === 'list_spaces') directory = {spaces:cuaCards(remote,spaces)};
+    if (tool === 'list_spaces') {
+      const cards = cuaCards(remote,spaces);
+      const names: Record<string,string> = await env.REGISTRY.getByName('main').cuaNames(cards.map(card => card.id),revision);
+      directory = {spaces:cards.map(card => ({...card,name:deviceAlias(names,card.id) ?? card.name}))};
+    }
     else {
       const block = remote.content[0];
       if (remote.content.length !== 1 || block?.type !== 'text') return mcpFailure('cua_directory_invalid');
