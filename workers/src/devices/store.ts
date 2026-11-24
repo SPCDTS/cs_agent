@@ -6,7 +6,7 @@ import { McpServerStore } from '../mcp/servers';
 import { TokenVault, randomSecret, sha256 } from '../mcp/crypto';
 import { DeviceTunnel, tunnelConfigured, tunnelSettings } from './tunnel';
 import type { Env } from '../env';
-import { DeviceCreate, DeviceView } from './contracts';
+import { DeviceCreate, DeviceView, type DeviceService } from './contracts';
 export { DeviceCreate } from './contracts';
 
 const strict = { additionalProperties: false };
@@ -25,6 +25,21 @@ export class DeviceStore {
   private view(row: Row): Static<typeof DeviceView> { return { id: row.id, name: row.name, desktop: !!row.desktop, state: row.state, createdAt: row.created, expiresAt: row.expires,
     serverId: deviceServerId(row.id), desktopServerId: row.desktop ? deviceServerId(row.id) + '-desktop' : null }; }
   list() { return { configured: tunnelConfigured(this.env), devices: this.sql.exec<Row>('SELECT * FROM devices ORDER BY created DESC').toArray().map(row => this.view(row)) }; }
+  serviceLabels(serverIds: string[]): Map<string, DeviceService> {
+    const prefix = 'device-';
+    const ids = [...new Set(serverIds.filter(id => id.startsWith(prefix)).map(id => id.slice(prefix.length).replace(/-desktop$/, '')))];
+    const labels = new Map<string, DeviceService>();
+    if (!ids.length) return labels;
+    // 只按本页已登记的服务查设备主键，避免扫描已撤销的历史记录或读取凭据。
+    const rows = this.sql.exec<Pick<Row, 'id' | 'name' | 'desktop'>>(
+      'SELECT id,name,desktop FROM devices WHERE id IN (' + ids.map(() => '?').join(',') + ')', ...ids);
+    for (const { id, name, desktop } of rows) {
+      const shell = deviceServerId(id);
+      labels.set(shell, { id, name, capability: 'shell' });
+      if (desktop) labels.set(shell + '-desktop', { id, name, capability: 'desktop' });
+    }
+    return labels;
+  }
   private async secrets(row: Row) { const value: unknown = JSON.parse(await this.vault.decrypt(row.secret, 'device:' + row.id)); if (!Check(Secrets, value)) throw new Error('device_secret_invalid'); return value; }
   private async saveSecrets(id: string, value: Static<typeof Secrets>) { const ciphertext = await this.vault.encrypt(JSON.stringify(value), 'device:' + id); this.sql.exec('UPDATE devices SET secret=? WHERE id=?', ciphertext, id); }
   private port(id: string) { return 20000 + (parseInt(id.slice(0, 4), 16) % 10000) * 2; }

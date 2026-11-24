@@ -1,3 +1,4 @@
+import { serviceLabel } from "./device-label";
 import { $, ApiError, api, el, fail, loadOverview, readToken, show } from "./app";
 import { Check } from "typebox/value";
 import { readApi } from "./api";
@@ -32,7 +33,7 @@ export async function loadMcpServers(selected=mcpServers.selected){
   if(!readToken())return;const version=++mcpServers.loading,epoch=cs.epoch;
   const data=await readApi(McpServersSchema,"GET","/admin/mcp/servers");if(version!==mcpServers.loading||epoch!==cs.epoch)return;
   mcpServers.rows=data.servers;const select=$("mcp-server-select");
-  select.replaceChildren(el("option",{value:"",text:"新增服务"}),...data.servers.map(row=>el("option",{value:row.server.id,text:row.server.id})));
+  select.replaceChildren(el("option",{value:"",text:"新增服务"}),...data.servers.map(row=>el("option",{value:row.server.id,text:serviceLabel(row.server.id,row.device),title:row.server.id})));
   mcpServerRender(selected);
 }
 export async function mcpServerAction(action:ServerAction){

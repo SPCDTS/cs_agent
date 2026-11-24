@@ -7,7 +7,7 @@ import { loadMcpServers } from './mcp-servers';
 
 let draft: { id: string; name: string; desktop: boolean } | undefined;
 let loading = 0;
-const labels = { provisioning: '正在准备连接，可重试', pairing: '等待设备配对', ready: '已接入（不表示设备当前在线）', revoked: '已撤销' };
+const labels = { provisioning: '正在准备连接，可重试', pairing: '等待设备配对', ready: '已完成配对', revoked: '已撤销' };
 export async function loadDevices() {
   if (!readToken()) return;
   const epoch = cs.epoch, version = ++loading;
@@ -29,12 +29,18 @@ export async function loadDevices() {
       try { await readApi(DeviceView, 'POST', `/admin/devices/${device.id}/revoke`); await loadDevices(); await loadMcpServers(); }
       catch (error) { fail(error); } finally { revoke.disabled = false; }
     });
-    const item = el('div', { className: 'source' }, [el('strong', { text: device.name }), el('p', { className: 'muted small', text: labels[device.state] + (device.desktop ? ' · 命令行 + 桌面' : ' · 命令行') }), revoke]);
+    const item = el('div', { className: 'row' }, [
+      el('div', { className: 'grow', title: device.serverId }, [
+        el('strong', { text: device.name }),
+        el('div', { className: 'muted small', text: [labels[device.state], device.desktop ? '命令行 + 桌面' : '命令行', device.id.slice(0, 8)].join(' · ') }),
+      ]),
+      revoke,
+    ]);
     if (['provisioning', 'pairing'].includes(device.state)) {
       const resume = el('button', { type: 'button', className: 'btn', text: '继续配对' });
       resume.addEventListener('click', () => { draft = { id: device.id, name: device.name, desktop: device.desktop }; void prepare(); }); item.append(resume);
     }
-    list.append(item);
+    list.append(el('div', { className: 'source' }, [item]));
   }
   const changes = $('device-cf-changes'); changes.replaceChildren(); changes.hidden = true;
   if (!grant?.domain) return;
