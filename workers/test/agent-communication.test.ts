@@ -145,11 +145,17 @@ describe("agent communication MVP", () => {
     expect((await send("owner",{to:group,text:"queued peer"})).status).toBe("accepted");
     expect(seenPeer).toBe(false);
     expect((await rows(group))[0]).toMatchObject({status:"queued",when_busy:null});
+    const display=env.REQUESTS.getByName("view:thread:"+group);
+    await env.THREAD.getByName(group).syncAdminView(group);
+    const queued=(await display.chatView(group)).messages.find(m=>m.source==="agent-in");
+    expect(queued).toMatchObject({status:"waiting",text:"尚无入模记录"});
     release();
     await busy;
     await vi.waitFor(()=>expect(seenPeer).toBe(true),{timeout:10000});
     await vi.waitFor(async()=>expect((await rows(group))[0]?.status).toBe("done"),{timeout:10000});
     expect((await rows(group))[0]?.when_busy).toBe("followUp");
+    await env.THREAD.getByName(group).syncAdminView(group);
+    expect((await display.chatView(group)).messages.filter(m=>m.source==="agent-in")).toMatchObject([{id:queued!.id,text:"queued peer",status:"done"}]);
   });
 
   it("rejects forged source and payload, including source-scope asset substitution", async () => {

@@ -468,7 +468,7 @@ describe("多账号目录恢复与共享生图", () => {
     } });
     const thread = env.THREAD.getByName("owner");
     await thread.submitWeb("owner", crypto.randomUUID(), "生成一张猫的图片");
-    await expect.poll(async () => (await (await syncedView("owner")).chatView("owner")).messages.filter(message => message.role === "assistant").length).toBe(1);
+    await expect.poll(async () => (await (await syncedView("owner")).chatView("owner")).messages.filter(message => message.role === "assistant" && message.source === "web").length).toBe(1);
     const page = await (await syncedView("owner")).chatView("owner");
     expect(JSON.stringify(page)).toContain(assetId);
     expect(assetId).toMatch(/^[a-f0-9]{64}$/);

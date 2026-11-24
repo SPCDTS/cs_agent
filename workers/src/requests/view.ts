@@ -10,6 +10,7 @@ import { clip, type ParentSubagentStatus, type SubagentIdentity, type SubagentMe
 import { shortSummary } from "../subagent/activity";
 import { historyEntry, historyCursor, readHistoryCursor } from "../sessions";
 import { ADMIN_PAGE_SIZE } from "../admin/pagination";
+import { safeChatText, transcriptChat, type ChatRow } from "./chat-transcript";
 import type { ProjectionStore, ViewInfo } from "./projection";
 export type EventQuery = { kind?: string; result?: string; since?: number; before?: number; limit: number };
 export type AuditEvent = { id: number; at: number; kind: string; detail: unknown };
@@ -31,10 +32,13 @@ export class AgentReadView {
     const {agingLastRun, consolidateLastRun} = this.info(); return {agingLastRun, consolidateLastRun, summaries};
   }
 
-  async chatView(thread: string, delta?: { after: number; pending: string[] }) {
+  async chatView(thread: string, delta?: { after: number; pending: string[]; revision?:number }) {
     await this.initialize();
     await this.bindNamespace(thread);
-    type ChatRow = { id: string; role: "user" | "assistant"; source: "qq" | "web"; name: string; text: string; at: number; status: string | null; turnId: string | null; assets_json: string };
+
+    const revision=this.store.status()!.revision;
+    // 新投影可能补写早于客户端时间游标的条目，或移除未入模占位。换代时重取有界窗口。
+    if(delta?.revision!==undefined && delta.revision!==revision)delta=undefined;
     // 投影数值列没有整数类型亲和性；rowid 保留源消息主键，拼接后可原样回传增量查询。
     const rows = await this.database.all<ChatRow>(`
       SELECT * FROM (
@@ -51,7 +55,14 @@ export class AgentReadView {
     `, ...(delta ? [delta.after, ...delta.pending] : []));
     const queued = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM inbound WHERE status='queued' AND reply_channel='web'"))?.n ?? 0;
     const active = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM inbound WHERE status='queued'"))?.n ?? 0;
-    return { messages: rows.reverse().map(({assets_json,...row})=>({...row,assets:JSON.parse(assets_json) as AssetRef[]})), queued, active, limit: 100, delta: !!delta };
+    const byId=new Map(rows.map(row=>[row.id,row]));
+    // QQ 以真实平台消息为准（不把引用上下文再发一遍）；网页已入模输入复用
+    // 原命令 ID，替换队列占位。外发的 QQ/web 行仍只来自真实投递/网页输出。
+    for(const row of await transcriptChat(this.database,delta))byId.set(row.id,row);
+    const merged=[...byId.values()];
+    // 与浏览器共用相同的二元稳定顺序；每一路先取前 100 不会丢失总榜前 100。
+    merged.sort((a,b)=>a.at-b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    return { messages: merged.slice(-100).map(({assets_json,...row})=>({...row,text:row.source==="qq"||row.source==="web"?safeChatText(row.text,row.text.length):row.text,assets:JSON.parse(assets_json) as AssetRef[]})), queued, active, limit: 100, revision, delta: !!delta };
   }
 
   async stats() {

@@ -7,7 +7,7 @@ import * as C from "./request-contracts";
 import { readApi } from "./api";
 import { loadTopology, refreshTopologyAfterTurn } from "./topology";
 import { loadSubagentChat, resetSubagentChat } from "./subagent-chat";
-export function resetChatTrace(){resetSubagentChat();cs.fingerprint="";cs.messages.clear();cs.requests.clear();cs.tools.clear();cs.traceCursor=0;cs.traceTurns="";cs.chatAfter=null;cs.chatActive=false;cs.chatLoading=false;cs.awaitingInput=null;toolCache.clear();}
+export function resetChatTrace(){resetSubagentChat();cs.fingerprint="";cs.messages.clear();cs.requests.clear();cs.tools.clear();cs.traceCursor=0;cs.traceTurns="";cs.chatAfter=null;cs.chatRevision=undefined;cs.chatActive=false;cs.chatLoading=false;cs.awaitingInput=null;toolCache.clear();}
 export function scheduleConsolePoll(){
   clearTimeout(cs.timer);cs.timer=undefined;
   if(document.hidden||!readToken())return;
@@ -53,11 +53,13 @@ export function showTurnRequests(turnId:string){
   if(requests.length&&Math.min(...requests.map(r=>r.startedAt))<cs.until-86400000)$("req-range").value="720";
   $("req-thread").value=cs.chat.thread;$("req-model").value="";$("req-status").value="";$("req-purpose").value="";consoleView("usage");
 }
+const chatSources: Record<string,string> = {qq:"QQ",web:"网页",model:"模型回答（非投递回执）","agent-in":"Agent 收件","agent-out":"Agent 发件",subagent:"子任务报告",event:"外部事件",github:"GitHub 事件",gmail:"Gmail 事件"};
+const chatStatus: Record<string,string> = {...statuses,accepted:"对端已入箱（非已读）",duplicate:"对端已入箱（重复投递）",unconfirmed:"未确认入箱",waiting:"等待进入模型"};
 export function renderChatMessages(messages:C.ChatMessage[]){
   const list=$("chat-messages"),nearBottom=list.scrollHeight-list.scrollTop-list.clientHeight<100,first=!list.querySelector(".chat-message"),expanded=new Set([...list.querySelectorAll<HTMLDetailsElement>("details[data-tool][open]")].map(n=>n.dataset.tool)),seen=new Set<string>();
   const content: HTMLElement[]=[];
   for(const m of messages){
-    const message=el("article",{className:"chat-message "+m.role},[el("div",{className:"message-meta",text:(m.role==="assistant"?"助手":m.name||"用户")+" · "+(m.source==="web"?"网页":"QQ")+" · "+bjTime(m.at)+(m.status?" · "+(statuses[m.status]||m.status):"")}),el("div",{className:"message-text",text:m.text}),...(m.assets||[]).map(ref=>el("button",{className:"btn",text:ref.name+" · "+bytes(ref.bytes),onclick:()=>downloadAsset(ref)}))]);
+    const message=el("article",{className:"chat-message "+m.role},[el("div",{className:"message-meta",text:(m.source!=="agent-out" && m.role==="assistant"?"助手":m.name||"用户")+" · "+(chatSources[m.source]||"未知来源")+" · "+bjTime(m.at)+(m.status?" · "+(chatStatus[m.status]||m.status):"")}),el("div",{className:"message-text",text:m.text}),...(m.assets||[]).map(ref=>el("button",{className:"btn",text:ref.name+" · "+bytes(ref.bytes),onclick:()=>downloadAsset(ref)}))]);
     if(m.turnId&&!seen.has(m.turnId)&&m.role==="assistant"){seen.add(m.turnId);content.push(turnTrace(m.turnId,expanded));}
     content.push(message);
     if(m.turnId&&!seen.has(m.turnId)&&m.role==="user"){seen.add(m.turnId);content.push(turnTrace(m.turnId,expanded));}
@@ -73,19 +75,20 @@ export async function loadChat(){
   if(cs.chatLoading)return;cs.chatLoading=true;
   loadTopology();
   const thread=cs.chat.thread,version=++cs.chatVersion,epoch=cs.epoch,p=new URLSearchParams();
-  if(cs.chatAfter!==null){p.set("after",String(cs.chatAfter));for(const m of cs.messages.values())if(m.status==="queued")p.append("pending",m.id);}
+  if(cs.chatAfter!==null){p.set("after",String(cs.chatAfter));if(cs.chatRevision!==undefined)p.set("revision",String(cs.chatRevision));for(const m of cs.messages.values())if(m.status==="queued"||m.status==="waiting")p.append("pending",m.id);}
   try{
     const d=await readApi(C.ChatView,"GET","/admin/threads/"+encodeURIComponent(thread)+"/chat"+(p.size?"?"+p:""));
     if((cs.chat.kind!=="thread"||thread!==cs.chat.thread)||version!==cs.chatVersion||epoch!==cs.epoch)return;
+    cs.chatRevision=d.revision;
     if(!d.delta)cs.messages.clear();d.messages.forEach(m=>cs.messages.set(m.id,m));
-    const messages=[...cs.messages.values()].sort((a,b)=>a.at-b.at||a.id.localeCompare(b.id)).slice(-100);cs.messages=new Map(messages.map(m=>[m.id,m]));
+    const messages=[...cs.messages.values()].sort((a,b)=>a.at-b.at||(a.id<b.id?-1:a.id>b.id?1:0)).slice(-100);cs.messages=new Map(messages.map(m=>[m.id,m]));
     cs.chatAfter=messages.at(-1)?.at??null;
     await fetchTrace(thread,messages,version,epoch);
     if((cs.chat.kind!=="thread"||thread!==cs.chat.thread)||version!==cs.chatVersion||epoch!==cs.epoch)return;
     if(cs.awaitingInput&&cs.messages.has(cs.awaitingInput)&&cs.messages.get(cs.awaitingInput)?.status!=="queued")cs.awaitingInput=null;
     cs.chatActive=!!cs.awaitingInput||!!d.active||[...cs.requests.values(),...cs.tools.values()].some(r=>r.status==="running");
     $("chat-title").textContent=(state.overview&&state.overview.threads.find(t=>t.key===thread)?.name)||thread;
-    $("chat-state").textContent=cs.pending?"上次发送结果未确认，重试沿用原编号。":cs.chatActive?"本轮执行中，正在增量更新…":"回复仅显示网页。空闲时停止自动刷新，点击刷新查看 QQ 新消息。";
+    $("chat-state").textContent=cs.pending?"上次发送结果未确认，重试沿用原编号。":cs.chatActive?"本轮执行中，正在增量更新…":"回复仅显示网页。空闲时停止自动刷新，点击刷新查看新消息。";
     if(d.syncedAt)$("chat-state").textContent+=" · 数据同步于 "+time(d.syncedAt);
     const fingerprint=JSON.stringify([messages,[...cs.requests.values()],[...cs.tools.values()]]);
     if(fingerprint!==cs.fingerprint){if(cs.fingerprint)refreshTopologyAfterTurn();cs.fingerprint=fingerprint;renderChatMessages(messages);if($("request-detail").open&&cs.detailId&&!detailCache.has(cs.detailId))openRequest(cs.detailId);}
