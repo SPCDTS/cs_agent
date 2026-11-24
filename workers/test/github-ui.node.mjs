@@ -17,7 +17,7 @@ for (const integratedConsole of [false, true]) {
     }, {
       "./console": consoleMock,
       "./browser/console": consoleMock,
-      "./management": "export const loadManagement = () => {};",
+      "./management": "export const loadManagement = () => {}, selectManagementSubtab = () => {};",
       "./memory": "export const loadMemory = () => {}, memoryDetail = () => {}, mm = {};",
     });
 

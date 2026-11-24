@@ -1,3 +1,4 @@
+import { isEnvironmentTool } from "./mcp/environments";
 import { SharedCredentials, SHARED_CREDENTIAL_SCHEMA, type WriteCredential } from "./credentials/store";
 import { EDGE_SCHEMA, EdgeStore } from "./communication/edges";
 import { DurableObject } from "cloudflare:workers";
@@ -26,7 +27,7 @@ import { connectionDigest } from "./mcp/names";
 
 type TokenRow = { server_id: string; account_id: string; revision: string; issuer: string; access_token: string; refresh_token: string | null; scope: string | null; expires_at: number | null; updated_at: number };
 type LoginRow = { state: string; server_id: string; verifier: string; nonce_hash: string; created_at: number; expires_at: number };
-export type McpStatus = { server: string; device?: DeviceService; enabled: boolean; credential: "none" | "static" | "oauth"; login: "ok" | "needed" | "error" | "unconfigured" };
+export type McpStatus = { server: string; purpose?: "environment" | "desktop"; device?: DeviceService; enabled: boolean; credential: "none" | "static" | "oauth"; login: "ok" | "needed" | "error" | "unconfigured" };
 const Pending = Type.Object({ verifier: Type.String(), config: Type.String(), discovery: DiscoverySchema }, { additionalProperties: false });
 const identity = (server: OAuthServer, field: string) => JSON.stringify([server.id, server.credential.accountId, server.credential.revision, field]);
 export type ModelView = { current: ModelSelection; subagent?: ModelSelection; revision: string; providers: ProviderStatus[]; codex: ChatGPTView };
@@ -542,7 +543,14 @@ export class RegistryDO extends DurableObject<Env> {
         }
       } else if (server.credential.kind === "managed") login = this.mcpServers.get(server.id).credentialSet ? "ok" : "needed";
       else if (server.credential.kind === "external-account" && Object.values(server.transport.secretHeaders).some(ref => !referencedSecret(this.env, ref))) login = "unconfigured";
-      return { server: server.id, device: labels?.get(server.id), enabled: MCP_CONFIG.enabled && server.enabled,
+      const device = labels?.get(server.id);
+      const tools = server.tools.allow;
+      let purpose: McpStatus["purpose"];
+      if (includeDeviceLabels && !device && tools.length) {
+        if (tools.every(isEnvironmentTool)) purpose = "environment";
+        else if (tools.every(name => name.startsWith("desktop_"))) purpose = "desktop";
+      }
+      return { server: server.id, device, ...(purpose && { purpose }), enabled: MCP_CONFIG.enabled && server.enabled,
         credential: server.credential.kind === "external-account" || server.credential.kind === "managed" ? "static" : server.credential.kind, login };
     }));
   }

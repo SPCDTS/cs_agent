@@ -206,18 +206,18 @@
     </div>
   </section>
 
-  <section class="card" id="mcp-section">
-    <div class="section-head"><h2 class="h2">MCP 服务与个人设备</h2><span class="muted small">运行时接入，无需重新部署</span></div>
+  <section class="card" id="device-section">
+    <div class="section-head"><h2 class="h2 grow">个人设备</h2><button id="device-reload" class="btn" type="button">刷新设备</button></div>
     <div class="stack">
-      <div id="mcp-list" class="stack flat-stack"></div>
+      <div id="device-list" class="stack flat-stack" aria-label="已登记设备">正在加载设备…</div>
       <details id="device-editor" class="source form-disclosure">
-        <summary>+ 添加设备与 Cloudflare 管理 · 默认命令行，可选桌面</summary>
+        <summary>+ 添加设备与 Cloudflare 管理</summary>
         <p class="muted small">设备默认提供本机命令行，代码与依赖保留在设备上。桌面能力按需安装。首次接入仅主人可用，共享请到权限与运维的 MCP 群授权设置。</p>
         <div class="row"><button id="device-cloudflare" type="button" class="btn" hidden>授权 Cloudflare</button><span id="device-cloudflare-state" class="muted small" role="status"></span></div>
         <div id="device-cf-changes" class="stack flat-stack" hidden></div>
         <div class="row"><label for="device-name">设备名称</label><input id="device-name" type="text" maxlength="80" placeholder="我的 Mac" autocomplete="off">
           <label class="row"><input id="device-desktop" type="checkbox">安装 agent-desktop，允许操作登录用户的桌面</label></div>
-        <div class="row"><button id="device-create" class="btn primary" type="button">生成配对链接</button><button id="device-reload" class="btn" type="button">刷新设备</button></div>
+        <div class="row"><button id="device-create" class="btn primary" type="button">生成配对链接</button></div>
         <p id="device-state" class="muted small" role="status">展开后加载设备。</p>
         <div id="device-pairing" hidden>
           <p>1. 在待接入设备安装 Node.js 24 或以上版本，<a href="/admin/device-client.cjs" download="cs-agent-device.cjs">下载设备客户端</a>。</p>
@@ -226,8 +226,14 @@
           <button id="device-copy" type="button" class="btn">复制配对链接</button>
           <p class="muted small">客户端自动安装 Tunnel 并设置当前用户登录自启动；命令按该用户权限执行。默认目录为用户主目录下 AgentWork。无需复制长期 Token，也不需要设备上的 Cloudflare 管理凭据。</p>
         </div>
-        <div id="device-list" class="stack flat-stack"></div>
       </details>
+    </div>
+  </section>
+
+  <section class="card" id="mcp-section">
+    <div class="section-head"><h2 class="h2">独立 MCP 服务</h2></div>
+    <div class="stack">
+      <div id="mcp-list" class="stack flat-stack"></div>
       <details id="mcp-server-editor" class="source form-disclosure">
         <summary>+ 接入或管理远程 MCP 服务</summary>
         <p class="muted small">保存连接 → 填写凭据或登录 → 检测工具 → 启用。修改即时保存，无需部署。</p>

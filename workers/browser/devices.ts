@@ -1,4 +1,6 @@
-import { $, el, fail, notice, show, showLogin, readToken } from './app';
+import type { Static } from 'typebox';
+import type { Overview } from './app-contracts';
+import { $, el, fail, loadOverview, renderMcpService, notice, show, showLogin, readToken } from './app';
 import { api, readApi } from './api';
 import { CloudflareChangeList, CloudflareLink, CloudflareStatus, DeviceList, DeviceSetup, DeviceView } from '../src/devices/contracts';
 import { cs } from './console';
@@ -7,13 +9,79 @@ import { loadMcpServers } from './mcp-servers';
 
 let draft: { id: string; name: string; desktop: boolean } | undefined;
 let loading = 0;
+let preparing = false;
 const labels = { provisioning: '正在准备连接，可重试', pairing: '等待设备配对', ready: '已完成配对', revoked: '已撤销' };
+type Device = Static<typeof DeviceView>;
+let registrations: { epoch: number; rows: Device[] } | undefined;
+let capabilities: { epoch: number; rows: Overview['mcp'] } | undefined;
+
+export function setDeviceServices(rows: Overview['mcp']) {
+  capabilities = { epoch: cs.epoch, rows };
+  renderDevices();
+}
+
+function deviceActions(device: Device, header: HTMLElement) {
+  if (device.state === 'provisioning' || device.state === 'pairing') {
+    header.append(el('button', { type: 'button', className: 'btn', text: '继续配对', onclick: () => {
+      if (preparing) return;
+      $('device-name').value = device.name;
+      $('device-desktop').checked = device.desktop;
+      $('device-editor').open = true;
+      draft = { id: device.id, name: device.name, desktop: device.desktop };
+      void prepare();
+    } }));
+  }
+  const revoke = el('button', { type: 'button', className: 'btn', text: device.state === 'revoked' ? '重试关闭入口' : '撤销接入' });
+  revoke.addEventListener('click', async () => {
+    revoke.disabled = true;
+    try {
+      await readApi(DeviceView, 'POST', `/admin/devices/${device.id}/revoke`);
+      await Promise.all([loadDevices(), loadMcpServers(), loadOverview()]);
+    } catch (error) { fail(error); } finally { revoke.disabled = false; }
+  });
+  header.append(revoke);
+}
+
+function renderDevices() {
+  const list = $('device-list');
+  const devices = registrations?.epoch === cs.epoch ? registrations.rows : undefined;
+  const services = capabilities?.epoch === cs.epoch ? capabilities.rows : [];
+  const groups = new Map<string, { name: string; device?: Device; services: Overview['mcp'] }>();
+  for (const device of devices ?? []) groups.set(device.id, { name: device.name, device, services: [] });
+  for (const service of services) {
+    const label = service.device;
+    if (!label) continue;
+    const group = groups.get(label.id) ?? { name: label.name, services: [] };
+    group.services.push(service);
+    groups.set(label.id, group);
+  }
+  const nameCounts = new Map<string, number>();
+  for (const { name } of groups.values()) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+  list.replaceChildren();
+  for (const [id, { name, device, services }] of groups) {
+    const header = el('div', { className: 'row' }, [
+      el('div', { className: 'grow', title: id }, [
+        el('strong', { text: name }),
+        el('div', { className: 'muted small', text: [device && labels[device.state], (nameCounts.get(name) ?? 0) > 1 && id.slice(0, 8)].filter(Boolean).join(' · ') }),
+      ]),
+    ]);
+    if (device) deviceActions(device, header);
+    const card = el('div', { className: 'source' }, [header]);
+    for (const service of services) card.append(renderMcpService(service));
+    if (device && !services.length && device.state !== 'revoked') {
+      card.append(el('div', { className: 'muted small', text: device.desktop ? '配对选项：命令行、桌面' : '配对选项：命令行' }));
+    }
+    list.append(card);
+  }
+  if (!groups.size) list.append(el('div', { className: 'muted', text: devices ? '尚无已登记设备' : '正在加载设备…' }));
+}
+
 export async function loadDevices() {
   if (!readToken()) return;
   const epoch = cs.epoch, version = ++loading;
   const result = await readApi(DeviceList, 'GET', '/admin/devices');
   if (epoch !== cs.epoch || version !== loading) return;
-  $('device-create').disabled = !result.configured;
+  $('device-create').disabled = preparing || !result.configured;
   const grant = result.cloudflare;
   $('device-cloudflare').hidden = !grant?.available;
   $('device-cloudflare').textContent = grant?.domain ? '重新授权 Cloudflare' : '授权 Cloudflare';
@@ -21,29 +89,10 @@ export async function loadDevices() {
   const optional = grant?.scopes.filter(scope => scopeLabels[scope]).map(scope => scopeLabels[scope]) ?? [];
   $('device-cloudflare-state').textContent = grant?.reauth ? '授权已失效，请重新授权。' : grant?.domain ? '已授权 ' + [grant.domain, ...optional].join(' · ') : '';
   $('device-state').textContent = result.configured ? '默认启用命令行；桌面选项默认关闭。' : grant?.available ? '授权后，服务端会识别域名并为每台设备创建 Tunnel 和 DNS 记录。' : '部署时登记 Cloudflare OAuth 客户端，或配置设备 Tunnel 凭据。';
-  const list = $('device-list'); list.replaceChildren();
-  for (const device of result.devices) {
-    const revoke = el('button', { type: 'button', className: 'btn', text: device.state === 'revoked' ? '重试关闭入口' : '撤销接入' });
-    revoke.addEventListener('click', async () => {
-      revoke.disabled = true;
-      try { await readApi(DeviceView, 'POST', `/admin/devices/${device.id}/revoke`); await loadDevices(); await loadMcpServers(); }
-      catch (error) { fail(error); } finally { revoke.disabled = false; }
-    });
-    const item = el('div', { className: 'row' }, [
-      el('div', { className: 'grow', title: device.serverId }, [
-        el('strong', { text: device.name }),
-        el('div', { className: 'muted small', text: [labels[device.state], device.desktop ? '命令行 + 桌面' : '命令行', device.id.slice(0, 8)].join(' · ') }),
-      ]),
-      revoke,
-    ]);
-    if (['provisioning', 'pairing'].includes(device.state)) {
-      const resume = el('button', { type: 'button', className: 'btn', text: '继续配对' });
-      resume.addEventListener('click', () => { draft = { id: device.id, name: device.name, desktop: device.desktop }; void prepare(); }); item.append(resume);
-    }
-    list.append(el('div', { className: 'source' }, [item]));
-  }
+  registrations = { epoch, rows: result.devices };
+  renderDevices();
   const changes = $('device-cf-changes'); changes.replaceChildren(); changes.hidden = true;
-  if (!grant?.domain) return;
+  if (!grant?.domain || !$('device-editor').open) return;
   const rows = await readApi(CloudflareChangeList, 'GET', '/admin/devices/cloudflare/changes');
   if (epoch !== cs.epoch || version !== loading) return;
   const status: Record<string,string> = { pending:'等待批准', executing:'已提交执行，请核对实际状态', succeeded:'已执行', rejected:'已拒绝', expired:'已过期', failed:'失败', unknown:'结果待核实' };
@@ -68,6 +117,9 @@ export async function loadDevices() {
   changes.hidden = rows.length === 0;
 }
 async function prepare() {
+  if (preparing) return;
+  preparing = true;
+  $('device-link').value = ''; $('device-pairing').hidden = true;
   const epoch = cs.epoch;
   $('device-create').disabled = true;
   $('device-state').textContent = '正在准备独立连接…';
@@ -78,7 +130,7 @@ async function prepare() {
     $('device-link').value = result.pairingUrl; $('device-pairing').hidden = false;
     draft = undefined; await loadDevices();
   } catch (error) { fail(error); $('device-state').textContent = '准备失败。再次点击可重试同一设备；已创建的连接会复用。'; }
-  finally { $('device-create').disabled = false; }
+  finally { preparing = false; $('device-create').disabled = false; }
 }
 const callbackPrefix = '#cloudflare?';
 const loginKey = 'cs-agent-cloudflare-state';
@@ -95,7 +147,7 @@ export function initDevices() {
     } catch (error) { fail(error); } finally { button.disabled = false; }
   });
   $('device-editor').addEventListener('toggle', () => { if ($('device-editor').open) void loadDevices().catch(fail); else { $('device-link').value = ''; $('device-pairing').hidden = true; } });
-  $('device-reload').addEventListener('click', () => { void loadDevices().catch(fail); });
+  $('device-reload').addEventListener('click', () => { void Promise.all([loadDevices(), loadOverview()]).catch(fail); });
   $('device-create').addEventListener('click', () => {
     const name = $('device-name').value.trim(); if (!name) { show('请填写设备名称', 'error'); return; }
     const desktop = $('device-desktop').checked;

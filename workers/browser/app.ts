@@ -1,4 +1,4 @@
-import { deviceServiceDetail } from "./device-label";
+import { setDeviceServices } from "./devices";
 import { renderGitHub } from "./github";
 import * as C from "./app-contracts";
 import { Check } from "typebox/value";
@@ -144,8 +144,11 @@ export function refresh() {
     $("refreshed").textContent = "刷新于 " + time(Date.now());
   }).catch(fail);
 }
+let overviewVersion = 0;
 export async function loadOverview() {
+  const version = ++overviewVersion, epoch = cs.epoch;
   const overview = await readApi(C.Overview, "GET", "/admin/overview");
+  if (epoch !== cs.epoch || version !== overviewVersion) return;
   state.overview = overview;
   renderOverview(overview);
   renderConsoleThreads();
@@ -470,28 +473,33 @@ export async function setSourcePaused(id: string, paused: boolean) {
   } catch (error) { fail(error); }
   refresh();
 }
+export function renderMcpService(server: C.Overview["mcp"][number]) {
+  const oauth = server.credential === "oauth";
+  const login = LOGIN[server.login] || [server.login, "neutral"];
+  let status = login[0];
+  if (!oauth && server.login === "ok") status = server.credential === "none" ? "已启用" : "凭据已配置";
+  if (!oauth && server.login === "needed") status = "缺少凭据";
+  const title = server.device ? { shell: "命令行", desktop: "桌面" }[server.device.capability] : server.server;
+  const purpose = server.purpose && { environment: "环境管理", desktop: "桌面控制" }[server.purpose];
+  const detail = [purpose, CREDENTIAL[server.credential] || server.credential].filter(Boolean).join(" · ");
+  return el("div", { className: "row" }, [
+    el("div", { className: "grow", style: "min-width:160px" }, [
+      el("div", { style: "font-weight:600", text: title, title: server.server }),
+      el("div", { className: "muted small", text: detail }),
+    ]),
+    server.enabled ? pill(status, login[1]) : pill("已停用", "neutral"),
+    el("span", { className: "mono muted", text: server.tools === null ? "工具数待同步" : server.tools + " 个工具" }),
+    server.enabled ? el("button", { className: "btn", type: "button", text: "刷新目录", onclick: () => mcpRefresh(server.server) }) : null,
+    server.enabled && oauth && server.login !== "ok" ? el("button", { className: "btn primary", type: "button", text: "生成登录链接", onclick: () => mcpLink(server.server) }) : null,
+    server.enabled && oauth && (server.login === "ok" || server.login === "error") ? el("button", { className: "btn danger", type: "button", text: "登出", onclick: () => mcpLogout(server.server) }) : null,
+  ]);
+}
+
 export function renderMcp(servers: C.Overview["mcp"]) {
+  setDeviceServices(servers.filter(server => server.device));
   const list = $("mcp-list");
-  clear(list);
-  for (const server of servers) {
-    const oauth = server.credential === "oauth";
-    const login = LOGIN[server.login] || [server.login, "neutral"];
-    let status = login[0];
-    if (!oauth && server.login === "ok") status = server.credential === "none" ? "已启用" : "凭据已配置";
-    if (!oauth && server.login === "needed") status = "缺少凭据";
-    list.append(el("div", { className: "row" }, [
-      el("div", { className: "grow", style: "min-width:160px" }, [
-        el("div", { style: "font-weight:600", text: server.device?.name ?? server.server, title: server.server }),
-        el("div", { className: "muted small", text: server.device ? deviceServiceDetail(server.device) : CREDENTIAL[server.credential] || server.credential }),
-      ]),
-      server.enabled ? pill(status, login[1]) : pill("已停用", "neutral"),
-      el("span", { className: "mono muted", text: server.tools === null ? "工具数待同步" : server.tools + " 个工具" }),
-      server.enabled ? el("button", { className: "btn", type: "button", text: "刷新目录", onclick: () => mcpRefresh(server.server) }) : null,
-      server.enabled && oauth && server.login !== "ok" ? el("button", { className: "btn primary", type: "button", text: "生成登录链接", onclick: () => mcpLink(server.server) }) : null,
-      server.enabled && oauth && (server.login === "ok" || server.login === "error") ? el("button", { className: "btn danger", type: "button", text: "登出", onclick: () => mcpLogout(server.server) }) : null,
-    ]));
-  }
-  if (!servers.length) list.append(el("div", { className: "muted", text: "尚未接入 MCP 服务" }));
+  list.replaceChildren(...servers.filter(server => !server.device).map(renderMcpService));
+  if (!list.childElementCount) list.append(el("div", { className: "muted", text: "尚未接入独立 MCP 服务" }));
   paginateChildren(list);
 }
 export function renderSecrets(configured: C.Overview["configured"]) {

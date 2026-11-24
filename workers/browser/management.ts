@@ -1,4 +1,5 @@
-import { $, el, loadEvents, loadMemory, loadModel, loadSchedules, loadSettings, loadSkills, loadSources } from "./app";
+import { $, el, fail, loadEvents, loadMemory, loadModel, loadSchedules, loadSettings, loadSkills, loadSources } from "./app";
+import { loadDevices } from "./devices";
 import { loadMcpServers } from "./mcp-servers";
 import { loadAccess, loadAccessPersona } from "./access";
 
@@ -26,6 +27,7 @@ const activeSubtabs: Record<string, string> = {
 
 const subtabTargets: Record<string, readonly [string, string]> = {
   "model-section": ["models", "models-core"],
+  "device-section": ["models", "models-mcp"],
   "mcp-section": ["models", "models-mcp"],
   "settings-section": ["models", "models-qq"],
   "overview-cards": ["models", "models-qq"],
@@ -61,6 +63,7 @@ function applySubtab(view: string) {
       onclick: () => {
         activeSubtabs[view] = id;
         applySubtab(view);
+        if (id === "models-mcp") void loadDevices().catch(fail);
       },
     })));
   } else {
@@ -111,7 +114,8 @@ export function showManagement(view: string, subtab?: string) {
 }
 
 export function loadManagement(view: string) {
-  if (view === "models") return Promise.all([loadSettings(), loadModel(), loadMcpServers()]);
+  if (view === "models") return Promise.all([loadSettings(), loadModel(), loadMcpServers(),
+    activeSubtabs.models === "models-mcp" && !location.hash.startsWith("#cloudflare?") ? loadDevices() : undefined]);
   if (view === "memory") return Promise.all([loadMemory(), loadSkills(), loadAccessPersona()]);
   if (view === "operations") return Promise.all([loadEvents(), loadSchedules(), loadSources()]);
   if (view === "access") return loadAccess();

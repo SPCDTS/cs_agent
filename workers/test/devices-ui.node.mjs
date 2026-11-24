@@ -18,7 +18,7 @@ globalThis.__deviceRead = async (_schema, method, path, body) => {
   assert.ok(path.endsWith("/revoke")); devices[0].state = "revoked"; return devices[0];
 };
 const { initDevices, loadDevices } = await bundleModule("browser/devices.ts", {
-  "./app": 'export { $, el } from "./browser/dom.ts"; export const fail = e => globalThis.__deviceErrors.push(e), show = () => {}, showLogin = () => {}, notice = () => {}, readToken = () => true;',
+  "./app": 'export { $, el } from "./browser/dom.ts"; export const loadOverview = async () => {}, renderMcpService = () => {}, fail = e => globalThis.__deviceErrors.push(e), show = () => {}, showLogin = () => {}, notice = () => {}, readToken = () => true;',
   "./api": "export const readApi = (...args) => globalThis.__deviceRead(...args); export const api = (...args) => globalThis.__deviceRead(null,...args);",
   "./console": "export const cs = globalThis.__deviceCs;",
   "./management": "export const selectManagementSubtab = () => {};",
@@ -102,11 +102,16 @@ test('概览和两个服务选择器区分同名设备与桌面，操作仍按�
     { server: 'device-' + ids[0], device: shell },
     { server: 'device-' + ids[0] + '-desktop', device: { ...shell, capability: 'desktop' } },
     { server: 'device-' + ids[1], device: { ...shell, id: ids[1] } },
-    { server: 'manual' },
+    { server: 'device-manual', purpose: 'environment' },
+    { server: 'remote-gui', purpose: 'desktop' },
   ];
   const paths = [];
   t.mock.method(globalThis, 'fetch', async path => {
     paths.push(String(path));
+    if (path === '/admin/devices') return Response.json({ configured: true, devices: [
+      { id: ids[0], name: '开发机', desktop: true, state: 'ready', createdAt: 1, expiresAt: 0, serverId: services[0].server, desktopServerId: services[1].server },
+      { id: '33333333-3333-4333-8333-333333333333', name: '等待安装', desktop: false, state: 'pairing', createdAt: 2, expiresAt: 3, serverId: 'pending', desktopServerId: null },
+    ] });
     if (path === '/admin/mcp/servers') return Response.json({ servers: services.map(({ server, device }) => ({
       server: { id: server, enabled: true, transport: { url: 'https://example.test/mcp', headers: {} },
         credential: { kind: 'managed' }, resourceAllow: [], access: {}, tools: { allow: [] } },
@@ -116,17 +121,27 @@ test('概览和两个服务选择器区分同名设备与桌面，操作仍按�
     if (String(path).startsWith('/admin/mcp/approvals?')) return Response.json({ approvals: [] });
     return new Promise(() => {});
   });
-  const { renderMcp, loadMcpServers, mcpUiLoad } = await bundleModule({ contents:
-    "export { renderMcp } from './browser/app.ts'; export { loadMcpServers } from './browser/mcp-servers.ts'; export { mcpUiLoad } from './browser/mcp.ts';" });
+  const { renderMcp, loadDevices, loadMcpServers, mcpUiLoad } = await bundleModule({ contents:
+    "export { loadDevices } from './browser/devices.ts'; export { renderMcp } from './browser/app.ts'; export { loadMcpServers } from './browser/mcp-servers.ts'; export { mcpUiLoad } from './browser/mcp.ts';" });
   renderMcp(services.map(service => ({ ...service, login: 'ok', credential: 'static', enabled: true, tools: 4 })));
+  const cards = [...page.document.querySelector('#device-list').children];
+  assert.equal(cards.length, 2);
+  assert.match(cards[0].textContent, /开发机.*11111111.*命令行.*桌面/);
+  assert.match(cards[1].textContent, /开发机.*22222222.*命令行.*凭据已配置/);
+  assert.equal(cards[0].textContent.includes(ids[0]), false);
+  assert.equal(cards[0].querySelectorAll('strong').length, 1);
   const rows = [...page.document.querySelector('#mcp-list').children];
-  assert.match(rows[0].textContent, /开发机.*设备命令行 · 11111111.*凭据已配置/);
-  assert.match(rows[1].textContent, /开发机.*设备桌面 · 11111111/);
-  assert.match(rows[2].textContent, /开发机.*设备命令行 · 22222222/);
-  assert.match(rows[3].textContent, /manual/);
-  assert.equal(rows[0].textContent.includes(ids[0]), false);
-  await page.click(rows[2].querySelector('button'));
-  assert.ok(paths.includes('/admin/mcp/' + services[2].server + '/refresh'));
+  assert.equal(rows.length, 2);
+  assert.match(rows[0].textContent, /device-manual.*环境管理/);
+  assert.match(rows[1].textContent, /remote-gui.*桌面控制/);
+  await page.click(cards[0].querySelectorAll('button')[1]);
+  assert.ok(paths.includes('/admin/mcp/' + services[1].server + '/refresh'));
+  await loadDevices();
+  const joined = [...page.document.getElementById('device-list').children];
+  assert.equal(joined.length, 3);
+  assert.match(joined[0].textContent, /开发机.*已完成配对.*撤销接入.*命令行.*桌面/);
+  assert.match(joined[1].textContent, /等待安装.*等待设备配对.*继续配对/);
+  assert.match(joined[2].textContent, /22222222.*命令行/);
   await loadMcpServers(services[1].server);
   await mcpUiLoad();
   for (const selectId of ['mcp-server-select', 'mcp-access-server']) {

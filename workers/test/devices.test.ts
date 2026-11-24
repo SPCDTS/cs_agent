@@ -107,6 +107,12 @@ it('过期配对不可领取，桌面可选时复用同一个 Tunnel 并限定�
     ] } });
     expect(mcp.get(deviceServerId(id) + '-desktop').server.enabled).toBe(false);
     mcp.put({ id: deviceServerId(other), url: 'https://manual.example.test/mcp', auth: 'none' }, 'absent');
+    for (const [server, allow] of Object.entries({ environments: ['env_status'], gui: ['desktop_click'], mixed: ['desktop_click', 'other'] })) {
+      const added = mcp.put({ id: server, url: 'https://manual.example.test/mcp', auth: 'none' }, 'absent');
+      const probe = mcp.recordProbe(server, added.revision, { tools: allow.map(name => ({ name, inputSchema: { type: 'object', properties: {} } })) });
+      mcp.activate(server, probe.revision, { allow, readOnly: [], resourceAllow: [] });
+    }
+    expect((await instance.status()).every(row => !row.purpose)).toBe(true);
     expect(instance.mcpServersList().every(row => !row.device)).toBe(true);
     state.storage.sql.exec('UPDATE devices SET expires=0 WHERE id=?', id);
     await expect(devices.claim(id, new URL(created.pairingUrl).hash.slice(1), 'a'.repeat(64))).rejects.toThrow('denied');
@@ -114,6 +120,11 @@ it('过期配对不可领取，桌面可选时复用同一个 Tunnel 并限定�
   const headers = { Authorization: 'Bearer ' + adminEnv().ADMIN_TOKEN };
   const get = (path: string) => worker.fetch(new Request(env.PUBLIC_ORIGIN + path, { headers }), adminEnv());
   const overview = await (await get('/admin/overview')).json<Overview>();
+  const purposes = new Map(overview.mcp.map(row => [row.server, row.purpose]));
+  expect(purposes.get('environments')).toBe('environment');
+  expect(purposes.get('gui')).toBe('desktop');
+  expect(purposes.get('mixed')).toBeUndefined();
+  expect(purposes.get(deviceServerId(other))).toBeUndefined();
   const servers = await (await get('/admin/mcp/servers')).json<{servers: McpServerRecord[]}>();
   for (const records of [
     overview.mcp.map(row => [row.server, row.device] as const),

@@ -51,7 +51,7 @@ test("管理台模型卡片支持选择与一键清除子任务默认模型，�
   }, {
     "./api": 'export class ApiError extends Error {} export const readApi = (...args) => globalThis.__modelReadApi(...args), api = (...args) => globalThis.__modelReadApi(null, ...args), readToken = () => "t", writeToken = () => {};',
     "./console": consoleMock,
-    "./management": "export const loadManagement = () => {};",
+    "./management": "export const loadManagement = () => {}, selectManagementSubtab = () => {};",
     "./memory": "export const loadMemory = () => {}, memoryDetail = () => {}, mm = {};",
   });
 
