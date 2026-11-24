@@ -111,6 +111,7 @@ export class RegistryDO extends DurableObject<Env> {
     return result;
   }
   mcpCredentialPut(id: string, expected: string, headers: unknown) { return this.mcpServers.credentialPut(id, expected, headers); }
+  mcpReverseRegistration(id: string, bearer: string) { return this.mcpServers.reverseRegistration(id, bearer); }
   mcpCredentialHeaders(id: string, digest: string) { return this.mcpServers.credentialHeaders(id, digest); }
 
   // 技能目录只经面板写入；Thread 读目录与正文。

@@ -1,6 +1,6 @@
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 
-type FailureCode = "missing_secret" | "auth_required" | "auth_failed" | "rate_limited" | "remote_state_lost" | "transport_error" | "protocol_error" | "catalog_limit" | "message_limit" | "timeout" | "closed";
+type FailureCode = "reverse_offline" | "missing_secret" | "auth_required" | "auth_failed" | "rate_limited" | "remote_state_lost" | "transport_error" | "protocol_error" | "catalog_limit" | "message_limit" | "timeout" | "closed";
 
 export class McpConnectionError extends Error {
   constructor(readonly code: FailureCode, message: string, readonly status?: number) {

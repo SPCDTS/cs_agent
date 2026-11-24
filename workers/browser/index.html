@@ -234,7 +234,7 @@
         <div class="row"><select id="mcp-server-select" aria-label="选择 MCP 服务"><option value="">新增服务</option></select><button id="mcp-server-reload" type="button" class="btn">刷新服务</button></div>
         <div class="pair"><div class="field"><label for="mcp-server-id">服务名称</label><input id="mcp-server-id" type="text" placeholder="github" autocomplete="off"></div>
           <div class="field"><label for="mcp-server-url">HTTPS MCP 地址</label><input id="mcp-server-url" type="url" placeholder="https://api.githubcopilot.com/mcp/" autocomplete="off"></div></div>
-        <div class="row"><label for="mcp-server-auth">认证</label><select id="mcp-server-auth"><option value="none">无认证</option><option value="token">Token / 认证头</option><option value="oauth">OAuth 登录</option></select>
+        <div class="row"><label for="mcp-server-auth">认证</label><select id="mcp-server-auth"><option value="none">无认证</option><option value="token">Token / 认证头</option><option value="reverse-websocket">反向 WebSocket（地址自动生成）</option><option value="oauth">OAuth 登录</option></select>
           <label for="mcp-server-scope">OAuth scope</label><input id="mcp-server-scope" type="text" placeholder="由服务提供方指定，可留空"></div>
         <div class="row"><button id="mcp-server-save" type="button" class="btn">保存连接</button><button id="mcp-server-login" type="button" class="btn">获取登录链接</button></div>
         <p class="muted small">重新保存已有连接会清除其旧凭据和工具选择。仅更新凭据时使用下方按钮。</p>

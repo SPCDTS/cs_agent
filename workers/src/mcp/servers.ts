@@ -2,15 +2,17 @@ import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { ListToolsResultSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MCP_CONFIG, parseMcpConfig, publicOrigin, type McpServerConfig } from "./config";
+import { secretsEqual } from "../auth";
 import { TokenVault } from "./crypto";
 import { makeCatalog } from "./catalog";
 import { serverDigest, connectionDigest, jsonBytes } from "./names";
 
 const strict = { additionalProperties: false };
 export const ServerId = Type.String({ pattern: "^[A-Za-z][A-Za-z0-9_-]{0,63}$" });
-export const ServerSetup = Type.Object({ id: ServerId, url: Type.String({ minLength: 1, maxLength: 4096 }),
+const HttpSetup = Type.Object({ id: ServerId, url: Type.String({ minLength: 1, maxLength: 4096 }),
   auth: Type.Union([Type.Literal("none"), Type.Literal("token"), Type.Literal("oauth")]),
   headers: Type.Optional(Type.Record(Type.String(), Type.String())), scope: Type.Optional(Type.String({ maxLength: 256 })) }, strict);
+export const ServerSetup = Type.Union([HttpSetup, Type.Object({ id: ServerId, transport: Type.Literal("reverse-websocket") }, strict)]);
 export type ServerSetupInput = Static<typeof ServerSetup>;
 export const ServerSelection = Type.Object({ allow: Type.Array(Type.String(), { uniqueItems: true, maxItems: 1000 }),
   readOnly: Type.Optional(Type.Array(Type.String(), { uniqueItems: true, maxItems: 1000 })),
@@ -65,10 +67,11 @@ export class McpServerStore {
     const previous = this.sql.exec<Row>("SELECT * FROM mcp_servers WHERE id=?", input.id).toArray()[0];
     if ((previous?.revision ?? "absent") !== expected) throw new McpSetupError("conflict");
     if (!previous && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM mcp_servers").one().n >= 64) throw new McpSetupError("invalid");
-    const revision = crypto.randomUUID(), url = setupUrl(input.url);
+    const reverse = "transport" in input;
+    const revision = crypto.randomUUID(), url = reverse ? publicOrigin(this.origin) + "/mcp/reverse/" + input.id : setupUrl(input.url);
     const server = parseMcpConfig({ version: 1, enabled: true, servers: [{ id: input.id, enabled: false,
-      transport: { kind: "streamable-http", url, headers: input.headers ?? {} },
-      credential: input.auth === "none" ? { kind: "none" } : input.auth === "token" ? { kind: "managed", accountId: "owner-" + input.id, revision } :
+      transport: { kind: reverse ? "reverse-websocket" : "streamable-http", url, headers: reverse ? {} : input.headers ?? {} },
+      credential: !reverse && input.auth === "none" ? { kind: "none" } : reverse || input.auth === "token" ? { kind: "managed", accountId: "owner-" + input.id, revision } :
         { kind: "oauth", accountId: "owner-" + input.id, revision, registration: "cimd", clientMetadataUrl: publicOrigin(this.origin) + "/oauth/client-metadata.json", ...(input.scope ? { scope: input.scope } : {}) },
       access: { kind: "owner-private", revision }, tools: { allow: [], readOnly: [], eventAllow: [] }, replay: "unsafe" }] }).servers[0]!;
     this.sql.exec("INSERT INTO mcp_servers(id,config,revision) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config,revision=excluded.revision,secret=NULL,discovered=NULL", input.id, JSON.stringify(server), revision);
@@ -104,6 +107,7 @@ export class McpServerStore {
   async credentialPut(id: string, expected: string, headers: unknown) {
     const row = this.row(id, expected), server = this.parse(row);
     if (server.credential.kind !== "managed" || !Check(Type.Record(Type.String(), Type.String({ minLength: 1, maxLength: 8192, pattern: "^[^\\r\\n]*$" })), headers) || !Object.keys(headers).length) throw new McpSetupError("invalid");
+    if (server.transport.kind === "reverse-websocket" && (Object.keys(headers).length !== 1 || !/^Bearer [A-Za-z0-9._~-]{32,256}$/.test(headers.Authorization ?? ""))) throw new McpSetupError("invalid");
     // 复用配置头名校验；模型与公开配置只接触引用，不接触值。
     parseMcpConfig({ version: 1, enabled: true, servers: [{ ...server, transport: { ...server.transport, secretHeaders: Object.fromEntries(Object.keys(headers).map(name => [name, "MANAGED_HEADER"])) } }] });
     const revision = crypto.randomUUID(), credential = { ...server.credential, revision };
@@ -111,6 +115,15 @@ export class McpServerStore {
     this.row(id, expected);
     this.sql.exec("UPDATE mcp_servers SET secret=?,config=?,revision=?,discovered=NULL WHERE id=?", secret, JSON.stringify({ ...server, credential, access: { ...server.access, revision }, enabled: false }), revision, id);
     return this.get(id);
+  }
+  async reverseRegistration(id: string, bearer: string) {
+    // 公开注册请求不读取发现目录，也不把凭据从 Registry 传给边缘入口。
+    const row = this.sql.exec<Pick<Row, "config" | "secret">>("SELECT config,secret FROM mcp_servers WHERE id=?", id).toArray()[0];
+    if (!row?.secret || !MCP_CONFIG.enabled) return null;
+    const server = this.parse(row);
+    if (server.transport.kind !== "reverse-websocket" || server.credential.kind !== "managed") return null;
+    const headers = JSON.parse(await this.vault.decrypt(row.secret, JSON.stringify([id, server.credential.revision])));
+    return typeof headers.Authorization === "string" && secretsEqual(bearer, headers.Authorization) ? connectionDigest(server) : null;
   }
   async credentialHeaders(id: string, expectedDigest: string): Promise<Record<string, string>> {
     const row = this.row(id), server = this.parse(row);

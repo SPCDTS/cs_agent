@@ -1,3 +1,4 @@
+import { registerReverse } from "./mcp/reverse-route";
 import { handleMediaRequest } from "./media/routes";
 import { authenticated } from "./auth";
 import { handleAdmin } from "./admin/routes";
@@ -83,6 +84,8 @@ export default {
         return new Response(oauthErrorCode(error), { status: 400, headers });
       }
     }
+    const reverse = /^\/mcp\/reverse\/([A-Za-z][A-Za-z0-9_-]{0,63})$/.exec(path);
+    if (reverse && request.method === "GET") return registerReverse(request, env, reverse[1]!);
     if (request.method === "GET" && path === "/onebot") {
       if (!(await authenticated(request, env.NAPCAT_TOKEN, true))) return new Response("unauthorized", { status: 401 });
       return env.BRIDGE.getByName("napcat").fetch(request);

@@ -142,6 +142,7 @@ export class ThreadMcp {
     for (const other of this.entries.values()) if (other.connection && (other === entry || other.pending === 0) && Date.now() - other.lastUsed >= this.config.limits.idleMs) {
       await other.connection.close(); other.connection = undefined; other.changed++;
     }
+    if (entry.connection?.reverseDisconnected) { await entry.connection.close(); entry.connection = undefined; }
     if (!entry.connection) {
       if ([...this.entries.values()].filter(e => e.connection).length >= this.config.limits.connections) throw new Error("connections_busy");
       entry.connection = await McpConnection.open(entry.server, this.env, this.config.limits, signal, () => { entry.changed++; });

@@ -59,6 +59,7 @@ export async function manageMcp(env: Env, input: McpManageRequest) {
       } catch (error) {
         const setup = setupFailure(error);
         if (setup === "conflict") throw new McpSetupError("conflict");
+        if (record.server.transport.kind === "reverse-websocket") return { status: "unavailable", code: safeError(error).code, message: "请确认已保存注册凭据，节点已使用该凭据连接注册端点，然后重新检测。" };
         const code = setup === "credentials_required" ? setup : safeError(error).code;
         return { status: "unavailable", code, next: record.server.credential.kind === "oauth" ? "login" : "credentials",
           credentialsUrl: env.PUBLIC_ORIGIN + "/admin/#mcp-server=" + encodeURIComponent(input.id),
@@ -71,7 +72,7 @@ export async function manageMcp(env: Env, input: McpManageRequest) {
 export function createMcpManagementExtension(env: Env, allowed: (api: ToolExecutionApi, context: Context) => Promise<boolean>,
   changed: (refresh: boolean) => Promise<void>, record: (change: McpChange) => Promise<unknown>) {
   return defineExtension({ name: "cs.mcp.management", tools: [defineTool({ name: "mcp_manage", replay: "unsafe", callers: ["model"], parameters: Type.Object({ request: McpManageInput }, strict),
-    description: "管理运行时 HTTP MCP 服务（仅限主人本人回合）。流程：list/get 取最新 revision -> put 登记地址与认证方式（新服务 expectedRevision=absent；修改已有服务会清空旧凭据与工具选择）-> Token 由主人在管理页填写（勿在聊天索要），OAuth 用 login 取链接 -> probe 拉取目录 -> activate 选择工具（遇 tools_rejected 按 rejectedTools 调整重试）。每次变更后换用返回的新 revision；远端描述与 readOnlyHint 不可信，不确定时 readOnly 留空；新服务不自动对群或事件开放。",
+    description: "管理运行时 MCP 服务（反向 WebSocket：put 的 server 只填 id、transport=reverse-websocket，再由主人在管理页填写注册 Bearer）（仅限主人本人回合）。流程：list/get 取最新 revision -> put 登记地址与认证方式（新服务 expectedRevision=absent；修改已有服务会清空旧凭据与工具选择）-> Token 由主人在管理页填写（勿在聊天索要），OAuth 用 login 取链接 -> probe 拉取目录 -> activate 选择工具（遇 tools_rejected 按 rejectedTools 调整重试）。每次变更后换用返回的新 revision；远端描述与 readOnlyHint 不可信，不确定时 readOnly 留空；新服务不自动对群或事件开放。",
     execute: async ({ request: input }, api, context) => {
       if (!await allowed(api, context)) return { isError: true, output: [{ type: "text", text: "只有主人本人私聊或经过验证的网页回合可以管理 MCP 服务。" }] };
       try {
