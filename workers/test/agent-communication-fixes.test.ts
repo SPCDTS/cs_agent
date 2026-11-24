@@ -258,8 +258,10 @@ it("a child without coding_exec can receive, read and return only its registered
   const { cid, address } = await child(group);
   await env.SANDBOX.getByName(group).saveAttachment("/work/source.txt", new TextEncoder().encode("child-visible"), "child-source");
   const receipt = await runInDurableObject(env.THREAD.getByName(group), async (i, s) => {
-    const row = s.storage.sql.exec("SELECT * FROM inbound WHERE kind='message'").one();
-    return (i as any).sendAgentMessage({ to: address, text: "file", files: ["/work/source.txt"] }, "child-file", row);
+    const row = s.storage.sql.exec<{received_at:number}>("SELECT * FROM inbound WHERE kind='message'").one();
+    const args = { to: address, text: "file", files: ["/work/source.txt"] };
+    const ticket = await (i as any).reserveAgentMessage(args, "child-file", row.received_at);
+    return (i as any).sendAgentMessage(args, "child-file", row, undefined, ticket);
   });
   const parent = env.THREAD.getByName(group);
   expect((await parent.validateSubagentAccess(cid))?.capabilities.coding).toBe(false);
@@ -269,7 +271,10 @@ it("a child without coding_exec can receive, read and return only its registered
     expect((await i.subagentCoding(cid, { kind: "read", operationId: "private-read", path: "/work/private.txt" })).isError).toBe(true);
   });
   await runInDurableObject(env.SUBAGENT.getByName(address), async (i, s) => {
-    expect((await (i as any).sendAgentMessage({ to: group, text: "return", files: receipt.files }, "child-return")).status).toBe("accepted");
+    const row = s.storage.sql.exec<{received_at:number}>("SELECT received_at FROM inbox WHERE request_id=?", receipt.messageId).one();
+    const args = { to: group, text: "return", files: receipt.files };
+    const ticket = await (i as any).reserveAgentMessage(args, "child-return", row.received_at);
+    expect((await (i as any).sendAgentMessage(args, "child-return", undefined, ticket)).status).toBe("accepted");
     await s.storage.deleteAlarm();
   });
 });
