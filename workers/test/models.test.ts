@@ -16,6 +16,7 @@ import { RegistryDO, type ModelView } from "../src/registry";
 import { sha256 } from "../src/mcp/crypto";
 import { MediaRepository } from "../src/media/repository";
 import { input, syncedView } from "./helpers";
+import { subagentName } from "../src/subagent/model";
 import { threadView } from "../src/admin/read-views";
 
 const TOKEN = "test-admin-only";
@@ -493,6 +494,8 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
   expect((await selectModel({ provider: "openai-codex", id: future.slug, reasoningEffort: "high" })).status).toBe(200);
   const alarms = vi.spyOn(ModelAlarm.prototype, "dispatch");
   let parentCalls = 0, childCalls = 0;
+  const secondResponse = Promise.withResolvers<void>();
+  let gatedChildId: string | undefined;
   const owner = env.THREAD.getByName("owner");
   network({ [CODEX_BASE_URL + "/responses"]: async request => {
     expect(request.headers.has("content-encoding")).toBe(false);
@@ -514,6 +517,10 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
       const [child] = await display.subagentList();
       expect(child).toBeDefined();
       expect(await display.subagentTranscript(child!.id, 5)).toBeDefined();
+      if (step === 1) {
+        gatedChildId = child!.id;
+        await secondResponse.promise;
+      }
     } else {
       await owner.syncAdminView("owner");
       expect(await display.chatView("owner")).toBeDefined();
@@ -529,22 +536,33 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
       { type: "response.completed", response: { status: "completed", usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 } } },
     ].map(event => "data: " + JSON.stringify(event) + "\n\n").join(""), { headers: { "Content-Type": "text/event-stream" } });
   } });
-  expect(await owner.submit(input(55, "派子 agent 执行隔离验证", 10000001))).toEqual({ status: "done" });
   const display = threadView(env, "owner");
-  await vi.waitFor(async () => {
+  let childId: string;
+  try {
+    expect(await owner.submit(input(55, "派子 agent 执行隔离验证", 10000001))).toEqual({ status: "done" });
+    childId = await vi.waitUntil(() => gatedChildId, { timeout: 5000 });
+    const execution = env.SUBAGENT.getByName(subagentName("owner", childId));
+    expect(await execution.status()).toMatchObject({ meta: { id: childId, status: "running" }, inbox: { running: 1 } });
     await owner.syncAdminView("owner");
-    const [child] = await display.subagentList();
-    expect(child?.status).toBe("done");
-  });
+    expect(await display.subagentList()).toContainEqual(expect.objectContaining({ id: childId, status: "running" }));
+
+    // 父回合结束并不代表子回合完成；等待子 DO 落下回答并汇报，再单独核查投影。
+    secondResponse.resolve();
+    await vi.waitFor(async () => expect(await execution.status()).toMatchObject({
+      meta: { id: childId, status: "done" }, inbox: { reported: 1 },
+    }), { timeout: 5000 });
+  } finally {
+    secondResponse.resolve();
+  }
   await owner.syncAdminView("owner");
-  const [child] = await display.subagentList();
-  expect((await display.subagentTranscript(child.id, 10))?.entries.some(entry => entry.text === "完成")).toBe(true);
+  expect(await display.subagentList()).toContainEqual(expect.objectContaining({ id: childId, status: "done" }));
+  expect((await display.subagentTranscript(childId, 10))?.entries.some(entry => entry.text === "完成")).toBe(true);
   const requests = env.REQUESTS.getByName("main");
   const page = await requests.list({ since: 0, until: Date.now() + 1000, limit: 20 });
   const withSearch = page.requests.filter(r => r.toolCalls?.some(call => call.name === "web_search"));
   expect(withSearch).toHaveLength(3);
   expect(withSearch.every(request => request.contextWindow === future.context_window && request.model === future.slug)).toBe(true);
-  const childRequests = withSearch.filter(r => r.actor === child.id);
+  const childRequests = withSearch.filter(r => r.actor === childId);
   expect(childRequests).toHaveLength(2);
   expect(childRequests[0]!.binding!.turnId).toBe(childRequests[1]!.binding!.turnId);
   const previews = [];
@@ -552,7 +570,7 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
     const tools = (await requests.detail(request.id))!.tools.filter(t => t.name === "web_search");
     expect(tools).toHaveLength(1);
     expect(tools[0]).toMatchObject({ callId: request.id + ":ws_0", status: "done" });
-    if (request.actor === child.id) previews.push(tools[0]?.argumentPreview);
+    if (request.actor === childId) previews.push(tools[0]?.argumentPreview);
   }
   expect(previews.sort()).toEqual(["query: 后续文档", "query: 官方文档"].sort());
   const audit = await adminJson<{ events: { detail: unknown }[] }>("GET", "/admin/events?thread=owner&kind=web_search");
