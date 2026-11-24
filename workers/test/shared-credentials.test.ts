@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { RegistryDO } from "../src/registry";
 import { input } from "./helpers";
 import { scriptedModel } from "./events-helpers";
-import { boundMaterial, outbound, parseMaterial } from "../src/credentials/material";
+import { boundMaterial, FILE_LIMIT, outbound } from "../src/credentials/material";
 
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
 const group = "group:200000001", endpoint = "https://api.example.test/items";
@@ -107,11 +107,36 @@ it("curl 导出的 Cookie 保留 HttpOnly、域、路径和到期约束", () => 
     "api.example.test\tFALSE\t/\tTRUE\t1\told\tfixture-expired",
     "api.example.test\tFALSE\t/\tTRUE\t0\troot\tfixture-root",
   ].join("\n");
-  const material = parseMaterial(bytes(jar), "cookie");
   const policy = { kind: "cookie" as const, endpoints: [endpoint] };
+  const material = boundMaterial(bytes(jar), policy);
   const selected = boundMaterial(bytes(jar), { ...policy, cookieNames: ["sid"] });
   expect(outbound(selected, policy, new URL(endpoint)).value).toBe("sid=fixture-sid");
   expect(outbound(material, policy, new URL(endpoint)).value).toBe("sid=fixture-sid; root=fixture-root");
   expect(outbound(material, policy, new URL(endpoint + "foo")).value).toBe("root=fixture-root");
   expect(() => outbound(material, policy, new URL("https://other.test/"))).toThrow("credential_cookie_scope");
+});
+
+it("浏览器导出按范围、有效期和名称筛选，只校验和计数将要使用的条目", () => {
+  const policy = { kind: "cookie" as const, endpoints: [endpoint], cookieNames: ["timezoneOffset"] };
+  const row = (name: string, value: string, host = "api.example.test", path = "/", expires = 0) =>
+    [host, "FALSE", path, "TRUE", expires, name, value].join("\t");
+  const valid = row("timezoneOffset", "28800,0");
+  const jar = [
+    ...Array.from({ length: 128 }, () => row("timezoneOffset", "unused", "elsewhere.example.test")),
+    row("timezoneOffset", "invalid;value", "elsewhere.example.test"),
+    row("timezoneOffset", "invalid;value", "api.example.test", "/elsewhere"),
+    row("timezoneOffset", "invalid;value", "api.example.test", "/", 1),
+    row("other", "invalid;value"),
+    valid,
+  ];
+  const selected = boundMaterial(bytes(jar.join("\n")), policy);
+  expect(outbound(selected, policy, new URL(endpoint)).value).toBe("timezoneOffset=28800,0");
+  for (const invalid of ["left;right", "left\rright", "left\tright"]) {
+    expect(() => boundMaterial(bytes(row("timezoneOffset", invalid)), policy)).toThrow("credential_invalid_file");
+  }
+  const atLimit = Array(128).fill(valid).join("\n");
+  expect(() => boundMaterial(bytes(atLimit), policy)).not.toThrow();
+  expect(() => boundMaterial(bytes(atLimit + "\n" + valid), policy)).toThrow("credential_invalid_file");
+  expect(() => boundMaterial(bytes("x".repeat(FILE_LIMIT + 1)), policy)).toThrow("credential_file_size");
+  expect(() => boundMaterial(bytes(row("other", "unused")), policy)).toThrow("credential_cookie_unavailable");
 });

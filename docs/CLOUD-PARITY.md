@@ -76,7 +76,7 @@ BridgeDO 是 QQ 唯一发送事实源，RegistryDO 保存授权、人设、技�
 主人可以在私聊或 owner 管理页说“把刚才登录生成的 `/work/login/cookies.txt` 用于这个服务的查询，授权给 A 群”。Agent 根据服务取一个简短引用名，使用宿主工具直接导入已保存的文件。主人无需给凭证起名、粘贴内容或上传 Worker Secret。导入完成后，原文件仍位于主人的私有工作区。
 
 - 每份凭证独立授权。主人指定受信任的 HTTPS 查询地址，可以一次登记多个。默认精确匹配 HTTPS 来源和路径。主人也可以用 `https://api.example.com/*` 明确授权该来源的所有路径，子域名和其他端口需要单独授权。宿主允许查询参数，发送 GET 并拒绝重定向。应选择只提供业务数据的接口，目标服务会收到认证头。
-- 文件支持单行 Cookie 请求头、curl/Netscape 格式的 `cookies.txt`、单行 Bearer Token 或 API Key。导入 Cookie 文件时保留适用的域、路径和过期条件，也可只选登录所需的 Cookie 名。API Key 默认经 `X-API-Key` 发送，也可指定服务要求的 `X-*` 头。Registry 使用已有主密钥加密保存凭证。
+- 文件支持单行 Cookie 请求头、curl/Netscape 格式的 `cookies.txt`、单行 Bearer Token 或 API Key。导入 Cookie 文件时保留适用的域、路径和过期条件，也可只选登录所需的 Cookie 名。源文件上限为 16 KiB，筛选后至多保留 128 条。curl 导出的值可包含逗号。API Key 默认经 `X-API-Key` 发送，也可指定服务要求的 `X-*` 头。Registry 使用已有主密钥加密保存凭证。
 - 主人和获授权群的普通消息回合可在 Code Mode 里使用 `credentials` 命名空间。Skill 先调用 `credential_list` 查看本会话可用引用，再调用 `credential_request`。模型和群工作区只接收业务响应。工具限制为 64 KiB 文本，发现凭证值回显会扣留正文，HTTP 错误只返回状态或错误码。原生 Bash 可处理宿主工具取回的业务数据。
 - 主人重新登录后从新文件轮换凭证，各群继续使用同一引用。服务返回 401 或请求时 Cookie 已无有效条目，系统按现有主人告警设置提醒更新。撤销一个群的权限即移除它对该引用的访问。删除凭证会同时清除所有群授权。
 - 凭证管理和查询审计只记录操作、引用、结果和授权目标。新的凭证默认仅主人可用。定时、事件、Agent 来信和子任务不继承用户的交互授权。

@@ -25,12 +25,11 @@ export function endpoint(raw: string): URL {
 type Cookie = { name: string; value: string; domain?: string; subdomains?: boolean; path?: string; expires?: number };
 export type Material = { token: string } | { cookies: Cookie[] };
 
-function cookie(name: string, value: string): Cookie {
-  if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(name) || !/^[\x21-\x2b\x2d-\x3a\x3c-\x7e]*$/.test(value)) throw new Error("credential_invalid_file");
-  return { name, value };
+function validateCookie({ name, value }: Cookie): void {
+  if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(name) || !/^[\x21-\x3a\x3c-\x7e]*$/.test(value)) throw new Error("credential_invalid_file");
 }
 
-export function parseMaterial(input: Uint8Array, kind: Binding["kind"]): Material {
+function parseMaterial(input: Uint8Array, kind: Binding["kind"], selected: (c: Cookie) => boolean): Material {
   if (!input.length || input.length > FILE_LIMIT) throw new Error("credential_file_size");
   let raw: string;
   try { raw = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(input).replace(/(?:\r?\n)+$/, ""); }
@@ -46,25 +45,32 @@ export function parseMaterial(input: Uint8Array, kind: Binding["kind"]): Materia
       if (!line || line.startsWith("#") && !line.startsWith("#HttpOnly_")) continue;
       const fields = line.replace(/^#HttpOnly_/, "").split("\t");
       const [domain, subs = "", path, secure = "", expiry = "", name = "", value = ""] = fields;
+      const record: Cookie = { name, value, domain: domain?.replace(/^\./, "").toLowerCase(), subdomains: subs === "TRUE", path,
+        expires: /^\d{1,12}$/.test(expiry) ? Number(expiry) : undefined };
+      if (!selected(record)) continue;
       if (fields.length !== 7 || !domain || !/^\.?[a-z\d-]+(?:\.[a-z\d-]+)*$/i.test(domain) || !path?.startsWith("/")
-        || !/^(TRUE|FALSE)$/.test(subs) || !/^(TRUE|FALSE)$/.test(secure) || !/^\d{1,12}$/.test(expiry)) throw new Error("credential_invalid_file");
-      cookies.push({ ...cookie(name, value), domain: domain.replace(/^\./, "").toLowerCase(), subdomains: subs === "TRUE", path, expires: Number(expiry) });
+        || !/^(TRUE|FALSE)$/.test(subs) || !/^(TRUE|FALSE)$/.test(secure) || record.expires === undefined) throw new Error("credential_invalid_file");
+      validateCookie(record);
+      cookies.push(record);
     }
   } else {
-    for (const field of raw.replace(/^Cookie:\s*/i, "").split(";")) {
-      const pair = field.trim(), equals = pair.indexOf("=");
+    for (const field of raw.replace(/^Cookie:[ \t]*/i, "").split(";")) {
+      const pair = field.replace(/^ +| +$/g, ""), equals = pair.indexOf("=");
+      const record = { name: equals < 0 ? pair : pair.slice(0, equals), value: pair.slice(equals + 1) };
+      if (!selected(record)) continue;
       if (equals < 1) throw new Error("credential_invalid_file");
-      cookies.push(cookie(pair.slice(0, equals), pair.slice(equals + 1)));
+      validateCookie(record);
+      cookies.push(record);
     }
   }
-  if (!cookies.length || cookies.length > 128) throw new Error("credential_invalid_file");
+  if (cookies.length > 128) throw new Error("credential_invalid_file");
   return { cookies };
 }
 
 function matchesScope(c: Cookie, target: URL, wholeOrigin = false): boolean {
-  if (!c.domain || !c.path) return true;
+  if (!c.domain) return true;
   const domainMatches = target.hostname === c.domain || !!c.subdomains && target.hostname.endsWith("." + c.domain);
-  const pathMatches = target.pathname === c.path || target.pathname.startsWith(c.path.endsWith("/") ? c.path : c.path + "/");
+  const pathMatches = !c.path || target.pathname === c.path || target.pathname.startsWith(c.path.endsWith("/") ? c.path : c.path + "/");
   return domainMatches && (wholeOrigin || pathMatches);
 }
 
@@ -72,15 +78,15 @@ const unexpired = (c: Cookie) => !c.expires || c.expires > Date.now() / 1000;
 
 /** 浏览器导出的文件可能包含多个站点，只接管允许的查询可使用的条目。 */
 export function boundMaterial(bytes: Uint8Array, binding: Binding): Material {
-  const material = parseMaterial(bytes, binding.kind);
-  if ("token" in material) return material;
   const targets = binding.endpoints.map(raw => new URL(raw));
   const applies = (c: Cookie, target: URL) => matchesScope(c, target, target.pathname === "/*");
-  const cookies = material.cookies.filter(c => unexpired(c) && (!binding.cookieNames || binding.cookieNames.includes(c.name))
+  const material = parseMaterial(bytes, binding.kind, c => unexpired(c) && (!binding.cookieNames || binding.cookieNames.includes(c.name))
     && targets.some(target => applies(c, target)));
+  if ("token" in material) return material;
+  const { cookies } = material;
   if (binding.cookieNames?.some(name => !cookies.some(c => c.name === name))
     || targets.some(target => !cookies.some(c => applies(c, target)))) throw new Error("credential_cookie_unavailable");
-  return { cookies };
+  return material;
 }
 
 export function outbound(material: Material, binding: Binding, target: URL) {
