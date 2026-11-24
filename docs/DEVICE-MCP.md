@@ -12,7 +12,7 @@ cs-agent 通过名为 `cua` 的反向 MCP 读取自托管的 Cua Spaces 目录�
 
 静态模式需要核对设备身份。Cua SDK 0.31.0 按主机名和端口构造 `direct:<host:port>`。同一 Relay 的多个 URL 即便路径含有不同 machine ID，在聚合目录里仍可能得到同一个 ID，后登记的设备可能覆盖原端点。每台设备需要独立且稳定的内部主机名或端口，并将该地址和允许注册的设备身份绑定。换机时先撤回原分配，核对新设备身份后再授权。[Cua 0.31.0 的设备登记实现](https://github.com/trycua/cua/blob/cua-sdk-v0.31.0/libs/cua/crates/cua-spaces/src/spaces.rs#L1322-L1382)
 
-公网入口只接受所需的设备注册流量。设备代理路径 `/m/<machine-id>/…` 和聚合 MCP 仅能从内部访问。设备与控制端凭据分开保存，按各自身份鉴权。管理台中的「节点在线」表示反向桥已连接 Worker。设备状态和 Driver 工具目录要从对应的 Space 查询。
+公网入口只接受所需的设备注册流量。设备代理路径 `/m/<machine-id>/…` 和聚合 MCP 仅能从内部访问。设备与控制端凭据分开保存，按各自身份鉴权。管理台中的「节点在线」表示反向桥已连接 Worker。设备状态和 Driver 工具目录要从对应的 Space 查询。安装步骤、按设备分配端口的示例和凭据轮换方式见[控制机部署指南](../deploy/cua/README.md)。
 
 ## 会话分配与生产验收
 

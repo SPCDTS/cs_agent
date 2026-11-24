@@ -1,0 +1,25 @@
+[Unit]
+Description=Cua device directory daemon
+
+[Service]
+User=cua-directory
+Group=cua-directory
+StateDirectory=cs-agent-cua
+StateDirectoryMode=0700
+RuntimeDirectory=cs-agent-cua
+RuntimeDirectoryMode=0700
+Environment=CUA_HOME=/var/lib/cs-agent-cua CUA_CREDENTIAL_STORE=file CUA_MESH=off CUA_TELEMETRY=0 DO_NOT_TRACK=1 CUA_TELEMETRY_FORBID_NETWORK=1
+Environment=CUA_RELAY_URL=http://127.0.0.1:1 CUA_VM_GUARD=0
+ExecStart=/usr/local/bin/cua daemon start --foreground --socket /run/cs-agent-cua/cua.sock --loopback off
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

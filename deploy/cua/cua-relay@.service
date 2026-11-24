@@ -1,0 +1,19 @@
+[Unit]
+Description=Cua static registration relay for %i
+
+[Service]
+DynamicUser=yes
+LoadCredential=registration:/etc/cs-agent/cua/relays/%i.token
+ExecStart=/usr/local/bin/cua-relay --listen 127.0.0.1:%i --token-file %d/registration --max-machines-per-token 1
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

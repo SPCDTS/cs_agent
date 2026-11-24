@@ -1,0 +1,55 @@
+# 将示例域名和 machine-id 换成实际值。两个设备不能共用端口或注册令牌。
+{
+	servers 127.0.0.1:18281 {
+		protocols h1 h2 h2c
+	}
+	servers 127.0.0.1:18282 {
+		protocols h1 h2 h2c
+	}
+}
+
+(join) {
+	@{args[0]} {
+		method GET
+		path /relay/v1/connect
+		header Upgrade websocket
+		header X-Cua-Machine-Id {args[0]}
+	}
+	handle @{args[0]} {
+		reverse_proxy 127.0.0.1:{args[1]} {
+			header_up X-Cua-Machine-Id {args[0]}
+		}
+	}
+}
+
+relay.example.org {
+	import join computer-alpha 18181
+	import join computer-bravo 18182
+	handle {
+		respond 404
+	}
+}
+
+# Cua 的 direct ID 由 host:port 决定。每台设备有一个独占的、仅接受目录请求的端口。
+(directory) {
+	bind 127.0.0.1
+	@catalog {
+		method POST
+		header Content-Type application/grpc*
+		path /m/{args[0]}/cua.env.v1.SystemService/GetCapabilities /m/{args[0]}/cua.env.v1.DriverService/ListTools
+	}
+	handle @catalog {
+		reverse_proxy h2c://127.0.0.1:{args[1]}
+	}
+	handle {
+		respond 404
+	}
+}
+
+http://127.0.0.1:18281 {
+	import directory computer-alpha 18181
+}
+
+http://127.0.0.1:18282 {
+	import directory computer-bravo 18182
+}
