@@ -235,6 +235,7 @@ export class ThreadMcp {
           const before = await assigned();
           if (!cuaQueryAllowed(tool.name, owned, before)) { classification = 'denied'; return mcpFailure(classification); }
           const remote = await connection.callTool(tool.name, owned, {scope}, signal);
+          outputBytes = jsonBytes(remote);
           // 目录读取期间可能重置会话、撤销设备、轮换节点。绝不返回旧分配中的设备内容。
           const recipient = await authorized();
           const after = await assigned();

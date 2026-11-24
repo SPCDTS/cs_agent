@@ -194,6 +194,10 @@ it('主人发消息可读主机名，额外的命令参数、定时任务与委�
         const name = toolNames(catalog,tool).nativeName;
         const call = (args:object,actor = who) => mcp.invoke({name,args,operationId:crypto.randomUUID()},async () => actor);
         expect((await call({space:device})).structuredOutput).toEqual({hostname:'mac-fixture.local'});
+        const audit = state.storage.sql.exec<{detail:string}>("SELECT detail FROM events WHERE kind='mcp_call'").one();
+        const remoteBytes = Buffer.byteLength(JSON.stringify({content:[{type:'text',text:'mac-fixture.local'}]}));
+        expect(JSON.parse(audit.detail)).toMatchObject({server:'cua',tool:name,result:'ok',outputBytes:remoteBytes});
+        expect(audit.detail).not.toContain('mac-fixture.local');
         for (const kind of ['schedule','subagent','event','agent'] as const) {
           expect((await call({space:device},{...who,kind})).isError).toBe(true);
         }
