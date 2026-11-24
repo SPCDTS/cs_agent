@@ -3,9 +3,8 @@ import { Check } from 'typebox/value';
 import { Type, type Static, type TSchema } from 'typebox';
 import { createOAuthFetch } from '../mcp/oauth-fetch';
 import { CloudflareChange, CloudflareInventory, DnsName, type Change } from './contracts';
-import type { tunnelSettings } from './tunnel';
 
-type Target = ReturnType<typeof tunnelSettings>;
+type Target = { account: string; zone: string; domain: string; token: string };
 type Pending = { id: string; account: string; zone: string; domain: string; payload: string; expires: number; status: string };
 const origin = 'https://api.cloudflare.com', request = createOAuthFetch(() => [origin]);
 const s = Type.String(), name = Type.Object({ name: s });

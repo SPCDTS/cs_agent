@@ -1,13 +1,6 @@
 import { Type, type Static } from 'typebox';
 const strict = { additionalProperties: false };
-export const DeviceId = Type.String({ pattern: '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$' });
-export const DeviceService = Type.Object({ id: DeviceId, name: Type.String(), capability: Type.Union([Type.Literal('shell'), Type.Literal('desktop')]) }, strict);
-export type DeviceService = Static<typeof DeviceService>;
-export const DeviceCreate = Type.Object({ id: DeviceId, name: Type.String({ minLength: 1, maxLength: 80 }), desktop: Type.Boolean() }, strict);
-export const DeviceClaim = Type.Object({ claim: Type.String({ pattern: '^[a-f0-9]{64}$' }) }, strict);
-export const DeviceView = Type.Object({ id: DeviceId, name: Type.String(), desktop: Type.Boolean(), state: Type.Union([
-  Type.Literal('provisioning'), Type.Literal('pairing'), Type.Literal('ready'), Type.Literal('revoked'),
-]), createdAt: Type.Number(), expiresAt: Type.Number(), serverId: Type.String(), desktopServerId: Type.Union([Type.String(), Type.Null()]) }, strict);
+const ChangeId = Type.String({ pattern: '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$' });
 export const CloudflareStatus = Type.Object({ scopes: Type.Array(Type.String()), available: Type.Boolean(), domain: Type.Union([Type.String(), Type.Null()]), reauth: Type.Boolean() }, strict);
 export const CloudflareLink = Type.Object({ url: Type.String() }, strict);
 export const CloudflareCallback = Type.Object({ state: Type.String({ pattern: '^[A-Za-z0-9_-]{43}$' }), code: Type.String({ minLength: 1, maxLength: 8192 }) }, strict);
@@ -21,6 +14,4 @@ export const CloudflareChange = Type.Union([
   Type.Object({ action: Type.Literal('bucket_create'), name: Type.String({ pattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$' }) }, strict),
 ]);
 export type Change = Static<typeof CloudflareChange>;
-export const CloudflareChangeList = Type.Array(Type.Object({ id: DeviceId, account: Type.String(), domain: Type.String(), change: CloudflareChange, expires: Type.Number(), status: Type.String() }, strict));
-export const DeviceList = Type.Object({ configured: Type.Boolean(), cloudflare: Type.Optional(CloudflareStatus), devices: Type.Array(DeviceView) }, strict);
-export const DeviceSetup = Type.Object({ device: DeviceView, pairingUrl: Type.String() }, strict);
+export const CloudflareChangeList = Type.Array(Type.Object({ id: ChangeId, account: Type.String(), domain: Type.String(), change: CloudflareChange, expires: Type.Number(), status: Type.String() }, strict));

@@ -1,11 +1,11 @@
 import { EnvironmentSnapshotsSchema } from "./environments";
+import { CuaSnapshot, cuaOutput } from "../cua/discovery";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { classifyError } from "../shared/diagnostics";
 import { mcpFailure } from "./result";
 import { mcpCodemodeResult, mcpCodemodeSchema, MCP_RESULT_INSTRUCTIONS } from "./codemode-result";
 import { defineExtension, defineTool, section, type Registry, type ToolExecutionResult } from "@earendil-works/pi-durable";
-import { deviceToolPresentation, deviceToolNamespace } from "./device-tools";
 import { installCodemode } from "../codemode";
 import { SandboxReadOutput } from "../tools/coding";
 import { boundedJson, compileMcpSchema } from "./schema";
@@ -62,12 +62,12 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
     registry.install(defineExtension({ name: "cs.subagent.mcp",
       sections: [section("mcp-delegation", () => "MCP 只能使用派出目录、环境范围与父线程当前授权的交集；写调用可能等待逐次审批。网页来源保持网页，不得另行通知 QQ。" + MCP_RESULT_INSTRUCTIONS)] }));
     for (const catalog of catalogs) registry.install(defineExtension({ name: `cs.subagent.mcp.${catalog.serverId}`,
-      ...(catalog.tools.length ? { namespace: deviceToolNamespace(catalog.serverId, catalog.device) } : {}),
+      ...(catalog.tools.length ? { namespace: { name: catalog.serverId, description: "" } } : {}),
       tools: catalog.tools.map(tool => {
         const name = toolNames(catalog, tool).nativeName, input = compileMcpSchema(tool.inputSchema, MCP_CONFIG.limits);
         const output = tool.outputSchema ? compileMcpSchema(tool.outputSchema, MCP_CONFIG.limits) : undefined;
-        return defineTool({ ...deviceToolPresentation(catalog.device, tool.name), name, description: tool.description, parameters: input.schema,
-          structuredOutputSchema: mcpCodemodeSchema(output?.schema), replay: "unsafe", callers: ["tools"],
+        return defineTool({ name, description: tool.description, parameters: input.schema,
+          structuredOutputSchema: mcpCodemodeSchema(cuaOutput(catalog.serverId,tool.name) ?? output?.schema), replay: "unsafe", callers: ["tools"],
           execute: async (args, api) => mcpCodemodeResult(await host.subagentMcp(id, { name, args, operationId: String(api.taskId) })) });
       }) }));
     if (snapshot?.resourceAllow?.some(row => row.prefixes.length)) registry.install(defineExtension({ name: "cs.subagent.mcp.resources", tools: (["list", "templates", "read"] as const).map(action => defineTool({
@@ -77,7 +77,6 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
     })) }));
   }
   return installCodemode(registry, {
-    catalog: "delegated-snapshot",
     allowed: async () => {
       const access = await host.validateSubagentAccess(id);
       return !!access; // 至少可调用附件 read；exec/写入/MCP 仍由父宿主逐次独立检查。
@@ -115,7 +114,7 @@ export function createSubagentCapabilityHost(stub: object): SubagentCapabilityHo
       if (value === null || value === undefined) return;
       const snapshot = Type.Object({ scope: Type.String(), actor: Type.String(), generation: Type.Integer({ minimum: 0 }),
         replyChannel: Type.Union([Type.Literal("web"), Type.Literal("qq")]), catalogJson: Type.String(), tools: Type.Array(Type.String()), environments: Type.Optional(EnvironmentSnapshotsSchema),
-        resourceAllow: Type.Optional(Type.Array(Type.Object({ server: Type.String(), prefixes: Type.Array(Type.String()) }))) });
+        cua: Type.Optional(CuaSnapshot), resourceAllow: Type.Optional(Type.Array(Type.Object({ server: Type.String(), prefixes: Type.Array(Type.String()) }))) });
       const schema = Type.Object({
         authority: McpAuthoritySchema,
         sandbox: Type.Optional(SandboxResourceSchema),

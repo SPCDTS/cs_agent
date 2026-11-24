@@ -10,10 +10,10 @@
   - 右侧可折叠观测抽屉由顶部「拓扑」「上下文」按钮按需展开：支持查看最近 24 小时 Agent 拓扑（全局最多 5 个最近活跃子 agent + 对应父会话与近期活跃主 agent，点击或键盘 Enter/空格切换对话）及按当前 agent 隔离的上下文监控趋势（详见 [架构与运行设计](ARCHITECTURE.md#5-上下文监控与-codemode-执行组)）。
   - 选择已有 QQ 会话继续同一 Harness root，显示最近 100 条 QQ / 网页消息，以及当前会话已入模的 Agent 收件、子任务报告、外部事件、Agent 发件回执和模型回答。未入模的内部收件只显示状态；模型回答不等于 QQ 投递，Agent 入箱不等于已读。仅展示白名单正文，不展开宿主说明、推理和工具原始参数；网页发言使用稳定 UUID（断网重试不重复入队），回复留在网页。点击子 agent 在中间同一对话区只读查看，保留父会话草稿。
 - **管理分区**（进入对应视图才按需加载，不增加后台轮询；各分区通过顶部二级 Sub-tabs 切换，低频大表单默认折叠收起）：
-  - **模型与接入**：分「模型与账号」「MCP 与设备」「QQ 响应与状态」子标签，涵盖模型切换（CAS）、Codex 原生多账号授权/目录刷新/登出、动态 MCP 服务、设备接入及 QQ 响应设置。
+  - **模型与接入**：分「模型与账号」「MCP 与设备」「QQ 响应与状态」子标签，涵盖模型切换（CAS）、Codex 原生多账号授权/目录刷新/登出、动态 MCP 服务、反向节点连接状态、Cloudflare 账户授权及 QQ 响应设置。
   - **会话与记忆**：分「长期记忆」「活跃会话」「技能目录」「全局人格」子标签，涵盖长期记忆筛选/编辑/冲突确认/画像复核/整理回滚与主人主线程行为规则管理（详见 [记忆系统](MEMORY-SYSTEM.md)）、会话状态与停止/重置、技能 `SKILL.md` 编辑与全局人格设定。
   - **任务与事件**：分「定时任务」「事件来源」「审计事件」子标签，涵盖定时任务管理、GitHub App 与 Gmail 事件来源配置、审计事件（每页 10 条）。
-  - **权限与运维**：分「跨会话授权」「MCP 群授权与审批」「额度与保留期」「告警与发送账本」子标签，涵盖跨目标发送/定时授权、群 MCP 授权与置顶逐次审批、运维设置 CAS、告警与 QQ 发送账本/核对。
+  - **权限与运维**：分「跨会话授权」「MCP 群授权与审批」「额度与保留期」「告警与发送账本」子标签，涵盖跨目标发送/定时授权、Cua 设备按会话分配、群 MCP 授权与置顶逐次审批、运维设置 CAS、告警与 QQ 发送账本/核对。
   - **工作区**：双栏展示持久文件列表与鉴权下载、停止容器（保留 R2 快照）、检查与选择合并子任务工作区。
 
 聊天与管理只读视图来自执行对象主动推送到 `RequestsDO` 的最终一致展示副本；首次同步前返回 `503 view_pending`，不会因查询唤醒执行 DO。管理写命令仍直接进入业务 DO 并尽力同步展示结果。
@@ -31,7 +31,9 @@
 | 记忆与规则 | `GET /admin/memory[/list\|/:id\|/candidates\|/jobs\|/proposals]`、`POST /admin/memory/{entries,consolidate,proposals}`、`PUT/DELETE /admin/memory/:id`、`PUT /admin/memory/profile`、`/admin/memory/rules/*` | 记忆增删改查、冲突/画像/整理/回滚与主人主线程行为规则 |
 | 技能、权限与运维 | `GET/PUT/DELETE /admin/skills[/:name]`、`POST /admin/skills/:name/{enable,disable,publish}`、`GET/PUT /admin/persona`、`GET/POST /admin/grants[/revoke]`、`GET/PUT /admin/ops-settings`、`GET /admin/alerts`、`GET /admin/deliveries[/:id]`、`POST /admin/deliveries/:id/reconcile` | 技能、人设、授权、运维设置、告警与发送账本核对 |
 | 定时与事件 | `GET /admin/schedules`、`POST /admin/schedules/:id/{pause,resume,delete,run-now}`、`GET /admin/event-sources`、`POST /admin/event-sources/:source/{pause,resume}`、`PUT /admin/event-sources/:source/settings`、`/admin/github/*` | 定时任务与 GitHub / Gmail 事件来源管理 |
-| MCP 与设备 | `/admin/mcp/servers*`、`POST /admin/mcp/manage`、`POST /admin/mcp/:server/{login-link,logout,refresh}`、`GET/PUT /admin/mcp/access`、`GET /admin/mcp/approvals`、`POST /admin/mcp/approvals/:id/{approve,reject}`、`/admin/devices*` | 动态 MCP 服务、群授权、逐次审批与设备接入 |
+| MCP 与设备 | `/admin/mcp/servers*`、`POST /admin/mcp/manage`、`POST /admin/mcp/:server/{login-link,logout,refresh}`、`GET/PUT /admin/mcp/access`、`GET /admin/mcp/approvals`、`POST /admin/mcp/approvals/:id/{approve,reject}` | 动态 MCP 服务、节点在线状态、群授权与逐次审批 |
+| Cua 设备目录与分配 | `GET /admin/cua/devices`、`GET/PUT /admin/cua/grants` | 查看桥接状态、设备卡片与已有分配。写入时携带 `expectedRevision` 并替换指定会话的设备列表；删除已有分配时可离线操作。 |
+| Cloudflare 账户管理 | `GET /admin/cloudflare`、`POST /admin/cloudflare/start`、`POST /admin/cloudflare/complete`、`GET /admin/cloudflare/changes`、`POST /admin/cloudflare/changes/:id/{approve,reject}` | 查看账户授权及审核模型提交的资源变更 |
 | 工作区与媒体 | `GET /admin/threads/:thread/workspace[/file\|/children/:childId]`、`POST /admin/threads/:thread/workspace/{reset-runtime,merge}`、`POST /admin/threads/:key/sandbox/reset`、`POST/GET /media/assets/:scope[/:id]` | 持久工作区只读/下载/合并、容器停止与私有媒体 |
 
 ## 3. 代码结构与构建

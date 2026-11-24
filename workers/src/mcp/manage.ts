@@ -59,8 +59,10 @@ export async function manageMcp(env: Env, input: McpManageRequest) {
       } catch (error) {
         const setup = setupFailure(error);
         if (setup === "conflict") throw new McpSetupError("conflict");
-        if (record.server.transport.kind === "reverse-websocket") return { status: "unavailable", code: safeError(error).code, message: "请确认已保存注册凭据，节点已使用该凭据连接注册端点，然后重新检测。" };
-        const code = setup === "credentials_required" ? setup : safeError(error).code;
+        const failure = safeError(error).code;
+        if (failure === "cua_identity") return { status: "unavailable", code: failure, message: "请将 Cua 目录桥登记为名为 cua 的反向连接，并为其他 MCP 服务使用独立 ID。" };
+        if (record.server.transport.kind === "reverse-websocket") return { status: "unavailable", code: failure, message: "请确认已保存注册凭据，节点已使用该凭据连接注册端点，然后重新检测。" };
+        const code = setup === "credentials_required" ? setup : failure;
         return { status: "unavailable", code, next: record.server.credential.kind === "oauth" ? "login" : "credentials",
           credentialsUrl: env.PUBLIC_ORIGIN + "/admin/#mcp-server=" + encodeURIComponent(input.id),
           message: "连接未完成。检查服务地址与认证方式；Token 在管理页填写，OAuth 使用 login。登录或保存凭据后重新 get、probe、activate。" };

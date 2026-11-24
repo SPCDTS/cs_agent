@@ -1,7 +1,7 @@
 import { env, runInDurableObject, reset } from 'cloudflare:test';
 import { afterEach, it, expect, vi } from 'vitest';
-import { CloudflareGrant } from '../src/devices/cloudflare';
-import { CloudflareManagement } from '../src/devices/cloudflare-management';
+import { CloudflareGrant } from '../src/cloudflare/cloudflare';
+import { CloudflareManagement } from '../src/cloudflare/cloudflare-management';
 import { TokenVault, sha256 } from '../src/mcp/crypto';
 import { TEST_STORE_KEY, adminEnv } from './mcp-helpers';
 import worker from '../src/index';
@@ -51,7 +51,7 @@ it('PKCE 回调仅使用一次，匹配活动父域，续期轮换加密令牌�
     expect(grant.status().reauth).toBe(true);
   });
 });
-it('首次省略 scope 仅保存设备必需权限，空 scope 和非 JSON 的 Zone 响应返回明确错误', async () => {
+it('首次省略 scope 仅保存登记的必需权限，空 scope 和非 JSON 的 Zone 响应返回明确错误', async () => {
   await runInDurableObject(env.REGISTRY.getByName('main'), async (_instance,state) => {
     const grant = new CloudflareGrant(state.storage.sql,new TokenVault(TEST_STORE_KEY),instance);
     grant.initialize();
@@ -104,11 +104,11 @@ it('模型申请绑定资源，管理台批准只执行一次，拒绝或过期�
   });
 });
 it('只有回调可公开访问，浏览器二次提交和审批需要管理口令', async () => {
-  const base = env.PUBLIC_ORIGIN + '/admin/devices/cloudflare';
+  const base = env.PUBLIC_ORIGIN + '/admin/cloudflare';
   for (const path of ['/start','/complete','/changes/' + crypto.randomUUID() + '/approve']) {
     expect((await worker.fetch(new Request(base + path, {method:'POST'}), adminEnv())).status).toBe(401);
   }
-  const response = await worker.fetch(new Request(base + '/callback?state=' + 's'.repeat(43) + '&code=sample'),adminEnv());
+  const response = await worker.fetch(new Request(env.PUBLIC_ORIGIN + '/admin/devices/cloudflare/callback?state=' + 's'.repeat(43) + '&code=sample'),adminEnv());
   expect(response.status).toBe(303); expect(response.headers.get('location')).toMatch(/^\/admin\/#cloudflare\?/);
   expect(response.headers.get('referrer-policy')).toBe('no-referrer');
 });

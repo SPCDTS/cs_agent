@@ -3,24 +3,11 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
-export const bearerDigest = (value: string) => createHash('sha256').update(value).digest();
+const bearerDigest = (value: string) => createHash('sha256').update(value).digest();
 
-export interface LocalMcpSession {
-  server: Server;
-  onClose?: () => void;
-}
-
-export interface LocalMcpHttpOptions<P> {
+interface LocalMcpHttpOptions<P> {
   authenticate(authorization: string): P | undefined;
-  createSession(principal: P): LocalMcpSession;
-  path?: string;
-  maxBodyBytes?: number;
-  requestTimeout?: number;
-}
-
-export function singleBearerAuth(token: string): (authorization: string) => true | undefined {
-  const expected = bearerDigest('Bearer ' + token);
-  return authorization => timingSafeEqual(expected, bearerDigest(authorization)) ? true : undefined;
+  createSession(principal: P): Server;
 }
 
 export function multiBearerAuth<P>(entries: readonly { principal: P; token: string }[]): (authorization: string) => P | undefined {
@@ -47,9 +34,7 @@ async function readJsonBody(req: IncomingMessage, maxBodyBytes: number): Promise
 }
 
 export function createLocalMcpHttpServer<P>(options: LocalMcpHttpOptions<P>) {
-  const expectedPath = options.path ?? '/mcp';
-  const maxBodyBytes = options.maxBodyBytes ?? 512 * 1024;
-  const server = createServer(async (req, res) => {
+  return createServer(async (req, res) => {
     const principal = options.authenticate(req.headers.authorization ?? '');
     if (principal === undefined) {
       res.writeHead(401, { 'WWW-Authenticate': 'Bearer', 'Cache-Control': 'no-store' }).end();
@@ -59,7 +44,7 @@ export function createLocalMcpHttpServer<P>(options: LocalMcpHttpOptions<P>) {
       res.writeHead(403).end();
       return;
     }
-    if (req.url !== expectedPath) {
+    if (req.url !== '/mcp') {
       res.writeHead(404).end();
       return;
     }
@@ -72,7 +57,7 @@ export function createLocalMcpHttpServer<P>(options: LocalMcpHttpOptions<P>) {
       return;
     }
     try {
-      const body = await readJsonBody(req, maxBodyBytes);
+      const body = await readJsonBody(req, 512 * 1024);
       if (!body.ok) {
         res.writeHead(body.status).end();
         return;
@@ -80,16 +65,13 @@ export function createLocalMcpHttpServer<P>(options: LocalMcpHttpOptions<P>) {
       const session = options.createSession(principal);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       res.once('close', () => {
-        session.onClose?.();
         void transport.close().catch(() => undefined);
-        void session.server.close().catch(() => undefined);
+        void session.close().catch(() => undefined);
       });
-      await session.server.connect(transport);
+      await session.connect(transport);
       await transport.handleRequest(req, res, body.value);
     } catch {
       if (!res.headersSent) res.writeHead(400).end();
     }
   });
-  if (options.requestTimeout !== undefined) server.requestTimeout = options.requestTimeout;
-  return server;
 }

@@ -1,4 +1,3 @@
-import { serviceLabel } from "./device-label";
 import { $, ApiError, api, el, fail, loadOverview, readToken, show } from "./app";
 import { Check } from "typebox/value";
 import { readApi } from "./api";
@@ -20,6 +19,8 @@ export function mcpServerRender(id:string){
   for(const action of ["login","probe","disable","remove"]){const button=$("mcp-server-"+action);if(button instanceof HTMLButtonElement)button.disabled=!record;}
   $("mcp-server-enable").disabled=!record?.discovered;
   $("mcp-server-state").textContent=server?(server.enabled?"已启用":"尚未启用")+(server.credential.kind==="managed"?(record?.credentialSet?" · 已保存凭据":" · 等待凭据"):""):"填写新服务的地址与认证方式。";
+  if(server?.transport.kind==="reverse-websocket" && record?.credentialSet)
+    $("mcp-server-state").textContent += record.online===undefined?" · 节点状态未知":record.online?" · 节点在线":" · 节点离线";
   const list=$("mcp-server-tools");list.replaceChildren();
   if(server)for(const tool of record?.discovered||[]){
     const enabled=el("input",{type:"checkbox","data-tool":tool.name});enabled.checked=server.tools.allow.includes(tool.name);
@@ -33,7 +34,7 @@ export async function loadMcpServers(selected=mcpServers.selected){
   if(!readToken())return;const version=++mcpServers.loading,epoch=cs.epoch;
   const data=await readApi(McpServersSchema,"GET","/admin/mcp/servers");if(version!==mcpServers.loading||epoch!==cs.epoch)return;
   mcpServers.rows=data.servers;const select=$("mcp-server-select");
-  select.replaceChildren(el("option",{value:"",text:"新增服务"}),...data.servers.map(row=>el("option",{value:row.server.id,text:serviceLabel(row.server.id,row.device),title:row.server.id})));
+  select.replaceChildren(el("option",{value:"",text:"新增服务"}),...data.servers.map(row=>el("option",{value:row.server.id,text:row.server.id,title:row.server.id})));
   mcpServerRender(selected);
 }
 export async function mcpServerAction(action:ServerAction){

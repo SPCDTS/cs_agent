@@ -10,15 +10,16 @@ import type { Resource, ResourceTemplate } from "@modelcontextprotocol/sdk/types
 import { McpAuthoritySchema, mcpAuthority, mcpCallerScope, sameMcpOrigin, type McpAuthority, type McpAuthorization, type McpCapabilitySnapshot, type McpToolSelection } from "./access";
 import { allowedResource, resourceInCatalog } from "./resources";
 export type { McpAuthority, McpAuthorization, McpCapabilitySnapshot } from "./access";
-import { MCP_CONFIG, type DeviceToolLabel, type McpConfig, type McpServerConfig } from "./config";
+import { MCP_CONFIG, type McpConfig, type McpServerConfig } from "./config";
 import { makeCatalog, restoreCatalog, saveCatalog, type Catalog, type CatalogTool } from "./catalog";
 import { McpConnection, safeError } from "./connection";
 import { compileMcpSchema, boundedJson } from "./schema";
 import { McpPolicyError, McpPolicyStore, type McpGrantInput } from "./policy";
-import { deviceToolPresentation, deviceToolNamespace } from "./device-tools";
 import { digest, jsonBytes, toolNames, serverDigest } from "./names";
 import { convertMcpResult, mcpFailure } from "./result";
 import { mcpCodemodeResult, mcpCodemodeSchema, MCP_RESULT_INSTRUCTIONS } from "./codemode-result";
+import { cuaOutput, cuaQueryAllowed, cuaResult, cuaSubject, cuaTools, isCuaTool } from "../cua/discovery";
+import { cuaCards } from "../cua/contracts";
 
 const KNOWN_MCP_CODES = new Set(["denied", "queue_busy", "connections_busy", "tool_retired", "catalog_changed_during_refresh", "timeout"]);
 function mcpErrorCode(error: unknown): string {
@@ -32,11 +33,9 @@ const MCP_RULE = "MCP 默认仅 owner 私聊可用，群仅可使用显式授权
 export class ThreadMcp {
   private readonly entries = new Map<string, Entry>();
   private stopped = false;
-  private deviceLabels: Map<string, DeviceToolLabel>;
   readonly policy: McpPolicyStore;
   constructor(private readonly db: SqliteDatabase, private readonly env: Env, private readonly registry: Registry,
     private readonly authorize: AuthorizeMcp, private config: McpConfig = MCP_CONFIG, private readonly options: { scope?: string; callerNamespace?: string; current?(id: string, digest: string): Promise<boolean> } = {}) {
-    this.deviceLabels = new Map(Object.entries(config.deviceLabels ?? {}));
     this.policy = new McpPolicyStore(db, config);
     if (config.enabled) for (const server of config.servers.filter(server => server.enabled)) this.entries.set(server.id,
       { server, listedAt: 0, lastUsed: 0, changed: 1, discovered: 0, tail: Promise.resolve(), pending: 0, ...(options.scope && options.scope !== "owner" ? { visible: new Set<string>() } : {}) });
@@ -44,7 +43,11 @@ export class ThreadMcp {
   }
   private installControl() {
     this.registry.install(defineExtension({ name: "cs.mcp.control",
-      sections: [section("mcp-policy", () => MCP_RULE + MCP_RESULT_INSTRUCTIONS)],
+      sections: [section("mcp-policy", () => {
+        const visible = this.entries.has("cua") && (this.scope === "owner" || !!this.config.cuaSpaces?.length);
+        const directory = visible ? " Cua 的 list_spaces 返回 structuredContent.spaces。用完整设备 ID 和 service=driver 调用 list_tools；用 name 筛选工具并读取参数契约。" : "";
+        return MCP_RULE + MCP_RESULT_INSTRUCTIONS + directory;
+      })],
       tools: [
       defineTool({ name: "mcp_refresh_tools", description: "在 codemode 中刷新 MCP 目录，不执行远端业务操作。",
         parameters: Type.Object({}, { additionalProperties: false }), replay: "unsafe", callers: ["tools"],
@@ -58,12 +61,12 @@ export class ThreadMcp {
   async canUseCodemode(api: ToolExecutionApi, context: Context): Promise<boolean> {
     const authority = mcpAuthority(await this.authorize(api, context));
     return !!authority && (authority.kind === "event"
-      ? [...this.entries.values()].some(entry => entry.server.tools.eventAllow.length > 0)
+      ? [...this.entries.values()].some(entry => entry.server.id !== 'cua' && entry.server.tools.eventAllow.length > 0)
       : await this.hasAccess(authority));
   }
   async syncConfig(config: McpConfig): Promise<void> {
     // DO RPC 在返回对象上附带生命周期符号，只比较配置本身的 JSON 字段。
-    if (digest([config.enabled, config.servers, config.limits, config.deviceLabels ?? {}]) === digest([this.config.enabled, this.config.servers, this.config.limits, this.config.deviceLabels ?? {}])) return;
+    if (digest([config.enabled, config.servers, config.limits, config.cuaSpaces ?? []]) === digest([this.config.enabled, this.config.servers, this.config.limits, this.config.cuaSpaces ?? []])) return;
     const active = new Map(config.servers.filter(server => config.enabled && server.enabled).map(server => [server.id, server]));
     for (const [id, entry] of this.entries) {
       const next = active.get(id);
@@ -72,12 +75,7 @@ export class ThreadMcp {
       this.registry.install(defineExtension({ name: `cs.mcp.server.${id}`, tools: [] }));
       void entry.tail.then(() => entry.connection?.close()).catch(() => {});
     }
-    const previousLabels = this.deviceLabels;
-    this.deviceLabels = new Map(Object.entries(config.deviceLabels ?? {}));
     this.config = config; this.policy.setConfig(config);
-    for (const [id, entry] of this.entries) {
-      if (entry.catalog && digest(previousLabels.get(id) ?? null) !== digest(this.deviceLabels.get(id) ?? null)) this.install(entry, entry.catalog);
-    }
     for (const [id, server] of active) if (!this.entries.has(id)) {
       const entry: Entry = { server, listedAt: 0, lastUsed: 0, changed: 1, discovered: 0, tail: Promise.resolve(), pending: 0,
         ...(this.options.scope && this.options.scope !== "owner" ? { visible: new Set<string>() } : {}) };
@@ -91,6 +89,7 @@ export class ThreadMcp {
     await this.refreshVisibility();
   }
   private current(entry: Entry) { return this.options.current ? this.options.current(entry.server.id, serverDigest(entry.server)) : Promise.resolve(true); }
+  get scope() { return this.options.scope; }
   private event(kind: "mcp_catalog" | "mcp_call", detail: object) {
     return this.db.run("INSERT INTO events(at,kind,detail) VALUES (?,?,?)", Date.now(), kind, JSON.stringify(detail));
   }
@@ -108,7 +107,8 @@ export class ThreadMcp {
     const results: { server: string; status: string; tools: number; code?: string }[] = [];
     for (const entry of this.entries.values()) {
       try {
-        if (this.options.scope && this.options.scope !== "owner") {
+        if (entry.server.id === 'cua' && this.scope !== 'owner' && !this.config.cuaSpaces?.length) continue;
+        if (entry.server.id !== 'cua' && this.options.scope && this.options.scope !== "owner") {
           const grant = await this.policy.grant(this.options.scope, entry.server.id);
           if (!grant || !this.policy.matches(entry.server, grant) || grant.expiresAt !== null && grant.expiresAt <= Date.now() || !grant.tools.length && !grant.resourceAllow.length) {
             results.push({ server: entry.server.id, status: "denied", tools: 0 }); continue;
@@ -180,21 +180,20 @@ export class ThreadMcp {
   }
   private install(entry: Entry, revision: Catalog): void {
     // 每服务一份当前 extension；Pi 仍保存旧任务定义，旧名称不会再成为新调用入口。
-    const device = this.deviceLabels.get(entry.server.id);
-    const visibleTools = revision.tools.filter(tool => !entry.visible || entry.visible.has(tool.name));
+    const visibleTools = revision.tools.filter(tool => (entry.server.id !== 'cua' || isCuaTool(tool.name)) && (!entry.visible || entry.visible.has(tool.name)));
     this.registry.install(defineExtension({ name: `cs.mcp.server.${entry.server.id}`,
-      ...(visibleTools.length ? { namespace: deviceToolNamespace(entry.server.id, device) } : {}),
+      ...(visibleTools.length ? { namespace: { name: entry.server.id, description: "" } } : {}),
       tools: visibleTools.map(tool => {
         const input = compileMcpSchema(tool.inputSchema, this.config.limits);
         const output = tool.outputSchema ? compileMcpSchema(tool.outputSchema, this.config.limits) : undefined;
         const name = toolNames(revision, tool).nativeName;
-        return defineTool({ ...deviceToolPresentation(device, tool.name), name, description: tool.description, parameters: input.schema,
-          structuredOutputSchema: mcpCodemodeSchema(output?.schema), replay: "unsafe", callers: ["tools"],
+        return defineTool({ name, description: tool.description, parameters: input.schema,
+          structuredOutputSchema: mcpCodemodeSchema(cuaOutput(entry.server.id,tool.name) ?? output?.schema), replay: "unsafe", callers: ["tools"],
           execute: async (args, api, context) => mcpCodemodeResult(await this.call(entry, tool, name, args, input, output, () => this.authorize(api, context), String(api.taskId), context)) });
       }) }));
   }
   private async call(entry: Entry, tool: CatalogTool, name: string, args: unknown, input: ReturnType<typeof compileMcpSchema>,
-    output: ReturnType<typeof compileMcpSchema> | undefined, authorize: () => Promise<McpAuthorization>, operationId: string, context: Context, environmentLimit?: EnvironmentAccess): Promise<ToolExecutionResult> {
+    output: ReturnType<typeof compileMcpSchema> | undefined, authorize: () => Promise<McpAuthorization>, operationId: string, context: Context, environmentLimit?: EnvironmentAccess, snapshot?: McpCapabilitySnapshot): Promise<ToolExecutionResult> {
     const started = Date.now(); let dispatched = false, claimId: string | undefined, classification = "not_started", errorCode: string | undefined, inputBytes = 0, outputBytes = 0;
     const authorized = async () => {
       const authority = mcpAuthority(await authorize());
@@ -206,7 +205,7 @@ export class ThreadMcp {
     try {
       if (!await authorized()) { classification = "denied"; return mcpFailure(classification); }
       const owned = boundedJson(args, this.config.limits.argumentBytes, this.config.limits.schemaDepth * 3 + 3);
-      if (!Check(Type.Record(Type.String(), Type.Unknown()), owned) || !input.check(owned)) return mcpFailure("invalid_arguments");
+      if (owned === null || typeof owned !== 'object' || Array.isArray(owned) || !input.check(owned)) return mcpFailure("invalid_arguments");
       inputBytes = jsonBytes(owned);
       return await this.queued(entry, context.abortSignal, async signal => {
         if (!await authorized() || !await this.current(entry)) { classification = "denied"; return mcpFailure(classification); }
@@ -220,6 +219,32 @@ export class ThreadMcp {
         const authority = await authorized();
         if (!authority || !await this.current(entry)) { classification = "denied"; return mcpFailure(classification); }
         const scope = callerScope(authority);
+        if (entry.server.id === 'cua') {
+          const revision = entry.server.access.revision;
+          if (!revision || (snapshot && snapshot.cua?.revision !== revision) ||
+              ((authority.subagentId || authority.kind === 'subagent') && !snapshot?.cua)) {
+            classification = 'denied'; return mcpFailure(classification);
+          }
+          const assigned = async () => {
+            const frozen = snapshot?.cua?.spaces;
+            if (authority.scope === 'owner') return frozen;
+            const live = await this.env.REGISTRY.getByName('main').cuaAssigned(authority.scope, revision);
+            return frozen ? live.filter(id => frozen.includes(id)) : live;
+          };
+          const before = await assigned();
+          if (!cuaQueryAllowed(tool.name, owned, before)) { classification = 'denied'; return mcpFailure(classification); }
+          const remote = await connection.callTool(tool.name, owned, {scope}, signal);
+          // 目录读取期间可能重置会话、撤销设备、轮换节点。绝不返回旧分配中的设备内容。
+          const recipient = await authorized();
+          const after = await assigned();
+          const effective = before && after ? before.filter(id => after.includes(id)) : after;
+          if (!recipient || callerScope(recipient) !== scope || !await this.current(entry) || !cuaQueryAllowed(tool.name, owned, effective)) {
+            classification = 'denied'; return mcpFailure(classification);
+          }
+          const result = cuaResult(tool.name, remote, effective, this.config.limits);
+          classification = result.isError ? 'result_rejected' : 'ok';
+          return result;
+        }
         const grantRevision = isEnvironmentTool(tool.name) && authority.scope !== 'owner' ? (await this.policy.grant(authority.scope, entry.server.id))?.revision : undefined;
         const mutation = !(entry.server.tools.readOnly ?? entry.server.tools.eventAllow).includes(tool.name);
         if (mutation) {
@@ -269,6 +294,9 @@ export class ThreadMcp {
     }
   }
   private async allowed(entry: Entry, authority: McpAuthority, tool?: string): Promise<boolean> {
+    if (entry.server.id === 'cua') return entry.server.transport.kind === 'reverse-websocket' && !!entry.server.access.revision
+      && authority.scope === this.scope && cuaSubject(authority) && !!tool && isCuaTool(tool) && entry.server.tools.allow.includes(tool)
+      && (authority.scope === 'owner' || !!this.config.cuaSpaces?.length);
     if (!await this.policy.allows(authority, entry.server, tool)) return false;
     if (!tool || !isEnvironmentTool(tool)) return true;
     const access = await this.policy.environments(authority, entry.server);
@@ -285,12 +313,18 @@ export class ThreadMcp {
   async refreshVisibility() {
     if (!this.options.scope || this.options.scope === "owner") return;
     for (const entry of this.entries.values()) {
+      if (entry.server.id === 'cua') {
+        entry.visible = new Set(this.config.cuaSpaces?.length ? cuaTools : []);
+        if (entry.catalog) this.install(entry, entry.catalog);
+        continue;
+      }
       const grant = await this.policy.grant(this.options.scope, entry.server.id);
       entry.visible = new Set(grant && this.policy.matches(entry.server, grant) && (grant.expiresAt === null || grant.expiresAt > Date.now()) ? grant.tools : []);
       if (entry.catalog) this.install(entry, entry.catalog);
     }
   }
   async setAccess(scope: string, server: string, input: McpGrantInput, expected: string, reviewer: McpAuthority) {
+    if (server === 'cua') throw new McpPolicyError('invalid');
     if (!reviewer.owner || reviewer.kind === "event" || reviewer.kind === "agent" || reviewer.kind === "subagent" || reviewer.subagentId) throw new McpPolicyError("denied");
     const grant = await this.policy.setGrant(scope, server, input, expected);
     await this.refreshVisibility();
@@ -322,6 +356,7 @@ export class ThreadMcp {
   /** 派出时复用本地目录快照；不会为每个子 agent 再拉取一次远端目录。 */
   async captureCapabilities(authority: McpAuthority, selection?: McpToolSelection): Promise<McpCapabilitySnapshot> {
     const catalogs: Catalog[] = [], resourceAllow: { server: string; prefixes: string[] }[] = [];
+    let cua: McpCapabilitySnapshot['cua'];
     const environments: NonNullable<McpCapabilitySnapshot["environments"]> = [];
     for (const entry of this.entries.values()) if (entry.catalog) {
       const selected = selection?.filter(row => row.server === entry.server.id).flatMap(row => row.tools);
@@ -331,12 +366,28 @@ export class ThreadMcp {
         if ((!selected || selected.includes(tool.name)) && entry.server.tools.allow.includes(tool.name)
           && await this.allowed(entry, authority, tool.name)) tools.push(tool);
       }
-      const prefixes = selection === undefined ? await this.policy.resourcePrefixes(authority, entry.server) : [];
+      if (entry.server.id === 'cua' && tools.length) {
+        const revision = entry.server.access.revision;
+        if (!revision || !await this.current(entry)) continue;
+        let spaces: string[];
+        if (authority.scope === 'owner') {
+          if (!entry.server.tools.allow.includes('list_spaces')) continue;
+          try {
+            spaces = await this.queued(entry, undefined, async signal => {
+              const remote = await (await this.connect(entry,signal)).callTool('list_spaces',{}, {scope:mcpCallerScope(authority, this.options.callerNamespace ?? authority.scope)},signal);
+              return cuaCards(remote).map(row => row.id);
+            });
+          } catch { continue; }
+        } else spaces = await this.env.REGISTRY.getByName('main').cuaAssigned(authority.scope,revision);
+        if (!spaces.length || spaces.length > 1024 || !await this.current(entry)) continue;
+        cua = {revision,spaces};
+      }
+      const prefixes = entry.server.id !== 'cua' && selection === undefined ? await this.policy.resourcePrefixes(authority, entry.server) : [];
       if (prefixes.length) resourceAllow.push({ server: entry.server.id, prefixes });
       if (tools.some(tool => isEnvironmentTool(tool.name))) environments.push({ server: entry.server.id, access: await this.policy.environments(authority, entry.server) });
-      if (tools.length || prefixes.length) catalogs.push({ ...entry.catalog, tools, device: this.deviceLabels.get(entry.server.id) });
+      if (tools.length || prefixes.length) catalogs.push({ ...entry.catalog, tools });
     }
-    return { scope: authority.scope, actor: authority.actor, generation: authority.generation, replyChannel: authority.replyChannel, catalogJson: JSON.stringify(catalogs), tools: catalogs.flatMap(c => c.tools.map(t => toolNames(c,t).nativeName)), resourceAllow, environments };
+    return { scope: authority.scope, actor: authority.actor, generation: authority.generation, replyChannel: authority.replyChannel, catalogJson: JSON.stringify(catalogs), tools: catalogs.flatMap(c => c.tools.map(t => toolNames(c,t).nativeName)), resourceAllow, environments, ...(cua ? {cua} : {}) };
   }
   async invoke(call: { name: string; args: unknown; operationId: string; snapshot?: McpCapabilitySnapshot },
     authorize: () => Promise<McpAuthority | undefined>, context: Context = BACKGROUND_CONTEXT): Promise<ToolExecutionResult> {
@@ -355,7 +406,7 @@ export class ThreadMcp {
       if (!tool) continue;
       if (call.snapshot && !call.snapshot.tools.includes(call.name)) return mcpFailure("denied");
       return this.call(entry, tool, call.name, call.args, compileMcpSchema(tool.inputSchema, this.config.limits),
-        tool.outputSchema ? compileMcpSchema(tool.outputSchema, this.config.limits) : undefined, checked, call.operationId, context, call.snapshot ? call.snapshot.environments?.find(row => row.server === entry.server.id)?.access ?? noEnvironments() : undefined);
+        tool.outputSchema ? compileMcpSchema(tool.outputSchema, this.config.limits) : undefined, checked, call.operationId, context, call.snapshot ? call.snapshot.environments?.find(row => row.server === entry.server.id)?.access ?? noEnvironments() : undefined, call.snapshot);
     }
     return mcpFailure("tool_retired");
   }
@@ -370,7 +421,7 @@ export class ThreadMcp {
   private async resourceCall(serverId: string, action: "list" | "templates" | "read", uri: string | undefined,
     authorize: () => Promise<McpAuthorization>, context: Context, snapshotPrefixes?: readonly string[]): Promise<ToolExecutionResult> {
     const entry = this.entries.get(serverId);
-    if (!entry || !entry.server.resourceAllow.length) return mcpFailure("denied");
+    if (!entry || entry.server.id === 'cua' || !entry.server.resourceAllow.length) return mcpFailure("denied");
     const allowed = async () => { const authority = mcpAuthority(await authorize()); return !!authority && await this.allowed(entry, authority); };
     if (!await allowed()) return mcpFailure("denied");
     try {

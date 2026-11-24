@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import type { Execution, ExecutionStatus, WsbTarget } from "../src/domain.ts";
+import type { Execution, ExecutionStatus, Target } from "../src/domain.ts";
 import { atomicJson, readJson } from "../src/files.ts";
 import {
   evidence, executionFiles, GuestInput, Marker, parse, SessionIntent, sessionFiles, wsbSessionDir,
@@ -15,7 +15,7 @@ import type { NativeWsb } from "../src/wsb-native.ts";
 import { WsbBackend } from "../src/wsb.ts";
 
 const unowned = randomUUID();
-const target: WsbTarget = { kind: "wsb", id: "wsb", memoryMb: 4096, idleTimeoutMs: 60000, maxLifetimeMs: 60000 };
+const target: Target = { kind: "wsb", id: "wsb", memoryMb: 4096, idleTimeoutMs: 60000, maxLifetimeMs: 60000 };
 const task = (sessionId: string, script = "Get-Location", timeoutMs = 20000): Execution => ({
   id: randomUUID(), requestId: randomUUID(), subject: { principal: "owner", scope: "test" }, target, sessionId,
   command: { kind: "powershell", script, timeoutMs }, deadline: Date.now() + timeoutMs,

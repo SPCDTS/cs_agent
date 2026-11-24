@@ -2,6 +2,7 @@ import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { ListToolsResultSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MCP_CONFIG, parseMcpConfig, publicOrigin, type McpServerConfig } from "./config";
+import { isCuaTool } from "../cua/discovery";
 import { secretsEqual } from "../auth";
 import { TokenVault } from "./crypto";
 import { makeCatalog } from "./catalog";
@@ -64,6 +65,7 @@ export class McpServerStore {
   }
   put(input: ServerSetupInput, expected: string) {
     if (!Check(ServerSetup, input)) throw new McpSetupError("invalid");
+    if (input.id === 'cua' && !('transport' in input)) throw new McpSetupError('invalid');
     const previous = this.sql.exec<Row>("SELECT * FROM mcp_servers WHERE id=?", input.id).toArray()[0];
     if ((previous?.revision ?? "absent") !== expected) throw new McpSetupError("conflict");
     if (!previous && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM mcp_servers").one().n >= 64) throw new McpSetupError("invalid");
@@ -87,6 +89,10 @@ export class McpServerStore {
   activate(id: string, expected: string, input: ServerSelectionInput) {
     if (!Check(ServerSelection, input)) throw new McpSetupError("invalid");
     const row = this.row(id, expected), server = this.parse(row);
+    if (id === 'cua') {
+      if (server.transport.kind !== 'reverse-websocket' || !row.secret || input.allow.some(tool => !isCuaTool(tool)) || input.resourceAllow?.length) throw new McpSetupError('invalid');
+      input = { ...input, readOnly: input.allow };
+    }
     if (!row.discovered) throw new McpSetupError("probe_required");
     const tools: Tool[] = ListToolsResultSchema.parse(JSON.parse(row.discovered)).tools;
     if (input.allow.some(name => !tools.some(tool => tool.name === name)) || input.readOnly?.some(name => !input.allow.includes(name))) throw new McpSetupError("invalid");
@@ -100,7 +106,9 @@ export class McpServerStore {
   }
   disable(id: string, expected: string) {
     const row = this.row(id, expected);
-    this.sql.exec("UPDATE mcp_servers SET config=?,revision=? WHERE id=?", JSON.stringify({ ...this.parse(row), enabled: false }), crypto.randomUUID(), id);
+    const server = this.parse(row), revision = crypto.randomUUID();
+    if (id === 'cua') server.access.revision = revision;
+    this.sql.exec("UPDATE mcp_servers SET config=?,revision=? WHERE id=?", JSON.stringify({ ...server, enabled: false }), revision, id);
     return this.get(id);
   }
   remove(id: string, expected: string) { this.row(id, expected); this.sql.exec("DELETE FROM mcp_servers WHERE id=?", id); return { removed: id }; }

@@ -1,4 +1,3 @@
-import { serviceLabel } from "./device-label";
 import { isEnvironmentTool } from "../src/mcp/environments";
 import { $, api, el, fail, readToken, show, time } from "./app";
 import { readApi } from "./api";
@@ -71,7 +70,7 @@ export async function mcpUiLoad() {
     const data = await readApi(McpServersSchema,"GET", "/admin/mcp/servers");
     if (version !== mcpUi.version) return;
     const select = mcpUiNode("mcp-access-server"), selected = select.value;
-    mcpUiServers = data.servers.filter(row => row.server.enabled).map(({server,device}) => ({id:server.id, label:serviceLabel(server.id,device), tools:server.tools.allow, readOnly:server.tools.readOnly??[], resourceAllow:server.resourceAllow, revision:server.access.revision}));
+    mcpUiServers = data.servers.filter(row => row.server.enabled && row.server.id !== 'cua').map(({server}) => ({id:server.id, label:server.id, tools:server.tools.allow, readOnly:server.tools.readOnly??[], resourceAllow:server.resourceAllow, revision:server.access.revision}));
     select.replaceChildren(...mcpUiServers.map(server => el("option", {value:server.id,text:server.label,title:server.id})));
     if(mcpUiServers.some(server=>server.id===selected))select.value=selected;
     const selection = mcpUiSelection();

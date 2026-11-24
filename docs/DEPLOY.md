@@ -17,7 +17,7 @@ npm run check
 
 部署必须显式选择档案。复制 `workers/deployments/example.json` 为被 Git 忽略的 `my.local.json`，填写自己的 Worker 名称、PUBLIC_ORIGIN、routes 和 R2 桶；可在 vars 中补 Gmail 推送配置。`production.json` 只描述本仓库既有生产实例，CI 显式选择它，既有 Worker、R2 和 DO 数据身份保持不变。新部署不能直接沿用该档案。
 
-正式部署会为档案中的 PUBLIC_ORIGIN 登记或复用 Cloudflare 私有 OAuth 客户端。首次登记需提供部署账户的 `CLOUDFLARE_ACCOUNT_ID` 和含 OAuth Clients Write 权限的 `CLOUDFLARE_API_TOKEN`。已登记的实例可以把公开的 `DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID` 固定在档案 vars 中，后续发布可使用日常部署权限。生成的 `workers/wrangler.deploy.json` 含本次使用的 client ID。实例主人上线后在管理台同意资源权限。[设备接入与 Cloudflare 授权](DEVICE-MCP.md)
+正式部署会为档案中的 PUBLIC_ORIGIN 登记或复用 Cloudflare 私有 OAuth 客户端。首次登记需提供部署账户的 `CLOUDFLARE_ACCOUNT_ID` 和含 OAuth Clients Write 权限的 `CLOUDFLARE_API_TOKEN`。已登记的实例可以把公开的 `DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID` 固定在档案 vars 中，后续发布可使用日常部署权限。生成的 `workers/wrangler.deploy.json` 含本次使用的 client ID。实例主人上线后在「模型与接入 → MCP 与设备 → Cloudflare 账户管理」授权账户。保留原 OAuth 回调 `/admin/devices/cloudflare/callback` 供既有客户端使用。主人会话可查询授权范围内的 DNS、Tunnel、Workers 与 R2 摘要。创建 DNS 记录、R2 桶或清缓存由主人在管理台逐项批准。
 
 `npm run deploy -- deployments/my.local.json` 会合并基础配置生成被 Git 忽略的 `workers/wrangler.deploy.json`，然后调用 Wrangler。漏填档案或保留示例域名会在联网前失败。不要手改生成文件或删迁移。
 
@@ -40,7 +40,7 @@ NapCat 独立运行，在其反向 WebSocket 客户端中配置 `wss://<Worker �
 
 仅在用户明确授权发布时执行。GitHub 仓库配置 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`，部署 job 使用 `workers` environment。
 
-- PR 和 main 的 CI 均运行 `npm run check`；runner 或 CI 改动还会运行 Windows 原生助手测试。合并必需的 `workers check` 汇总相关检查结果。
+- PR 和 main 的 CI 均运行 `npm run check`；runner 或 CI 改动还会在 Windows 上运行 WSB runner 测试。合并必需的 `workers check` 汇总相关检查结果。
 - main 上检查成功后，CI 自动发布 Worker 和 coding 沙箱，并把提交号写入 `CS_AGENT_COMMIT`。因此通过 GitHub 合并 PR 属于发布操作；禁止直接推送 main。
 - 手动发布在 `workers/` 运行 `npm run deploy -- deployments/my.local.json --var CS_AGENT_COMMIT:<已批准的提交号>`；检查待发布差异和目标账号，不上传私有本机目录。
 
@@ -69,4 +69,6 @@ HTTP 403 的 HTML 响应和 Cloudflare challenge 属于接入失败证据，不�
 
 代码清理不删除既有 `data/`、`workspace/`、`napcat/`、`secrets/` 或其他 worktree。老 worktree 可能通过目录链接共享根 node_modules，不能直接递归删除这份共享缓存。新 checkout 安装 `workers/` 和 `runner/` 各自的依赖；不能共享其他 worktree 的 node_modules。
 
-远程 Windows 环境通过管理台的 MCP 服务接入，配置见 [Windows MCP](WINDOWS-MCP.md)。旧 Sandbox 标签、远程开关和配对协议已移除。上线前先用旧版本完成或取消远程任务并停止旧连接器；新服务使用独立状态目录，不复用或删除旧持久数据。Cloudflare 资源由 v12 DO class rename 保留，部署时必须连同迁移发布。
+旧设备的收据、Tunnel/DNS、登录任务和本地凭据需在切换时分别核对。部署新版前先结清旧任务，再撤销设备并清理专用云资源。[设备清退与验收](DEVICE-MCP.md#从旧设备服务切换)
+
+Windows Sandbox 沿用原 Windows MCP 服务与任务账本。[WSB 配置](WINDOWS-MCP.md) Cloudflare 资源由 v12 DO class rename 保留，部署时必须连同迁移发布。

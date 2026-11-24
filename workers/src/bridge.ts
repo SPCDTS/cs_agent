@@ -28,6 +28,7 @@ function decodeMediaContent(encoded: string, invalidCode: string): Uint8Array {
 export class BridgeDO extends DurableObject<Env> {
   // echo 与发送事实持久化；内存 Promise 仅用于等待本次连接的响应。
   private readonly reverse = new ReverseRelay(this.ctx);
+  reverseOnline(): boolean { return this.reverse.online(); }
   private readonly ledger = new DeliveryStore(this.ctx.storage);
   private readonly sending = new Map<string, Promise<Delivery>>();
   private readonly runSending = new Map<string, Promise<Delivery>>();

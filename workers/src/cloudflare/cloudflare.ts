@@ -5,7 +5,6 @@ import { TokenVault, randomSecret, sha256 } from '../mcp/crypto';
 import { publicOrigin } from '../mcp/config';
 import { createOAuthFetch } from '../mcp/oauth-fetch';
 import { Tokens, type OAuthTokens } from '../mcp/oauth';
-import { tunnelSettings } from './tunnel';
 import client from './cloudflare-client.json';
 
 const dash = 'https://dash.cloudflare.com', api = 'https://api.cloudflare.com';
@@ -90,10 +89,10 @@ export class CloudflareGrant {
     await this.save(tokens, tokens.refresh_token, target);
     return this.status();
   }
-  // 宿主串行化换发与重新授权，避免并发设备覆盖已经轮换的 refresh token。
+  // 宿主串行化换发与重新授权，避免并发请求覆盖已经轮换的 refresh token。
   async settings() {
     const row = this.row();
-    if (!row) return tunnelSettings(this.env);
+    if (!row) throw new Error('device_cloudflare_denied');
     if (row.client !== this.clientId || row.reauth) throw new Error('device_oauth_reauthorize');
     const saved: {access:string;refresh:string} = JSON.parse(await this.vault.decrypt(row.secret, field(row.client)));
     let token = saved.access;

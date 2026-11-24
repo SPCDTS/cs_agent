@@ -9,7 +9,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { COMPLETED_DETAILS_RETENTION_MS } from '../src/job-details.ts';
 import type { Backend, Execution, ExecutionStatus, Target } from '../src/domain.ts';
 const subject = { principal: 'test', scope: 'a'.repeat(64) };
-const vm: Target = { kind: 'hyperv', id: 'dev', vmId: randomUUID(), credentialPath: 'C:\\secret.xml', guestWorkdir: 'C:\\Work' };
 const wsb: Target = { kind: 'wsb', id: 'temp', memoryMb: 2048, idleTimeoutMs: 60000, maxLifetimeMs: 3600000 };
 const command = { kind: 'powershell' as const, script: 'Get-Date', timeoutMs: 120000 };
 const success: ExecutionStatus = { state: 'succeeded', result: { exitCode: 0, stdout: 'ok', stderr: '', truncated: false } };
@@ -26,42 +25,20 @@ function fake() {
 }
 async function fixture(t: TestContext) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'windows-mcp-jobs-')); const f = fake(); let now = 1000;
-  let jobs = new Jobs(dir, { hyperv: f.backend, wsb: f.backend }, () => now);
+  let jobs = new Jobs(dir, f.backend, () => now);
   t.after(async () => { await jobs.shutdown(); await rm(dir, { recursive: true, force: true }); });
-  return { f, dir, get jobs() { return jobs; }, time(value: number) { now = value; }, async restart() { await jobs.shutdown(); jobs = new Jobs(dir, { hyperv: f.backend, wsb: f.backend }, () => now); } };
+  return { f, dir, get jobs() { return jobs; }, time(value: number) { now = value; }, async restart() { await jobs.shutdown(); jobs = new Jobs(dir, f.backend, () => now); } };
 }
 test('持久请求去重、冲突与重启只查证据，不重新执行', async t => {
   const x = await fixture(t), id = randomUUID();
-  const first = x.jobs.submit(subject, vm, id, command); await x.jobs.tick();
+  const first = x.jobs.submit(subject, wsb, id, command); await x.jobs.tick();
   assert.equal(x.f.calls.length, 1);
-  assert.equal(x.jobs.submit(subject, vm, id, command).jobId, first.jobId);
-  assert.throws(() => x.jobs.submit(subject, vm, id, { ...command, script: 'Remove-Item x' }), /request_id_conflict/);
+  assert.equal(x.jobs.submit(subject, wsb, id, command).jobId, first.jobId);
+  assert.throws(() => x.jobs.submit(subject, wsb, id, { ...command, script: 'Remove-Item x' }), /request_id_conflict/);
   await x.restart(); await x.jobs.tick(); assert.equal(x.f.calls.length, 1);
   x.f.states.set(first.jobId, success); await x.jobs.tick();
-  assert.equal(x.jobs.get(subject, vm, id).state, 'succeeded');
-  assert.equal(x.jobs.submit(subject, vm, id, command).state, 'succeeded');
-});
-test('VM 配对后旧入口拒接新命令，原收据和排队中的任务仍归原调用方', async t => {
-  const x = await fixture(t);
-  x.jobs.bindTargets([vm, wsb]);
-  const running = x.jobs.submit(subject, vm, randomUUID(), command);
-  const queued = x.jobs.submit(subject, vm, randomUUID(), command);
-  await x.jobs.tick();
-  await x.restart();
-  const draining = { ...vm, drainOnly: true };
-  x.jobs.bindTargets([draining, wsb]);
-  assert.equal(x.jobs.submit(subject, draining, running.requestId, command).jobId, running.jobId);
-  assert.throws(() => x.jobs.submit(subject, draining, queued.requestId, { ...command, script: 'Get-Location' }), /request_id_conflict/);
-  assert.throws(() => x.jobs.submit({ ...subject, scope: 'other' }, draining, running.requestId, command), /hyperv_target_draining/);
-  assert.throws(() => x.jobs.submit(subject, draining, randomUUID(), command), /hyperv_target_draining/);
-  x.jobs.cancel(subject, draining, running.requestId);
-  await x.jobs.tick();
-  assert.equal(x.jobs.get(subject, draining, running.requestId).state, 'cancelled');
-  await x.jobs.tick();
-  x.f.states.set(queued.jobId, success);
-  await x.jobs.tick();
-  assert.deepEqual(x.f.calls.map(job => job.id), [running.jobId, queued.jobId]);
-  assert.equal(x.jobs.get(subject, draining, queued.requestId).result?.stdout, 'ok');
+  assert.equal(x.jobs.get(subject, wsb, id).state, 'succeeded');
+  assert.equal(x.jobs.submit(subject, wsb, id, command).state, 'succeeded');
 });
 test('WSB 首提交丢回包可找回 session，去重先于容量检查，关闭后仍保留收据', async t => {
   const x = await fixture(t), id = randomUUID();
@@ -85,7 +62,7 @@ test('跨 principal/scope/target 不泄露或接管任务和 session', async t =
     assert.throws(() => x.jobs.close(other, wsb, first.sessionId!), /session_not_found/);
     assert.throws(() => x.jobs.submit(other, wsb, randomUUID(), command, first.sessionId), /session_unavailable/);
   }
-  assert.throws(() => x.jobs.get(subject, vm, id), /job_not_found/);
+  assert.throws(() => x.jobs.get(subject, { ...wsb, id: 'other' }, id), /job_not_found/);
 });
 test('unknown 保留执行槽位，取消必须得到真实停止证据', async t => {
   const x = await fixture(t), id = randomUUID();
@@ -101,13 +78,13 @@ test('unknown 保留执行槽位，取消必须得到真实停止证据', async 
   x.f.setClose(true); await x.jobs.tick(); assert.equal(x.jobs.get(subject, wsb, id).state, 'cancelled');
   assert.equal(x.f.calls.length, 1);
 });
-test('VM FIFO 与 deadline：排队过期不执行，活跃任务只调用 backend stop', async t => {
-  const x = await fixture(t), first = x.jobs.submit(subject, vm, randomUUID(), command), second = x.jobs.submit(subject, vm, randomUUID(), { ...command, timeoutMs: 1000 });
+test('WSB 队列过期任务不执行，活跃任务在截止时关闭 session', async t => {
+  const x = await fixture(t), first = x.jobs.submit(subject, wsb, randomUUID(), command), second = x.jobs.submit(subject, wsb, randomUUID(), { ...command, timeoutMs: 1000 }, first.sessionId);
   await x.jobs.tick(); assert.equal(x.f.calls.length, 1);
   x.time(122000); await x.jobs.tick(); await x.jobs.tick();
-  assert.equal(x.jobs.get(subject, vm, first.requestId).state, 'cancelled');
-  assert.equal(x.jobs.get(subject, vm, second.requestId).state, 'cancelled');
-  assert.equal(x.f.calls.length, 1); assert.deepEqual(x.f.stopped, [first.jobId]); assert.deepEqual(x.f.closed, []);
+  assert.equal(x.jobs.get(subject, wsb, first.requestId).state, 'cancelled');
+  assert.equal(x.jobs.get(subject, wsb, second.requestId).state, 'cancelled');
+  assert.equal(x.f.calls.length, 1); assert.deepEqual(x.f.stopped, [first.jobId]); assert.deepEqual(x.f.closed, [first.sessionId]);
 });
 test('WSB 空闲 TTL 关闭实例；服务重启后仍处理同一 session', async t => {
   const x = await fixture(t), first = x.jobs.submit(subject, wsb, randomUUID(), command); await x.jobs.tick();
@@ -115,47 +92,43 @@ test('WSB 空闲 TTL 关闭实例；服务重启后仍处理同一 session', asy
   x.time(62000); await x.jobs.tick(); assert.deepEqual(x.f.closed, [first.sessionId]);
   assert.equal(x.jobs.close(subject, wsb, first.sessionId!).state, 'closed');
 });
-test('target id 不可复用到不同 VM，避免同名工具指向另一工作区', async t => {
-  const x = await fixture(t); x.jobs.bindTargets([vm, wsb]);
-  assert.throws(() => x.jobs.bindTargets([{ ...vm, vmId: randomUUID() }]), /target_id_reused/);
-});
 test('派发中异常只进入 unknown，轮询和重启不再次 dispatch', async t => {
   const x = await fixture(t); x.f.backend.dispatch = async e => { x.f.calls.push(e); throw new Error('connection_lost'); };
-  const first = x.jobs.submit(subject, vm, randomUUID(), command); await x.jobs.tick();
-  assert.equal(x.jobs.get(subject, vm, first.requestId).state, 'unknown');
+  const first = x.jobs.submit(subject, wsb, randomUUID(), command); await x.jobs.tick();
+  assert.equal(x.jobs.get(subject, wsb, first.requestId).state, 'unknown');
   await x.restart(); await x.jobs.tick(); assert.equal(x.f.calls.length, 1);
 });
 
-test('同 VM 前任务未结束时，后面的排队项仍按自己的期限结算', async t => {
+test('同 WSB 会话前任务未结束时，后面的排队项仍按自己的期限结算', async t => {
   const x = await fixture(t);
-  const first = x.jobs.submit(subject, vm, randomUUID(), command);
+  const first = x.jobs.submit(subject, wsb, randomUUID(), command);
   await x.jobs.tick();
-  const second = x.jobs.submit(subject, vm, randomUUID(), { ...command, timeoutMs: 1000 });
+  const second = x.jobs.submit(subject, wsb, randomUUID(), { ...command, timeoutMs: 1000 }, first.sessionId);
   x.time(5000); await x.jobs.tick();
-  assert.equal(x.jobs.get(subject, vm, first.requestId).state, 'running');
-  assert.equal(x.jobs.get(subject, vm, second.requestId).state, 'cancelled');
+  assert.equal(x.jobs.get(subject, wsb, first.requestId).state, 'running');
+  assert.equal(x.jobs.get(subject, wsb, second.requestId).state, 'cancelled');
   assert.equal(x.f.calls.length, 1);
   assert.deepEqual(x.f.stopped, []);
 });
 
 test('终态正文在线归档后保留去重和退出摘要，超过旧总量限制仍接收新任务', async t => {
   const x = await fixture(t), id = randomUUID();
-  const first = x.jobs.submit(subject, vm, id, command);
+  const first = x.jobs.submit(subject, wsb, id, command);
   await x.jobs.tick(); x.f.states.set(first.jobId, success); await x.jobs.tick();
-  assert.equal(x.jobs.get(subject, vm, id).result?.stdout, 'ok');
-  const before = (await x.jobs.status(subject, vm)).ledger;
+  assert.equal(x.jobs.get(subject, wsb, id).result?.stdout, 'ok');
+  const before = (await x.jobs.status(subject, wsb)).ledger;
   assert.equal(before.jobs, 1); assert.equal(before.retainedPayloads, 1);
   assert.ok(before.databaseBytes > 0); assert.ok(before.allocatedBytes > 0);
   assert.ok(before.reusableBytes >= 0 && before.reusableBytes <= before.allocatedBytes); assert.ok(before.walBytes >= 0);
   x.time(COMPLETED_DETAILS_RETENTION_MS + 2000); await x.jobs.tick();
-  const archived = x.jobs.get(subject, vm, id);
+  const archived = x.jobs.get(subject, wsb, id);
   assert.equal(archived.details, 'archived');
-  const after = (await x.jobs.status(subject, vm)).ledger;
+  const after = (await x.jobs.status(subject, wsb)).ledger;
   assert.equal(after.jobs, 1); assert.equal(after.retainedPayloads, 0);
   assert.equal(archived.result, undefined);
   assert.deepEqual(archived.resultSummary, { exitCode: 0, truncated: false });
-  assert.equal(x.jobs.submit(subject, vm, id, command).jobId, first.jobId);
-  assert.throws(() => x.jobs.submit(subject, vm, id, { ...command, script: 'changed' }), /request_id_conflict/);
+  assert.equal(x.jobs.submit(subject, wsb, id, command).jobId, first.jobId);
+  assert.throws(() => x.jobs.submit(subject, wsb, id, { ...command, script: 'changed' }), /request_id_conflict/);
   const db = new DatabaseSync(path.join(x.dir, 'jobs.sqlite'));
   try {
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM job_payloads').get()?.n, 0);
@@ -165,10 +138,10 @@ test('终态正文在线归档后保留去重和退出摘要，超过旧总量�
       FROM counter CROSS JOIN (SELECT * FROM jobs LIMIT 1)`);
   } finally { db.close(); }
   await x.restart();
-  assert.equal(x.jobs.get(subject, vm, id).details, 'archived');
-  const next = x.jobs.submit(subject, vm, randomUUID(), command);
+  assert.equal(x.jobs.get(subject, wsb, id).details, 'archived');
+  const next = x.jobs.submit(subject, wsb, randomUUID(), command);
   await x.jobs.tick();
-  assert.equal(x.jobs.get(subject, vm, next.requestId).state, 'running');
+  assert.equal(x.jobs.get(subject, wsb, next.requestId).state, 'running');
   assert.equal(x.f.calls.length, 2);
 });
 
@@ -176,17 +149,35 @@ test('旧账本升级保留终态正文，并在保留期后继续阻止重放',
   const dir = await mkdtemp(path.join(os.tmpdir(), 'windows-mcp-migration-'));
   const db = new DatabaseSync(path.join(dir, 'jobs.sqlite'));
   const id = randomUUID(), requestId = randomUUID();
-  const execution: Execution = { id, requestId, subject, target: vm, command, deadline: 120000 };
+  const execution: Execution = { id, requestId, subject, target: wsb, command, deadline: 120000 };
   db.exec('CREATE TABLE jobs (id TEXT PRIMARY KEY, principal TEXT NOT NULL, scope TEXT NOT NULL, target TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, execution TEXT NOT NULL, phase TEXT NOT NULL, status TEXT NOT NULL, created INTEGER NOT NULL, UNIQUE(principal,scope,target,request_id))');
-  db.prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)').run(id,subject.principal,subject.scope,vm.id,requestId,'legacy',JSON.stringify(execution),'terminal',JSON.stringify(success),0);
+  db.prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)').run(id,subject.principal,subject.scope,wsb.id,requestId,'legacy',JSON.stringify(execution),'terminal',JSON.stringify(success),0);
+  const oldTarget = { kind: 'hyperv', id: 'retired', vmId: randomUUID() };
+  db.exec('CREATE TABLE targets (id TEXT PRIMARY KEY, identity TEXT NOT NULL)');
+  db.prepare('INSERT INTO targets VALUES(?,?)').run(oldTarget.id, JSON.stringify({ kind: oldTarget.kind, vmId: oldTarget.vmId }));
+  for (const phase of ['queued', 'dispatching', 'active', 'cancelling']) {
+    const job = randomUUID();
+    db.prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)').run(job,subject.principal,subject.scope,oldTarget.id,job,'old',
+      JSON.stringify({ ...execution, id: job, requestId: job, target: oldTarget }),phase,'{"state":"running"}',0);
+  }
   db.close();
-  let now = 1000; const f = fake(), jobs = new Jobs(dir, { hyperv: f.backend, wsb: f.backend }, () => now);
+  let now = 1000; const f = fake(), jobs = new Jobs(dir, f.backend, () => now);
   t.after(async () => { await jobs.shutdown(); await rm(dir, { recursive: true, force: true }); });
-  assert.equal(jobs.get(subject, vm, requestId).result?.stdout, 'ok');
+  assert.equal(jobs.get(subject, wsb, requestId).result?.stdout, 'ok');
   now += COMPLETED_DETAILS_RETENTION_MS + 1; jobs.archiveCompleted();
-  assert.equal(jobs.get(subject, vm, requestId).details, 'archived');
-  assert.deepEqual(jobs.get(subject, vm, requestId).resultSummary, { exitCode: 0, truncated: false });
-  assert.throws(() => jobs.submit(subject, vm, requestId, command), /request_id_conflict/);
+  assert.equal(jobs.get(subject, wsb, requestId).details, 'archived');
+  assert.deepEqual(jobs.get(subject, wsb, requestId).resultSummary, { exitCode: 0, truncated: false });
+  assert.throws(() => jobs.submit(subject, wsb, requestId, command), /request_id_conflict/);
+  assert.throws(() => jobs.bindTargets([{ ...wsb, id: oldTarget.id }]), /target_id_reused/);
+  const stored = new DatabaseSync(path.join(dir, 'jobs.sqlite'), {readOnly: true});
+  try {
+    const old = stored.prepare("SELECT phase, json_extract(status,'$.state') AS state FROM jobs WHERE target=? ORDER BY rowid").all(oldTarget.id);
+    assert.deepEqual(old.map(row => [row.phase, row.state]), [
+      ['terminal','cancelled'], ['terminal','unknown'], ['terminal','unknown'], ['terminal','unknown'],
+    ]);
+  } finally { stored.close(); }
+  jobs.bindTargets([wsb]);
+  await jobs.tick();
   assert.equal(f.calls.length, 0);
 });
 
@@ -194,31 +185,31 @@ test('执行桥阻塞时状态不排队，并按作用域隐藏任务与错误',
   const x = await fixture(t), gate = Promise.withResolvers<void>();
   x.f.backend.dispatch = async e => { x.f.calls.push(e); await gate.promise; };
   x.f.backend.probe = async () => ({ state: 'ready', protocolVersion: 1, helperVersion: 'test-build' });
-  const first = x.jobs.submit(subject, vm, randomUUID(), command);
+  const first = x.jobs.submit(subject, wsb, randomUUID(), command);
   const pending = x.jobs.tick();
-  const second = x.jobs.submit(subject, vm, randomUUID(), command);
+  const second = x.jobs.submit(subject, wsb, randomUUID(), command, first.sessionId);
   try {
-    const status = await x.jobs.status(subject, vm);
+    const status = await x.jobs.status(subject, wsb);
     assert.equal(status.readiness.state, 'ready');
     assert.equal(status.queue.busy, true);
     assert.equal(status.queue.current?.jobId, first.jobId);
     assert.equal(status.queue.queued, 1);
     assert.equal(status.queue.oldestQueuedAt, 1000);
     assert.equal(x.f.calls.length, 1);
-    const foreign = await x.jobs.status({ ...subject, scope: 'other' }, vm);
+    const foreign = await x.jobs.status({ ...subject, scope: 'other' }, wsb);
     assert.deepEqual(foreign.queue, { busy: true, current: null, queued: 0, oldestQueuedAt: null });
     assert.equal(foreign.lastError, null);
     assert.equal(status.ledger.jobs, 2); assert.equal(status.ledger.retainedPayloads, 2);
     assert.equal(foreign.ledger.jobs, 0); assert.equal(foreign.ledger.retainedPayloads, 0);
     assert.equal(foreign.ledger.databaseBytes, status.ledger.databaseBytes);
     assert.equal(JSON.stringify(foreign).includes(first.jobId), false);
-    assert.equal(x.jobs.get(subject, vm, second.requestId).state, 'queued');
+    assert.equal(x.jobs.get(subject, wsb, second.requestId).state, 'queued');
   } finally { gate.resolve(); await pending; }
   x.f.backend.probe = async () => ({ state: 'unavailable', error: 'probe_offline' });
-  const offline = await x.jobs.status(subject, vm);
+  const offline = await x.jobs.status(subject, wsb);
   assert.equal(offline.readiness.state, 'unavailable');
   assert.equal(offline.queue.current?.error, 'missing_evidence');
   assert.equal(offline.lastError?.jobId, first.jobId);
-  assert.equal((await x.jobs.status({ principal: 'other', scope: subject.scope }, vm)).lastError, null);
+  assert.equal((await x.jobs.status({ principal: 'other', scope: subject.scope }, wsb)).lastError, null);
   assert.equal(x.f.calls.length, 1);
 });

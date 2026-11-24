@@ -1,4 +1,3 @@
-import { deviceServiceDetail } from "./device-label";
 import { renderGitHub } from "./github";
 import * as C from "./app-contracts";
 import { Check } from "typebox/value";
@@ -22,7 +21,7 @@ export const ERRORS: Record<string, string> = {
   device_oauth_state: "授权请求已过期，请从当前标签页重新授权。",
   device_oauth_zone: "没有找到匹配的活动域名。请核对授权账户、部署域名或 DEVICE_TUNNEL_DOMAIN。",
   device_oauth_refresh_missing: "Cloudflare 未授予离线续期权限，请重新授权。",
-  device_oauth_scope: "设备所需权限不完整，请重新授权。",
+  device_oauth_scope: "Cloudflare 所需权限不完整，请重新授权。",
   device_oauth_exchange: "Cloudflare 换取令牌失败，请重新授权。",
   device_oauth_reauthorize: "Cloudflare 授权已失效，请重新授权。",
   device_cloudflare_denied: "Cloudflare 未授权此操作，请核对本次同意的可选权限。",
@@ -481,8 +480,8 @@ export function renderMcp(servers: C.Overview["mcp"]) {
     if (!oauth && server.login === "needed") status = "缺少凭据";
     list.append(el("div", { className: "row" }, [
       el("div", { className: "grow", style: "min-width:160px" }, [
-        el("div", { style: "font-weight:600", text: server.device?.name ?? server.server, title: server.server }),
-        el("div", { className: "muted small", text: server.device ? deviceServiceDetail(server.device) : CREDENTIAL[server.credential] || server.credential }),
+        el("div", { style: "font-weight:600", text: server.server, title: server.server }),
+        el("div", { className: "muted small", text: CREDENTIAL[server.credential] || server.credential }),
       ]),
       server.enabled ? pill(status, login[1]) : pill("已停用", "neutral"),
       el("span", { className: "mono muted", text: server.tools === null ? "工具数待同步" : server.tools + " 个工具" }),

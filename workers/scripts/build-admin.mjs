@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const root = new URL("../", import.meta.url);
-const [result, css, device, htmlTemplate, pagination] = await Promise.all([
+const [result, css, htmlTemplate, pagination] = await Promise.all([
   build({
     absWorkingDir: fileURLToPath(root), entryPoints: ["browser/main.ts"], bundle: true,
     format: "iife", platform: "browser", target: "es2022", write: false,
@@ -14,11 +14,6 @@ const [result, css, device, htmlTemplate, pagination] = await Promise.all([
     loader: { ".css": "css" }, minify: true, write: false,
     legalComments: "none", charset: "utf8", logLevel: "warning",
   }),
-  build({
-    absWorkingDir: fileURLToPath(new URL('../runner/', root)), entryPoints: ['src/device-cli.ts'], bundle: true,
-    format: 'cjs', platform: 'node', target: 'node24', minify: true, write: false,
-    legalComments: 'none', charset: 'utf8', logLevel: 'warning',
-  }),
   readFile(new URL("browser/index.html", root), "utf8"),
   readFile(new URL("src/admin/pagination.ts", root), "utf8"),
 ]);
@@ -27,9 +22,6 @@ if (!pageSize) throw new Error("ADMIN_PAGE_SIZE not found in src/admin/paginatio
 const pageHtml = htmlTemplate
   .replace("/*__ADMIN_CSS__*/", () => css.outputFiles[0].text.trim())
   .replace("__ADMIN_PAGE_SIZE__", pageSize);
-await mkdir(new URL('src/devices/', root), { recursive: true });
-await writeFile(new URL('src/devices/client.generated.ts', root),
-  '// 自动生成的设备客户端；修改 runner/src/device-*.ts。\nexport const DEVICE_CLIENT = ' + JSON.stringify(device.outputFiles[0].text) + ';\n', 'utf8');
 await mkdir(new URL("src/admin/", root), { recursive: true });
 await writeFile(new URL("src/admin/app.generated.ts", root),
   "// 此文件由 scripts/build-admin.mjs 生成，请修改 browser/ 中的源文件。\nexport const ADMIN_PAGE_HTML = " + JSON.stringify(pageHtml) + ";\nexport const ADMIN_APP_JS = " + JSON.stringify(result.outputFiles[0].text) + ";\n", "utf8");

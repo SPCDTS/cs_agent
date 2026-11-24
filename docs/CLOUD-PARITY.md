@@ -98,7 +98,8 @@ if (result.status === 200) text(JSON.parse(result.body).items);
 - 主线程复用 `ThreadMcp` 连接、目录缓存与队列；子 agent 只保存派出时的有界目录快照（`catalogJson`），所有 MCP 调用经父线程 `SubagentCapabilityHost`（`workers/src/mcp/delegated.ts`）代理并重核父 scope、当前 `generation`、取消状态与当前授权。目录快照只能缩小权限，不能扩大。
 - 派出参数支持可选 `mcpTools: [{ server, tools }]` 收窄原始工具名，可选 `sandboxId`（来自 `sandbox_list` / `sandbox_create`，省略继承父默认工作区；同一 ID 共享 `/work`）。子 agent 没有发送、鉴权、技能发布、记忆写入或继续派出子 agent 的工具。
 - 宿主在 `tools/call` 的 `params._meta["cs-agent/caller"]` 注入不可伪造的调用 scope（以及 Windows MCP 的授权环境范围 `environments`），模型工具参数不能覆盖。
-- Cloudflare 之外的环境（Windows Hyper-V/WSB、设备命令行、独立桌面）均通过标准 MCP 接入，不走 R2 同步。停止子任务不撤回已提交远端命令，须在有效期间显式取消并等待确认。
+- 自托管 Cua 通过 `list_spaces` 和 `list_tools`（`service=driver`）展示获准设备及其 Driver 工具说明。主人通过管理台按会话分配设备，子任务只可查看派出时清单与当前分配的交集。
+- Cloudflare 编码沙箱和独立 Windows Sandbox MCP 依据各自的执行权限运行任务。R2 快照属于会话的 Cloudflare 编码沙箱。停止子任务后仍需对已经提交的 WSB 命令显式取消并等待确认。
 
 ### 4.2 资源、图片与统一返回契约
 
@@ -107,6 +108,6 @@ if (result.status === 200) text(JSON.parse(result.body).items);
 
 ### 4.3 群 MCP 授权与逐次审批
 
-- 群默认无任何 MCP 工具。管理员通过 `PUT /admin/mcp/access` 为群配置允许工具（静态 `allow` 子集）、允许资源前缀、允许成员、有效期及（Windows runner 的）环境 ID 列表与环境审批策略。
+- 普通 MCP 服务默认仅主人可用。管理员通过 `PUT /admin/mcp/access` 为群配置允许工具（静态 `allow` 子集）、允许资源前缀、允许成员、有效期及（Windows runner 的）环境 ID 列表与环境审批策略。
 - 宿主维护静态 `tools.readOnly` 清单（不信任远端声明）；群成员使用 owner 账号调用非只读工具时产生独立审批（绑定 `actor`、`scope`、`generation`、`replyChannel`、工具契约、参数摘要、`operationId` 与 10 分钟有效期）。
 - 批准接口只接受请求 ID 与动作，严格执行已保存参数；执行中若 DO 中断，下次 `restore` 经 `recoverInterrupted` 将 `executing` 标为 `outcome_unknown` 绝不重放。事件回合不借群授权调用 MCP；网页来源 `replyChannel` 保持 `web`。
