@@ -20,7 +20,35 @@ export const deviceServerId = (id: string) => 'device-' + id;
 export class DeviceStore {
   constructor(private readonly sql: SqlStorage, private readonly vault: TokenVault, private readonly mcp: McpServerStore, private readonly env: Env,
     private readonly settings = async () => tunnelSettings(env)) {}
-  initialize() { this.sql.exec(`CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY,name TEXT NOT NULL,desktop INTEGER NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL,expires INTEGER NOT NULL,pairing_hash TEXT NOT NULL,claim_hash TEXT,secret TEXT NOT NULL,tunnel_id TEXT,dns_id TEXT)`); }
+  initialize() {
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY,name TEXT NOT NULL,desktop INTEGER NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL,expires INTEGER NOT NULL,pairing_hash TEXT NOT NULL,claim_hash TEXT,secret TEXT NOT NULL,tunnel_id TEXT,dns_id TEXT)`);
+    this.sql.exec('CREATE TABLE IF NOT EXISTS device_tool_aliases(id TEXT PRIMARY KEY, alias TEXT NOT NULL UNIQUE)');
+    this.sql.exec("CREATE INDEX IF NOT EXISTS devices_active ON devices(created,id) WHERE state != 'revoked'");
+  }
+  /** 只读取登记名；已分配的别名在撤销后仍保留，防止同名新设备接管旧名称。 */
+  toolLabels() {
+    const labels: Record<string, { alias: string; name: string }> = {};
+    const rows = this.sql.exec<{ id: string; name: string; desktop: number; alias: string | null }>(
+      "SELECT d.id,d.name,d.desktop,a.alias FROM devices d LEFT JOIN device_tool_aliases a ON a.id=d.id WHERE d.state != 'revoked' ORDER BY d.created,d.id").toArray();
+    for (const row of rows) {
+      let alias = row.alias;
+      if (!alias) {
+        const base = row.name.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 32);
+        const hexId = row.id.replaceAll('-', '');
+        alias = base || 'device_' + hexId.slice(0, 8);
+        // 首段和管理台短编号一致。极少数 UUID 前缀相同的情况逐段延长。
+        for (let length = base ? 8 : 12; this.sql.exec('SELECT 1 FROM device_tool_aliases WHERE alias=?', alias).toArray().length; length += 4) {
+          if (length > hexId.length) throw new Error('device_alias_conflict');
+          alias = (base || 'device') + '_' + hexId.slice(0, length);
+        }
+        this.sql.exec('INSERT INTO device_tool_aliases(id,alias) VALUES(?,?)', row.id, alias);
+      }
+      const label = { alias, name: row.name }, server = deviceServerId(row.id);
+      labels[server] = label;
+      if (row.desktop) labels[server + '-desktop'] = label;
+    }
+    return labels;
+  }
   private row(id: string) { const row = this.sql.exec<Row>('SELECT * FROM devices WHERE id=?', id).toArray()[0]; if (!row) throw new Error('device_not_found'); return row; }
   private view(row: Row): Static<typeof DeviceView> { return { id: row.id, name: row.name, desktop: !!row.desktop, state: row.state, createdAt: row.created, expiresAt: row.expires,
     serverId: deviceServerId(row.id), desktopServerId: row.desktop ? deviceServerId(row.id) + '-desktop' : null }; }

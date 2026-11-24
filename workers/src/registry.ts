@@ -5,7 +5,7 @@ import { Type } from "typebox";
 import { Check } from "typebox/value";
 import type { Credential } from "@earendil-works/pi-ai";
 import type { Env } from "./env";
-import { MCP_CONFIG, isOAuthServer, publicOrigin, referencedSecret, type OAuthServer } from "./mcp/config";
+import { MCP_CONFIG, isOAuthServer, publicOrigin, referencedSecret, type McpConfig, type OAuthServer } from "./mcp/config";
 import { TokenVault, randomSecret, sha256 } from "./mcp/crypto";
 import { DiscoverySchema, discover, exchange, TokenRejected, type OAuthTokens } from "./mcp/oauth";
 import { OAuthFailure } from "./mcp/oauth-fetch";
@@ -122,7 +122,7 @@ export class RegistryDO extends DurableObject<Env> {
     });
   }
 
-  mcpConfig() { return this.mcpServers.config(); }
+  mcpConfig(): McpConfig { return { ...this.mcpServers.config(), deviceLabels: this.devices.toolLabels() }; }
   mcpServersList(includeDeviceLabels = false) {
     const records = this.mcpServers.list();
     const labels = includeDeviceLabels ? this.devices.serviceLabels(records.map(({ server }) => server.id)) : undefined;

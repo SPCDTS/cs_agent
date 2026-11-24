@@ -41,7 +41,9 @@ export function snapshotCatalogs(snapshot: McpCapabilitySnapshot): Catalog[] {
   const value: unknown = JSON.parse(snapshot.catalogJson);
   const tool = Type.Object({ name: Type.String(), description: Type.String(), inputSchema: Type.Record(Type.String(), Type.Unknown()),
     outputSchema: Type.Optional(Type.Record(Type.String(), Type.Unknown())) });
-  const schema = Type.Array(Type.Object({ serverId: Type.String(), configDigest: Type.String(), scopeDigest: Type.String(), digest: Type.String(), tools: Type.Array(tool) }));
+  const schema = Type.Array(Type.Object({ serverId: Type.String(), device: Type.Optional(Type.Object({
+    alias: Type.String({ pattern: "^[a-z0-9]{1,32}(_[a-f0-9]{8,32})?$" }), name: Type.String({ maxLength: 80 }),
+  })), configDigest: Type.String(), scopeDigest: Type.String(), digest: Type.String(), tools: Type.Array(tool) }));
   if (!Check(schema, value)) throw new Error("catalog_invalid");
   return value.map(catalog => {
     if (catalog.tools.length > MCP_CONFIG.limits.visibleTools) throw new Error("catalog_limit");

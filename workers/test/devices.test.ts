@@ -72,6 +72,25 @@ it('配对、断线重试、MCP 自动启用、凭据加密与撤销使用现有
     expect(fixture.requests.at(-1)?.body).toEqual({ config: { ingress: [{ service: 'http_status:404' }] } });
   });
 });
+it('已有设备按首次登记顺序取得别名，同名设备在重启和撤销后保留编号', async () => {
+  await runInDurableObject(env.REGISTRY.getByName('main'), async (registry, state) => {
+    const add = (name: string, order: number, key: string = crypto.randomUUID()) => {
+      state.storage.sql.exec("INSERT INTO devices(id,name,desktop,state,created,expires,pairing_hash,secret) VALUES(?,?,1,'ready',?,0,'','')", key, name, order);
+      return key;
+    };
+    const later = add('Lab Mac', 2, '12345678-abcd-4000-8000-000000000001'), first = add('Lab-Mac', 1), chinese = add('办公室', 3);
+    const labels = registry.mcpConfig().deviceLabels!;
+    expect(labels[deviceServerId(first)]?.alias).toBe('labmac');
+    expect(labels[deviceServerId(later) + '-desktop']?.alias).toBe('labmac_12345678');
+    expect(labels[deviceServerId(chinese)]).toEqual({ alias: 'device_' + chinese.slice(0, 8), name: '办公室' });
+    state.storage.sql.exec("UPDATE devices SET state='revoked' WHERE id=?", first);
+    const third = add('LAB MAC', 4, '12345678-def0-4000-8000-000000000002');
+    const restored = stores(state).devices.toolLabels();
+    expect(restored[deviceServerId(first)]).toBeUndefined();
+    expect(restored[deviceServerId(later)]?.alias).toBe('labmac_12345678');
+    expect(restored[deviceServerId(third)]?.alias).toBe('labmac_12345678def0');
+  });
+});
 it('过期配对不可领取，桌面可选时复用同一个 Tunnel 并限定路由', async () => {
   const fixture = cloud();
   const other = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
