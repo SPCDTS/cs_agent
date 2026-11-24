@@ -48,7 +48,7 @@ Token 不通过聊天或模型工具参数接收，不回显。凭据使用现�
 
 ## 个人设备与 Windows Sandbox
 
-个人设备和持久 VM 共用 `cua`。设备卡默认显示主机名，管理台支持自定义显示名。模型用 `list_spaces` 选择获准设备，再用 `list_tools` 查询该卡的 Driver 工具。主人当前的交互回合还可使用单独启用的 `get_hostname` 和 `get_window_screenshot`，按完整设备 ID 读取主机名或指定的 Mac 窗口。设备分配和隔离验证见 [Cua 设备接入](DEVICE-MCP.md)。
+个人设备和持久 VM 共用 `cua`。设备卡默认显示主机名，管理台支持自定义显示名。模型用 `list_spaces` 选择获准设备，再用 `list_tools` 查询该卡的 Driver 工具。为目标设备启用读取后，获授权的交互会话和子任务还可用 `space_bash` 读取主机名，或用 `call_tool(service=driver)` 查询并截取指定的 Mac 窗口。设备分配和隔离验证见 [Cua 设备接入](DEVICE-MCP.md)。
 
 Cloudflare 容器提供会话私有的编码工作区。临时 Windows Sandbox 单独登记为提供 `env_*` 的宿主机服务。[WSB 配置](WINDOWS-MCP.md)
 

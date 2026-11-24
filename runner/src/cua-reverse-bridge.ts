@@ -28,21 +28,19 @@ const bridgeTools: Record<string,Tool> = {
       service:{type:'string',enum:['driver']}, name:{type:'string',maxLength:128},
     }, required:['space','service'], additionalProperties:false}, annotations:{readOnlyHint:true},
   },
-  get_hostname: {
-    name:'get_hostname', description:'在选定设备上读取系统主机名。',
-    inputSchema:{type:'object',properties:{space:spaceProperty},required:['space'],additionalProperties:false},
-    annotations:{readOnlyHint:true},
+  space_bash: {
+    name:'space_bash', description:'在选定设备运行 hostname，读取系统主机名。',
+    inputSchema:{type:'object',properties:{space:spaceProperty,command:{type:'string',enum:['hostname']}},
+      required:['space','command'],additionalProperties:false}, annotations:{readOnlyHint:true},
   },
-  get_window_screenshot: {
-    name:'get_window_screenshot', description:'读取指定 macOS 进程中一个窗口的 PNG 截图。需要该设备上的进程 ID 和窗口 ID。',
+  call_tool: {
+    name:'call_tool', description:'调用 macOS Driver。list_windows 返回可选窗口的 PID 和窗口 ID，可按 app 或 pid 筛选。get_window_state 用这两个 ID 获取指定窗口的 PNG。',
     inputSchema:{type:'object',properties:{
-      space:spaceProperty, pid:{type:'integer',minimum:1,maximum:0x7fffffff},
-      window_id:{type:'integer',minimum:1,maximum:0xffffffff},
-    },required:['space','pid','window_id'],additionalProperties:false}, annotations:{readOnlyHint:true},
+      space:spaceProperty, service:{type:'string',enum:['driver']}, tool:{type:'string',enum:['list_windows','get_window_state']},
+      arguments:{type:'object',properties:{app:{type:'string',minLength:1,maxLength:128},pid:{type:'integer',minimum:1,maximum:0x7fffffff},
+        window_id:{type:'integer',minimum:1,maximum:0xffffffff}},additionalProperties:false},
+    },required:['space','service','tool','arguments'],additionalProperties:false},annotations:{readOnlyHint:true},
   },
-};
-const publicToolFor: Record<string,string> = {
-  list_spaces:'list_spaces', list_tools:'list_tools', space_bash:'get_hostname', call_tool:'get_window_screenshot',
 };
 const methods = new Set(['initialize', 'notifications/initialized', 'notifications/cancelled', 'ping', 'tools/list', 'tools/call']);
 
@@ -105,9 +103,16 @@ function validToolArgs(name: string, args: Record<string, unknown>): boolean {
   if (name === 'list_spaces') return keys.length === 0;
   if (typeof args.space !== 'string' || !args.space || args.space.length > 256) return false;
   switch (name) {
-    case 'get_hostname': return keys.length === 1;
-    case 'get_window_screenshot':
-      return keys.length === 3 && positiveInteger(args.pid,0x7fffffff) && positiveInteger(args.window_id,0xffffffff);
+    case 'space_bash': return keys.length === 2 && args.command === 'hostname';
+    case 'call_tool': {
+      const input = args.arguments;
+      if (keys.length !== 4 || args.service !== 'driver' || !isRecord(input)) return false;
+      if (args.tool === 'get_window_state')
+        return Object.keys(input).length === 2 && positiveInteger(input.pid,0x7fffffff) && positiveInteger(input.window_id,0xffffffff);
+      return args.tool === 'list_windows' && Object.keys(input).every(key => key === 'app' || key === 'pid')
+        && (input.pid === undefined || positiveInteger(input.pid,0x7fffffff))
+        && (input.app === undefined || typeof input.app === 'string' && !!input.app.trim() && input.app.length <= 128);
+    }
     case 'list_tools':
       return keys.every(k => ['space','service','name'].includes(k)) && args.service === 'driver'
         && (args.name === undefined || typeof args.name === 'string' && args.name.length <= 128);
@@ -200,7 +205,7 @@ class DirectorySession {
     this.server.setRequestHandler(ListToolsRequestSchema, async (req, {signal}) => {
       try {
         const page = await this.client.request({method:'tools/list',params:{cursor:req.params?.cursor}}, ListToolsResultSchema,{signal});
-        return {nextCursor:page.nextCursor, tools:page.tools.filter(t => Object.hasOwn(publicToolFor,t.name)).map(t => bridgeTools[publicToolFor[t.name]!]!)};
+        return {nextCursor:page.nextCursor, tools:page.tools.filter(t => Object.hasOwn(bridgeTools,t.name)).map(t => bridgeTools[t.name]!)};
       } catch { throw new McpError(ErrorCode.InternalError, '无法读取 Cua 工具目录'); }
     });
     this.server.setRequestHandler(CallToolRequestSchema, async ({params}, {signal}) => {
@@ -215,31 +220,44 @@ class DirectorySession {
         throw new McpError(ErrorCode.InvalidParams,'未登记此设备 ID，请使用 list_spaces 返回的完整 ID。',{reason:'space_not_registered'});
       if (matching.length > 1)
         throw new McpError(ErrorCode.InternalError,'Cua 目录中此设备 ID 出现多次，无法确认目标。',{reason:'space_ambiguous'});
-      if (params.name === 'get_hostname')
+      if (params.name === 'space_bash')
         return hostnameResult(await this.call('space_bash',{space,command:'hostname',timeout:5},signal));
-      if (params.name === 'get_window_screenshot') {
+      if (params.name === 'call_tool') {
         if (matching[0]!.os !== 'macos')
           throw new McpError(ErrorCode.InvalidParams,'此设备尚未提供经验证的精确窗口截图。',{reason:'window_screenshot_unsupported'});
-        return this.windowScreenshot(space,args.pid as number,args.window_id as number,signal);
+        return this.windowTool(space,args.tool as string,args.arguments as Record<string,unknown>,signal);
       }
       const directory = driverDirectory(await this.readDirectory('list_tools',args,signal));
       return {content:[{type:'text',text:JSON.stringify(directory)}]};
     });
   }
 
-  private async windowScreenshot(space: string, pid: number, windowId: number, signal: AbortSignal): Promise<CallToolResult> {
+  private async windowTool(space: string, name: string, input: Record<string,unknown>, signal: AbortSignal): Promise<CallToolResult> {
     const {tools} = driverDirectory(await this.readDirectory('list_tools',{space,service:'driver',name:'window'},signal));
     const supports = (name: string, keys: string[]) => {
       const matches = tools.filter(tool => tool.name === name);
       const properties = matches[0]?.inputSchema?.properties;
       return matches.length === 1 && isRecord(properties) && keys.every(key => Object.hasOwn(properties,key));
     };
+    const callDriver = (tool: string, args: Record<string,unknown>) =>
+      this.call('call_tool',{space,service:'driver',tool,arguments:args},signal);
+    if (name === 'list_windows') {
+      if (!supports('list_windows',Object.keys(input))) throw new McpError(ErrorCode.InvalidParams,'设备不支持该窗口查询。');
+      const {windows} = (await callDriver(name,input)).structuredContent ?? {};
+      if (!Array.isArray(windows) || windows.length > 1024) throw invalidDirectory();
+      const rows = windows.map(row => {
+        if (!isRecord(row) || !positiveInteger(row.pid,0x7fffffff) || !positiveInteger(row.window_id,0xffffffff)
+            || (input.pid !== undefined && row.pid !== input.pid)) throw invalidDirectory();
+        const title = typeof row.title === 'string' ? row.title.slice(0,128) : '';
+        return {pid:row.pid,window_id:row.window_id,title};
+      });
+      return {content:[{type:'text',text:JSON.stringify({windows:rows})}]};
+    }
+    const pid = input.pid as number, windowId = input.window_id as number;
     const capture = {pid,window_id:windowId,include_accessibility_tree:false,include_screenshot:true,
       display_only:true,screenshot_format:'png',max_dimension:maxScreenshotDimension};
     if (!supports('get_window_state',Object.keys(capture)) || !supports('list_windows',['pid']))
       throw new McpError(ErrorCode.InvalidParams,'设备的 Driver 缺少精确窗口截图支持。',{reason:'window_screenshot_unsupported'});
-    const callDriver = (tool: string, args: Record<string,unknown>) =>
-      this.call('call_tool',{space,service:'driver',tool,arguments:args},signal);
     const image = windowImage(await callDriver('get_window_state',capture),pid,windowId);
     // Driver 拍摄前已检查窗口归属；拍摄期间退出或易主时，也须丢弃图像。
     const {windows} = (await callDriver('list_windows',{pid})).structuredContent ?? {};

@@ -219,7 +219,8 @@ test('设备读取只用登记目标、固定命令和同一进程的精确窗�
   const dir = await mkdtemp(join(tmpdir(),'cua-read-'));
   const path = process.platform === 'win32' ? '\\\\.\\pipe\\cua-read-' + randomUUID() : join(dir,'daemon.sock');
   const space = 'relay:fixture01', pid = 122, window_id = 501;
-  const windowArgs = {space,pid,window_id};
+  const driverArgs = (tool:string,args:object) => ({space,service:'driver',tool,arguments:args});
+  const windowArgs = (args:object = {pid,window_id}) => driverArgs('get_window_state',args);
   const png = {type:'image' as const,mimeType:'image/png',data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC'};
   const meta = {pid,window_id,screenshot_frame_valid:true,screenshot_width:1,screenshot_height:1,window_title:'private title'};
   let capture: CallToolResult = {content:[png,{type:'text',text:'private title'}],structuredContent:meta};
@@ -245,11 +246,15 @@ test('设备读取只用登记目标、固定命令和同一进程的精确窗�
         assert.deepEqual(args,{space,service:'driver',name:'window'});
         return json({service:'driver',tools:[
           {name:'get_window_state',description:'test',inputSchema:{properties:screenshotSupported ? captureArguments : {}}},
-          {name:'list_windows',description:'test',inputSchema:{properties:{pid:{}}}},
+          {name:'list_windows',description:'test',inputSchema:{properties:{pid:{},app:{}}}},
         ]});
       case 'call_tool': {
         if (args?.tool === 'list_windows') {
-          assert.deepEqual(args,{space,service:'driver',tool:'list_windows',arguments:{pid}});
+          if ((args.arguments as {app?:string}).app) {
+            assert.deepEqual(args,driverArgs('list_windows',{app:'Test'}));
+            return {content:[],structuredContent:{windows:[{pid,window_id,title:'Fixture window',unrelated:'private'}]}};
+          }
+          assert.deepEqual(args,driverArgs('list_windows',{pid}));
           return {content:[{type:'text',text:'unrelated window title'}],structuredContent:{windows:matched ? [{pid,window_id}] : [{pid:pid+1,window_id}]}};
         }
         assert.deepEqual(args,{space,service:'driver',tool:'get_window_state',arguments:captureArguments});
@@ -271,29 +276,31 @@ test('设备读取只用登记目标、固定命令和同一进程的精确窗�
   const session = randomUUID();
   await ws.rpc(session,'initialize',{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'test',version:'1'}});
   const tools = (await ws.rpc(session,'tools/list')).result.tools.map((tool:{name:string}) => tool.name);
-  assert.deepEqual(tools,['list_spaces','list_tools','get_hostname','get_window_screenshot']);
+  assert.deepEqual(tools,['list_spaces','list_tools','space_bash','call_tool']);
   const call = (name: string,args: object) => ws.rpc(session,'tools/call',{name,arguments:args});
   for (const [name,args] of [
-    ['get_hostname',{space,command:'anything'}],['get_window_screenshot',{...windowArgs,window_id:0}],
-    ['get_window_screenshot',{...windowArgs,pid:2**31}],['get_window_screenshot',{...windowArgs,path:'test'}],
-    ['space_bash',{space,command:'hostname'}],['call_tool',{space,service:'driver',tool:'get_desktop_state'}],
+    ['space_bash',{space,command:'anything'}],['call_tool',windowArgs({pid,window_id:0})],
+    ['call_tool',windowArgs({pid:2**31,window_id})],['call_tool',windowArgs({pid,window_id,path:'test'})],
+    ['space_bash',{space,command:'hostname',timeout:3600}],['call_tool',driverArgs('get_desktop_state',{})],
   ] as const) assert.ok((await call(name,args)).error);
   assert.equal(seen.length,0);
-  for (const [name,args] of [['get_hostname',{}],['get_window_screenshot',{pid,window_id}]] as const)
+  for (const [name,args] of [['space_bash',{command:'hostname'}],['call_tool',windowArgs()]] as const)
     assert.equal((await call(name,{...args,space:'direct:unknown:18181'})).error.data.reason,'space_not_registered');
-  assert.deepEqual((await call('get_hostname',{space})).result,{content:[{type:'text',text:'mbp14.local'}]});
+  assert.deepEqual((await call('space_bash',{space,command:'hostname'})).result,{content:[{type:'text',text:'mbp14.local'}]});
   for (host of ['mbp14\n[exit 1]','token\nprivate text\n[exit 0]','-invalid\n[exit 0]','mbp14\n[exit 0]\n']) {
-    const reply = await call('get_hostname',{space});
+    const reply = await call('space_bash',{space,command:'hostname'});
     assert.equal(reply.error.data.reason,'hostname_unavailable');
     assert.ok(!JSON.stringify(reply).includes('private text'));
   }
-  const snap = () => call('get_window_screenshot',windowArgs);
+  const snap = () => call('call_tool',windowArgs());
   os = 'windows';
   assert.equal((await snap()).error.data.reason,'window_screenshot_unsupported');
   os = 'macos'; screenshotSupported = false;
   assert.equal((await snap()).error.data.reason,'window_screenshot_unsupported');
   assert.ok(!seen.includes('call_tool'));
   screenshotSupported = true;
+  const found = await call('call_tool',driverArgs('list_windows',{app:'Test'}));
+  assert.deepEqual(JSON.parse(found.result.content[0].text),{windows:[{pid,window_id,title:'Fixture window'}]});
   assert.deepEqual((await snap()).result,{content:[png]});
   matched = false;
   assert.equal((await snap()).error.data.reason,'window_screenshot_unavailable');

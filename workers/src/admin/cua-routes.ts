@@ -79,9 +79,6 @@ export const CUA_ROUTES: AdminRoute[] = [
         throw new HttpError(400,'unknown_space');
       }
       revision = view.revision;
-    } else if (input.spaces.length) {
-      // 离线也能缩小已有分配；CAS 防止会话沿用另一个节点的目录。
-      revision = (await registry.mcpConfig()).servers.find(row => row.id === 'cua')?.access.revision;
     }
     const result = await registry.cuaGrantsPut(input,revision);
     if (result.status !== 'ok') throw new HttpError(result.status === 'conflict' ? 409 : 400,result.status);

@@ -2,7 +2,7 @@ import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { ListToolsResultSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MCP_CONFIG, parseMcpConfig, publicOrigin, type McpServerConfig } from "./config";
-import { cuaDirectoryTools, isCuaTool } from "../cua/discovery";
+import { cuaReadTools, isCuaTool } from "../cua/discovery";
 import { secretsEqual } from "../auth";
 import { TokenVault } from "./crypto";
 import { makeCatalog } from "./catalog";
@@ -69,7 +69,7 @@ export class McpServerStore {
     const server = this.parse(row);
     if (!server.enabled || server.transport.kind !== 'reverse-websocket' || serverDigest(server) !== expectedDigest) return;
     const {tools} = ListToolsResultSchema.parse(JSON.parse(row.discovered));
-    return JSON.stringify({tools:tools.filter(tool => server.tools.allow.includes(tool.name) && cuaDirectoryTools.some(name => name === tool.name))});
+    return JSON.stringify({tools:tools.filter(tool => server.tools.allow.includes(tool.name) && cuaReadTools.some(name => name === tool.name))});
   }
   put(input: ServerSetupInput, expected: string) {
     if (!Check(ServerSetup, input)) throw new McpSetupError("invalid");
@@ -99,6 +99,8 @@ export class McpServerStore {
     const row = this.row(id, expected), server = this.parse(row);
     if (id === 'cua') {
       if (server.transport.kind !== 'reverse-websocket' || !row.secret || input.allow.some(tool => !isCuaTool(tool)) || input.resourceAllow?.length) throw new McpSetupError('invalid');
+      // 移除已启用的工具即撤销其旧调用，即使管理员稍后勾回完全相同的工具组合。
+      if (server.enabled && server.tools.allow.some(tool => !input.allow.includes(tool))) server.access.revision = crypto.randomUUID();
       input = { ...input, readOnly: input.allow };
     }
     if (!row.discovered) throw new McpSetupError("probe_required");
@@ -115,6 +117,7 @@ export class McpServerStore {
   disable(id: string, expected: string) {
     const row = this.row(id, expected);
     const server = this.parse(row), revision = crypto.randomUUID();
+    // 暂停前已派出的调用和子任务继续使用旧版本；已保存的会话分配由 Registry 迁到新版本。
     if (id === 'cua') server.access.revision = revision;
     this.sql.exec("UPDATE mcp_servers SET config=?,revision=? WHERE id=?", JSON.stringify({ ...server, enabled: false }), revision, id);
     return this.get(id);

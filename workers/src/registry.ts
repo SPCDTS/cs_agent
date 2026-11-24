@@ -126,6 +126,7 @@ export class RegistryDO extends DurableObject<Env> {
     return config;
   }
   cuaAssigned(scope:string, serverRevision:string) { return MCP_CONFIG.enabled ? this.cuaGrants.assigned(scope,serverRevision) : []; }
+  cuaGrantVersions(scope:string, serverRevision:string): Record<string,string> { return MCP_CONFIG.enabled ? this.cuaGrants.grantVersions(scope,serverRevision) : {}; }
   cuaDirectoryToolsJson(scope:string, serverRevision:string, configDigest:string) {
     if (this.cuaAssigned(scope,serverRevision).length) return this.mcpServers.cuaDirectoryToolsJson(configDigest);
   }

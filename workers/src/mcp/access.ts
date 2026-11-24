@@ -13,7 +13,7 @@ export const McpAuthoritySchema = Type.Object({
 });
 export type McpAuthority = Static<typeof McpAuthoritySchema>;
 export type McpCapabilitySnapshot = {
-  cua?: { revision:string; spaces:string[] };
+  cua?: { revision:string; spaces:string[]; grants?:Record<string,string> };
   scope: string; actor: string; generation: number; replyChannel: "web" | "qq"; catalogJson: string; tools: string[]; resourceAllow?: { server: string; prefixes: string[] }[]; environments?: { server: string; access: EnvironmentAccess }[];
 };
 export const McpToolSelectionSchema = Type.Array(Type.Object({
