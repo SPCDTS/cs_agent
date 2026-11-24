@@ -20,7 +20,7 @@ Linux amd64 可从 [Relay 构建工作流](../../.github/workflows/build-cua-rel
 1. 创建专用系统账号和组 `cua-directory`。安装核对过发布校验的 CLI 到 `/usr/local/bin/cua`。Relay 可在相同 CPU 架构的 Linux 构建机检出上述上游提交，用 `cargo build --locked --release --manifest-path libs/cua-spacesd/Cargo.toml -p cua-relay` 构建并将二进制安装到控制机的 `/usr/local/bin/cua-relay`。从本仓库执行 `npm --prefix runner ci`、`npm --prefix runner run build:cua`，把生成的 `runner/dist/reverse-mcp-bridge.cjs` 安装到 `/opt/cs-agent/cua/`，并确认 `/usr/bin/node` 是 Node.js 24 或更高版本。
 2. 将本目录的四个 `.service` 文件安装到 `/etc/systemd/system/` 并运行 `systemctl daemon-reload`。在 `/etc/cs-agent/cua/` 建立 `relays/` 和 `spaces/`，目录仅准 root 访问。以下凭据文件均由 root 持有，权限为 `0600`。
 3. 每台设备准备两个独立、随机的秘密。*注册令牌*只给该设备和它的 Relay，放入 `relays/18181.token` 或 `relays/18182.token`，每个文件恰好一行。*设备令牌*供设备验证目录请求，稍后写入对应的 `spaces/<目录端口>.env`。可使用密码管理器分发。令牌应直接写入受保护的文件，避免终端输出和命令行参数。
-4. 按表填写 [Caddyfile](Caddyfile)。这份独立控制机配置使用公网 443/TCP 提供 WSS，通过 TLS-ALPN-01 在同一端口签发和续期证书；80 端口保持关闭。域名应直接解析到控制机。检查 `caddy validate --config /etc/caddy/Caddyfile` 和 `ss -ltn` 的实际监听结果。与现有站点共用 Caddy 时，全局跳转选项会影响同一实例内的其他站点。运行 `systemctl enable --now cua-relay@18181 cua-relay@18182 cua-directory`。
+4. 按表填写 [Caddyfile](Caddyfile)。域名应直接解析到控制机，公网只开放 443/TCP。若与其他站点共用 Caddy，按下节核对完整配置与监听端口。运行 `systemctl enable --now cua-relay@18181 cua-relay@18182 cua-directory`。
 5. 在 cs-agent「模型与接入」展开「接入或管理远程 MCP 服务」，服务名称填 `cua`，认证选择「反向 WebSocket」，点击「保存连接」。管理员用密码管理器生成一枚独立的 64 位随机十六进制令牌，在 `Authorization` 的密码框填入令牌，点击「保存凭据并检测」。首次操作时桥尚未启动，稍后可重新检测。
 6. 把自动生成的 WSS 地址及同一枚令牌写入 `/etc/cs-agent/cua/bridge.env`，格式如下。令牌值直接填原文。运行 `systemctl enable --now cua-directory-bridge`，在管理台「刷新服务」，选中 `cua` 并确认显示「节点在线」。点击「检测连接与工具」，勾选 `list_spaces` 和 `list_tools`，点击「启用选中工具」。资源 URI 前缀留空。
 
@@ -29,7 +29,38 @@ REVERSE_MCP_URL=wss://agent.example.org/mcp/reverse/cua
 REVERSE_MCP_TOKEN=<管理员生成并在服务凭据中保存的令牌>
 ```
 
-目录 daemon 和登记命令均设置 `CUA_CREDENTIAL_STORE=file`，服务账号将凭据保存在专用的 `0700` 状态目录 `/var/lib/cs-agent-cua` 中。原生 MCP 仅监听 Unix socket。daemon 和各 Relay unit 的 systemd IP 策略只允许回环网络。桥会出站连接上面指定的 cs-agent WSS 地址。每台机器有一个 Relay 进程，增加机器时需按实际同时在线数核对控制机内存和文件描述符。
+目录 daemon 和登记命令均设置 `CUA_CREDENTIAL_STORE=file`，服务账号将凭据保存在专用的 `0700` 状态目录 `/var/lib/cs-agent-cua` 中。原生 MCP 仅监听 Unix socket。daemon 和各 Relay unit 的 systemd IP 策略只允许回环网络。桥会出站连接上面指定的 cs-agent WSS 地址。
+
+### 共享 Caddy 时仅开放 443/TCP
+
+模板的全局 `auto_https disable_redirects` 关闭自动 HTTP 跳转，作用于同一 Caddy 实例上的所有站点。ACME 的 HTTP-01 由各站点的证书签发策略单独控制。Relay 和同机 LLM 等所有使用 ACME 的公网域名都需配置签发方式。采用 TLS-ALPN-01 时，将下段加入每个相关站点现有的 `tls` 配置，并确保 443/TCP 上的证书验证流量直接抵达该 Caddy。已有通过 DNS-01 签发的站点可沿用现有策略。检查全局选项、导入文件和显式的 `:80`、`http://域名` 站点。[Caddy 自动 HTTPS](https://caddyserver.com/docs/caddyfile/options#auto-https) · [ACME 签发与挑战配置](https://caddyserver.com/docs/caddyfile/directives/tls#acme)
+
+```caddyfile
+tls {
+    issuer acme {
+        disable_http_challenge
+    }
+}
+```
+
+在目标机器运行 `caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile`，核对两个公网域名都被预期的签发策略覆盖、使用 TLS-ALPN-01 的域名禁用了 HTTP-01，并检查适配结果中的监听地址。再运行 `caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`。切换窗口内重载后，用 `ss -ltn '( sport = :80 or sport = :443 )'` 确认仅有 443 监听，并分别验证两个域名的 HTTPS 服务与证书。后续续期在 443/TCP 或已配置的 DNS 验证通道完成。
+
+### 1 GiB 控制机上每台设备的开销
+
+在 Debian amd64 的 1 GiB VPS 上，内核可见内存 967 MiB，无 swap。已有共享 Caddy、目录 daemon 和一个原生 Relay，反向 Node 桥当时未启动。测试开始时整机 `MemAvailable` 为 651 MiB。以下内存单位均为 MiB。RSS 包含共享页，PSS 按进程分摊共享页。systemd 的 cgroup 按内核记账，与进程 PSS 口径不同。
+
+| 进程与状态 | 每进程 RSS | 每进程 PSS | 打开的 FD | unit 当前 / 历史峰值内存 |
+| --- | ---: | ---: | ---: | ---: |
+| 已有 Caddy | 53.0 | 53.0 | 7 | 17.4 / 19.6 |
+| 已有目录 daemon | 84.0 | 81.7 | 17 | 86.2 / 86.5 |
+| 已有 Relay，启动探针前 | 18.7 | 15.3 | 10 | 7.5 / 9.5 |
+| 新增三个独立 Relay，空闲 | 18.4–18.8 | 9.6–9.8 | 10 | — |
+| 新增 Relay 各连接一个设备 | 19.9–20.3 | 10.1–10.2 | 11 | — |
+| 三台同时查目录，每个 Relay 的采样峰值 | 19.9–20.3 | 10.1–10.2 | 12 | — |
+
+三个临时 Relay 各用独立的回环地址和凭据。三个合成设备保持 WSS 连接，每台连续读取固定的 Driver 目录 40 次，合计成功 120 次。查询期间采样 66 次。查询末尾整机可用内存为 598 MiB，包含临时 TLS 代理、合成设备及请求进程的开销。退出测试进程、确认监听关闭后恢复至 654 MiB。
+
+这组数据可用于估算少量目录设备的常驻开销。该样本的并发规模为三台，未涵盖桥、真实截图、大目录和同机其他业务的峰值。扩容时先启动实际要用的桥和同机服务，按设备逐步增加并发，记录代表性请求期间的最低 `MemAvailable`。可用 `systemctl show cua-relay@18181 -p MainPID -p MemoryCurrent -p MemoryPeak -p LimitNOFILE` 检查一个实例，再用对应 PID 的 `/proc/<PID>/smaps_rollup` 和 `/proc/<PID>/fd/` 核对 PSS 和文件描述符。用同机业务与桥在高峰期间的实测波动预留余量，再决定是否增加下一台。
 
 ## 登记一台设备
 
