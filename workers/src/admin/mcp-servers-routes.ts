@@ -4,7 +4,7 @@ import { adminJson as json, HttpError, readAdminBody } from "./http";
 import { McpManageInput, manageMcp, mcpChange, setupFailure } from "../mcp/manage";
 
 export const MCP_SERVER_ROUTES: AdminRoute[] = [
-  { method: "GET", path: "/admin/mcp/servers", handle: async ({ env }) => json({ servers: await env.REGISTRY.getByName("main").mcpServersList() }) },
+  { method: "GET", path: "/admin/mcp/servers", handle: async ({ env }) => json({ servers: await env.REGISTRY.getByName("main").mcpServersList(true) }) },
   { method: "POST", path: "/admin/mcp/manage", handle: async ({ env, request }) => {
     try {
       const input = await readAdminBody(request, McpManageInput);

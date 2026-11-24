@@ -1,3 +1,4 @@
+import { deviceServiceDetail } from "./device-label";
 import { renderGitHub } from "./github";
 import * as C from "./app-contracts";
 import { Check } from "typebox/value";
@@ -473,14 +474,17 @@ export function renderMcp(servers: C.Overview["mcp"]) {
   const list = $("mcp-list");
   clear(list);
   for (const server of servers) {
-    const login = LOGIN[server.login] || [server.login, "neutral"];
     const oauth = server.credential === "oauth";
+    const login = LOGIN[server.login] || [server.login, "neutral"];
+    let status = login[0];
+    if (!oauth && server.login === "ok") status = server.credential === "none" ? "已启用" : "凭据已配置";
+    if (!oauth && server.login === "needed") status = "缺少凭据";
     list.append(el("div", { className: "row" }, [
       el("div", { className: "grow", style: "min-width:160px" }, [
-        el("div", { style: "font-weight:600", text: server.server }),
-        el("div", { className: "muted small", text: CREDENTIAL[server.credential] || server.credential }),
+        el("div", { style: "font-weight:600", text: server.device?.name ?? server.server, title: server.server }),
+        el("div", { className: "muted small", text: server.device ? deviceServiceDetail(server.device) : CREDENTIAL[server.credential] || server.credential }),
       ]),
-      server.enabled ? pill(login[0], login[1]) : pill("已停用", "neutral"),
+      server.enabled ? pill(status, login[1]) : pill("已停用", "neutral"),
       el("span", { className: "mono muted", text: server.tools === null ? "工具数待同步" : server.tools + " 个工具" }),
       server.enabled ? el("button", { className: "btn", type: "button", text: "刷新目录", onclick: () => mcpRefresh(server.server) }) : null,
       server.enabled && oauth && server.login !== "ok" ? el("button", { className: "btn primary", type: "button", text: "生成登录链接", onclick: () => mcpLink(server.server) }) : null,

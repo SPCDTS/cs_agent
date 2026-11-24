@@ -93,3 +93,45 @@ test('管理台启动后仍显示失败原因，展开设备面板时加载设�
   assert.equal(sessionStorage.getItem('cs-agent-cloudflare-state'),null);
   delete globalThis.history; delete globalThis.location;
 });
+
+test('概览和两个服务选择器区分同名设备与桌面，操作仍按原服务 ID 定位', async t => {
+  const page = mountDom(ADMIN_PAGE_HTML, { token: 'synthetic-admin' });
+  const ids = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
+  const shell = { id: ids[0], name: '开发机', capability: 'shell' };
+  const services = [
+    { server: 'device-' + ids[0], device: shell },
+    { server: 'device-' + ids[0] + '-desktop', device: { ...shell, capability: 'desktop' } },
+    { server: 'device-' + ids[1], device: { ...shell, id: ids[1] } },
+    { server: 'manual' },
+  ];
+  const paths = [];
+  t.mock.method(globalThis, 'fetch', async path => {
+    paths.push(String(path));
+    if (path === '/admin/mcp/servers') return Response.json({ servers: services.map(({ server, device }) => ({
+      server: { id: server, enabled: true, transport: { url: 'https://example.test/mcp', headers: {} },
+        credential: { kind: 'managed' }, resourceAllow: [], access: {}, tools: { allow: [] } },
+      device, revision: 'v1', credentialSet: true, discovered: null,
+    })) });
+    if (String(path).startsWith('/admin/mcp/access?')) return Response.json({ grant: null });
+    if (String(path).startsWith('/admin/mcp/approvals?')) return Response.json({ approvals: [] });
+    return new Promise(() => {});
+  });
+  const { renderMcp, loadMcpServers, mcpUiLoad } = await bundleModule({ contents:
+    "export { renderMcp } from './browser/app.ts'; export { loadMcpServers } from './browser/mcp-servers.ts'; export { mcpUiLoad } from './browser/mcp.ts';" });
+  renderMcp(services.map(service => ({ ...service, login: 'ok', credential: 'static', enabled: true, tools: 4 })));
+  const rows = [...page.document.querySelector('#mcp-list').children];
+  assert.match(rows[0].textContent, /开发机.*设备命令行 · 11111111.*凭据已配置/);
+  assert.match(rows[1].textContent, /开发机.*设备桌面 · 11111111/);
+  assert.match(rows[2].textContent, /开发机.*设备命令行 · 22222222/);
+  assert.match(rows[3].textContent, /manual/);
+  assert.equal(rows[0].textContent.includes(ids[0]), false);
+  await page.click(rows[2].querySelector('button'));
+  assert.ok(paths.includes('/admin/mcp/' + services[2].server + '/refresh'));
+  await loadMcpServers(services[1].server);
+  await mcpUiLoad();
+  for (const selectId of ['mcp-server-select', 'mcp-access-server']) {
+    const option = [...page.document.getElementById(selectId).options].find(o => o.value === services[1].server);
+    assert.equal(option.textContent, '开发机 · 设备桌面 · 11111111');
+  }
+  assert.equal(page.document.getElementById('mcp-server-id').value, services[1].server);
+});

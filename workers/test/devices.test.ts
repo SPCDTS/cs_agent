@@ -6,6 +6,8 @@ import { McpServerStore } from '../src/mcp/servers';
 import { TokenVault } from '../src/mcp/crypto';
 import { fakeRemote, adminEnv, TEST_STORE_KEY } from './mcp-helpers';
 import worker from '../src/index';
+import type { Overview } from '../browser/app-contracts';
+import type { McpServerRecord } from '../browser/integration-contracts';
 
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
 const id = '11111111-1111-4111-8111-111111111111', tunnelId = '22222222-2222-4222-8222-222222222222';
@@ -70,9 +72,29 @@ it('配对、断线重试、MCP 自动启用、凭据加密与撤销使用现有
     expect(fixture.requests.at(-1)?.body).toEqual({ config: { ingress: [{ service: 'http_status:404' }] } });
   });
 });
+it('已有设备按首次登记顺序取得别名，同名设备在重启和撤销后保留编号', async () => {
+  await runInDurableObject(env.REGISTRY.getByName('main'), async (registry, state) => {
+    const add = (name: string, order: number, key: string = crypto.randomUUID()) => {
+      state.storage.sql.exec("INSERT INTO devices(id,name,desktop,state,created,expires,pairing_hash,secret) VALUES(?,?,1,'ready',?,0,'','')", key, name, order);
+      return key;
+    };
+    const later = add('Lab Mac', 2, '12345678-abcd-4000-8000-000000000001'), first = add('Lab-Mac', 1), chinese = add('办公室', 3);
+    const labels = registry.mcpConfig().deviceLabels!;
+    expect(labels[deviceServerId(first)]?.alias).toBe('labmac');
+    expect(labels[deviceServerId(later) + '-desktop']?.alias).toBe('labmac_12345678');
+    expect(labels[deviceServerId(chinese)]).toEqual({ alias: 'device_' + chinese.slice(0, 8), name: '办公室' });
+    state.storage.sql.exec("UPDATE devices SET state='revoked' WHERE id=?", first);
+    const third = add('LAB MAC', 4, '12345678-def0-4000-8000-000000000002');
+    const restored = stores(state).devices.toolLabels();
+    expect(restored[deviceServerId(first)]).toBeUndefined();
+    expect(restored[deviceServerId(later)]?.alias).toBe('labmac_12345678');
+    expect(restored[deviceServerId(third)]?.alias).toBe('labmac_12345678def0');
+  });
+});
 it('过期配对不可领取，桌面可选时复用同一个 Tunnel 并限定路由', async () => {
   const fixture = cloud();
-  await runInDurableObject(env.REGISTRY.getByName('main'), async (_instance, state) => {
+  const other = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  await runInDurableObject(env.REGISTRY.getByName('main'), async (instance, state) => {
     const { devices, mcp } = stores(state);
     const created = await devices.create({ id, name: '桌面测试', desktop: true });
     const claim = await devices.claim(id, new URL(created.pairingUrl).hash.slice(1), 'a'.repeat(64));
@@ -84,9 +106,25 @@ it('过期配对不可领取，桌面可选时复用同一个 Tunnel 并限定�
       { service: 'http_status:404' },
     ] } });
     expect(mcp.get(deviceServerId(id) + '-desktop').server.enabled).toBe(false);
+    mcp.put({ id: deviceServerId(other), url: 'https://manual.example.test/mcp', auth: 'none' }, 'absent');
+    expect(instance.mcpServersList().every(row => !row.device)).toBe(true);
     state.storage.sql.exec('UPDATE devices SET expires=0 WHERE id=?', id);
     await expect(devices.claim(id, new URL(created.pairingUrl).hash.slice(1), 'a'.repeat(64))).rejects.toThrow('denied');
   });
+  const headers = { Authorization: 'Bearer ' + adminEnv().ADMIN_TOKEN };
+  const get = (path: string) => worker.fetch(new Request(env.PUBLIC_ORIGIN + path, { headers }), adminEnv());
+  const overview = await (await get('/admin/overview')).json<Overview>();
+  const servers = await (await get('/admin/mcp/servers')).json<{servers: McpServerRecord[]}>();
+  for (const records of [
+    overview.mcp.map(row => [row.server, row.device] as const),
+    servers.servers.map(row => [row.server.id, row.device] as const),
+  ]) {
+    const labels = new Map(records);
+    expect(labels.get(deviceServerId(id))).toEqual({ id, name: '桌面测试', capability: 'shell' });
+    expect(labels.get(deviceServerId(id) + '-desktop')).toEqual({ id, name: '桌面测试', capability: 'desktop' });
+    expect(labels.has(deviceServerId(other))).toBe(true);
+    expect(labels.get(deviceServerId(other))).toBeUndefined();
+  }
 });
 it('管理员入口和配对入口分别鉴权，下载客户端不包含真实凭据', async () => {
   const response = await worker.fetch(new Request(env.PUBLIC_ORIGIN + '/admin/devices', { method: 'POST', body: '{}' }), adminEnv());
