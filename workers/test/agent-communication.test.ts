@@ -83,10 +83,14 @@ describe("agent communication MVP", () => {
     await env.SANDBOX.getByName("owner").saveAttachment("/work/report.txt", new TextEncoder().encode("report"));
     await env.SANDBOX.getByName(group).saveAttachment("/work/private.txt", new TextEncoder().encode("not received"));
     const path = "/work/agent-files/" + messageId("owner", "0:send-1").slice(6) + "/0-report.txt";
+    const privateImage = await new MediaRepository({ bucket: env.ASSETS, scope: group }).put({
+      bytes: Uint8Array.of(137,80,78,71,13,10,26,10), name: "local.png", kind: "image",
+    });
     const seen = scriptedModel([
       { name: "send_message", args: { text: "wrong group", target: "qq:group:200000002" } },
       { name: "send_file", args: { path: "/work/private.txt" } },
       { name: "send_message", args: { text: "refresh_token=synthetic-test-value" } },
+      { name: "send_message", args: { text: "", images: [privateImage.id] } },
       { name: "send_message", args: { text: "result ready" } },
       { name: "send_file", args: { path } },
       { name: "send_message", args: { text: "extra" } },
@@ -103,6 +107,7 @@ describe("agent communication MVP", () => {
     expect(seen.outputs[0]).toContain("send_denied");
     expect(seen.outputs[1]).toContain("agent_file_access_denied");
     expect(seen.outputs[2]).toContain("agent_credentials_forbidden");
+    expect(seen.outputs[3]).toContain("agent_file_access_denied");
     expect(await env.BRIDGE.getByName("napcat").deliveryList()).toHaveLength(2);
   });
 

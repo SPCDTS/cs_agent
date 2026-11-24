@@ -221,7 +221,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
           description: "直接展示给用户的纯文本正文（配 images 时可留空）。不用 Markdown 链接；严禁写入内置联网搜索的内部引用标记（如 turn…search、turn…view、cite 等）；确需给出处时只写简短域名或纯文本 URL。",
         }),
         images: Type.Optional(Type.Array(Type.String({ pattern: "^[a-f0-9]{64}$" }), {
-          maxItems: 5, description: "当前会话已有的私有图片资产 ID，最多 5 个；不能传 URL 或文件路径。",
+          maxItems: 5, description: "当前会话已有的私有图片资产 ID，最多 5 个；Agent 回合不可用，已接收的附件请用 send_file。",
         })),
         target: Type.Optional(Type.String({
           pattern: "^qq:(group|private):[1-9][0-9]{0,19}$",
@@ -233,6 +233,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
       execute: async ({ text, images, target }, api, toolContext) => {
         const input = await host.currentInput(harness, api, api.conversationId, toolContext);
         if (!input) throw new Error("current input missing");
+        if (input.kind === "agent" && images?.length) throw new Error("agent_file_access_denied");
         const repository = new MediaRepository({ bucket: host.env.ASSETS, scope: memory.ns });
         const attachments = await Promise.all((images ?? []).map(async id => { const { ref } = await repository.get(id); if(ref.kind!=="image")throw new Error("unsupported_image"); return ref; }));
         const to: Target | undefined = target ? target.startsWith("qq:group:") ? { kind: "group", groupId: target.slice(9) } : { kind: "private", userId: target.slice(11) } : undefined;
