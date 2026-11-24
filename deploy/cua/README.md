@@ -20,7 +20,7 @@ Linux amd64 可从 [Relay 构建工作流](../../.github/workflows/build-cua-rel
 1. 创建专用系统账号和组 `cua-directory`。安装核对过发布校验的 CLI 到 `/usr/local/bin/cua`。Relay 可在相同 CPU 架构的 Linux 构建机检出上述上游提交，用 `cargo build --locked --release --manifest-path libs/cua-spacesd/Cargo.toml -p cua-relay` 构建并将二进制安装到控制机的 `/usr/local/bin/cua-relay`。从本仓库执行 `npm --prefix runner ci`、`npm --prefix runner run build:cua`，把生成的 `runner/dist/reverse-mcp-bridge.cjs` 安装到 `/opt/cs-agent/cua/`，并确认 `/usr/bin/node` 是 Node.js 24 或更高版本。
 2. 将本目录的四个 `.service` 文件安装到 `/etc/systemd/system/` 并运行 `systemctl daemon-reload`。在 `/etc/cs-agent/cua/` 建立 `relays/` 和 `spaces/`，目录仅准 root 访问。以下凭据文件均由 root 持有，权限为 `0600`。
 3. 每台设备准备两个独立、随机的秘密。*注册令牌*只给该设备和它的 Relay，放入 `relays/18181.token` 或 `relays/18182.token`，每个文件恰好一行。*设备令牌*供设备验证目录请求，稍后写入对应的 `spaces/<目录端口>.env`。可使用密码管理器分发。令牌应直接写入受保护的文件，避免终端输出和命令行参数。
-4. 按表填写 [Caddyfile](Caddyfile)。若主机已有 Caddy，合并站点和 `servers` 配置后先执行 `caddy validate --config /etc/caddy/Caddyfile` 再 reload。域名应指向 Caddy 的 TLS 入口，回环端口留在控制机。运行 `systemctl enable --now cua-relay@18181 cua-relay@18182 cua-directory`。
+4. 按表填写 [Caddyfile](Caddyfile)。这份独立控制机配置使用公网 443/TCP 提供 WSS，通过 TLS-ALPN-01 在同一端口签发和续期证书；80 端口保持关闭。域名应直接解析到控制机。检查 `caddy validate --config /etc/caddy/Caddyfile` 和 `ss -ltn` 的实际监听结果。与现有站点共用 Caddy 时，全局跳转选项会影响同一实例内的其他站点。运行 `systemctl enable --now cua-relay@18181 cua-relay@18182 cua-directory`。
 5. 在 cs-agent「模型与接入」展开「接入或管理远程 MCP 服务」，服务名称填 `cua`，认证选择「反向 WebSocket」，点击「保存连接」。管理员用密码管理器生成一枚独立的 64 位随机十六进制令牌，在 `Authorization` 的密码框填入令牌，点击「保存凭据并检测」。首次操作时桥尚未启动，稍后可重新检测。
 6. 把自动生成的 WSS 地址及同一枚令牌写入 `/etc/cs-agent/cua/bridge.env`，格式如下。令牌值直接填原文。运行 `systemctl enable --now cua-directory-bridge`，在管理台「刷新服务」，选中 `cua` 并确认显示「节点在线」。点击「检测连接与工具」，勾选 `list_spaces` 和 `list_tools`，点击「启用选中工具」。资源 URI 前缀留空。
 

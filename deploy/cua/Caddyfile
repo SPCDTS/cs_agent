@@ -1,5 +1,9 @@
 # 将示例域名和 machine-id 换成实际值。两个设备不能共用端口或注册令牌。
 {
+	auto_https disable_redirects
+	servers :443 {
+		protocols h1 h2
+	}
 	servers 127.0.0.1:18281 {
 		protocols h1 h2 h2c
 	}
@@ -23,6 +27,11 @@
 }
 
 relay.example.org {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
 	import join computer-alpha 18181
 	import join computer-bravo 18182
 	handle {
