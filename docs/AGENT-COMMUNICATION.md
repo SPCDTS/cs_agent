@@ -2,7 +2,7 @@
 
 ## 身份与接口
 
-运行时注入 agentSessionId：主会话为 owner、group:<群号> 或 private:<用户号>；子会话为 sub:<父会话>:<子 ID>。模型只可调用 agent_send({to,text?,files?})，不能指定来源、用户身份、权限或消息 ID。回复仍用 agent_send。
+运行时注入 agentSessionId：主会话为 owner、group:<群号> 或 private:<用户号>；子会话为 sub:<父会话>:<子 ID>。Agent 间通信只可调用 agent_send({to,text?,files?})，不能指定来源、用户身份、权限或消息 ID。回复来源 Agent 仍用 agent_send。
 
 消息 ID 从来源、会话代次和工具调用 ID 稳定生成。同次调用重放复用原文件快照；accepted/duplicate 只表示原收件箱已收下，不表示已读或任务完成。通信不新增 cancel/wait/delegate/steer 或任务状态机。
 
@@ -28,7 +28,7 @@ Thread 使用既有 inbound，Subagent 使用既有 inbox，执行仍经 root.su
 
 通信入站使用独立 kind=agent、空 user_id 及可追踪来源，不伪装成 owner 输入。通信边不包含任意 coding 委托：无论群或 owner 的 Agent 回合都不签发或借用人类 SandboxTask，不能据通信任意写文件或执行命令；正常人类群回合及明确派给子任务的原有 coding 能力不受影响；已接收附件可凭当前代次入箱记录经 read 只读和转发，不能读其他主人文件；MCP 使用接收会话主体 agent:<会话地址> 和 kind=agent，不使用最近群发言人的身份。群 Agent 必须在既有 MCP grant 的 actors 中显式加入 agent:group:<群号>，工具、资源、环境及审批策略仍取该 grant；旧数字用户或 * 不自动授予 Agent。owner Agent 同样 owner=false，仅可使用显式 eventAllow 工具白名单；不获得环境或资源访问，写调用仍需审批。代次重置与 grant 撤销即时生效；不继承发送方权限、不写入新 grant。父子通信地址仍绑定会话；不能保持原派出身份的跨成员或 Agent 追问，在写入子 inbox 之前明确拒绝，不能先给运行中的 owner 子任务注入文本再降权。两入口使用同一校验；原任务与原报告不被拒绝的输入污染。
 
-需要用户本人输入的管理、写记忆等操作仍受原入口限制；Agent 回合只能只读本会话记忆。普通 send_message/send_file 不能把 Agent 回合输出发往 QQ/网页。自动子任务结果仍通过原报告格式交回父任务，不会直接通知 QQ。
+需要用户本人输入的管理、写记忆等操作仍受原入口限制；Agent 回合只能只读本会话记忆。主会话收到 Agent 消息后，需要时可用 send_message/send_file 主动通知当前 QQ 会话用户或汇报任务结果，避免刷屏转发内部沟通过程。每回合文字与附件合计最多两次投递，不可跨会话指定目标；文件限本代次已接收的附件。QQ 频控、熔断和网页输出行为不变。自动子任务结果仍通过原报告格式交回父任务，不会直接通知 QQ。
 
 ## 文件
 
@@ -46,7 +46,7 @@ files 是发送方自己已授权工作区的路径列表，最多 5 个，单�
 
 ## 验证边界
 
-本地测试使用 workerd/SQLite/R2 测试环境、faux 模型；工作区持久化用真实 WorkspaceManager/manifest/CAS，容器客户端使用测试夹具。它们验证源码链路，不等于真实 Cloudflare 容器、真实账号或线上群部署验收。发布前还需独立审查，并在另行授权的环境验证双方实际 read 文件及无 QQ 外泄。当前不得宣称线上可用。
+本地测试使用 workerd/SQLite/R2 测试环境、faux 模型；工作区持久化用真实 WorkspaceManager/manifest/CAS，容器客户端使用测试夹具。它们验证源码链路，不等于真实 Cloudflare 容器、真实账号或线上群部署验收。发布前还需独立审查，并在另行授权的环境验证双方实际 read 文件及仅投递到预期 QQ 会话。当前不得宣称线上可用。
 
 ### 容量与重试生命周期
 

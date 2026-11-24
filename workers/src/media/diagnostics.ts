@@ -6,7 +6,7 @@ export type MediaStage = "authorize" | "repository" | "recall" | "send" | "looku
   | "download" | "store" | "asset_get" | "workspace_write" | "export" | "deliver" | "audit";
 const codes = new Set([
   ...SANDBOX_FAILURES, "sandbox_not_found",
-  "media_access_denied", "media_not_found", "media_scope_denied", "media_message_mismatch", "media_reference_missing",
+  "agent_file_access_denied", "agent_credentials_forbidden", "media_access_denied", "media_not_found", "media_scope_denied", "media_message_mismatch", "media_reference_missing",
   "media_url_missing", "media_url_unavailable", "media_url_denied", "media_dns_failed", "media_redirect_denied",
   "media_download_failed", "message_recalled", "invalid_media", "invalid_scope", "invalid_asset", "invalid_message_id",
   "invalid_media_reference", "napcat_image_content_missing", "invalid_image_content", "napcat_file_content_missing", "invalid_file_content",

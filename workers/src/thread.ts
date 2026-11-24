@@ -1,4 +1,4 @@
-import { childAddress, fingerprint, type AgentMessage, type AgentReceipt, type AgentSend } from "./communication/model";
+import { assertNoCredentials, childAddress, fingerprint, type AgentMessage, type AgentReceipt, type AgentSend } from "./communication/model";
 import { importFiles, incomingText, proves, reserveAgent, sendAgent, verifyMessage, type AgentTicket } from "./communication/service";
 import { MemoryAdmin } from "./memory/admin";
 import { McpAdmin } from "./mcp/admin";
@@ -10,7 +10,7 @@ import { ProjectionPublisher, observeWrites } from "./requests/projection";
 import { MCP_POLICY_SCHEMA } from "./mcp/policy";
 import { createWorkspaceAdminApi, type WorkspaceAdminApi, type WorkspaceMergeInput } from "./sandbox/admin";
 import type { Delivery, DeliverySource } from "./delivery";
-import { gcMediaTickets, type AssetRef } from "./media/repository";
+import { MediaRepository, gcMediaTickets, type AssetRef } from "./media/repository";
 import type { McpAuthority, McpToolSelection } from "./mcp/access";
 import type { SubagentCodingOperation, SubagentCapabilityHost } from "./mcp/delegated";
 import { DurableObject } from "cloudflare:workers";
@@ -129,6 +129,7 @@ export class ThreadDO extends DurableObject<Env> {
       if (!(await tx.all<{name:string}>("PRAGMA table_info(web_outputs)")).some(c=>c.name==="assets_json")) await tx.exec("ALTER TABLE web_outputs ADD COLUMN assets_json TEXT NOT NULL DEFAULT '[]'");
       // 跟进输入会并入同一 Pi run、共用 turn_id；定时运行的发送条数只能按输入计。
       if (!outboxColumns.some(column => column.name === "input_id")) await tx.exec("ALTER TABLE outbox ADD COLUMN input_id TEXT");
+      await tx.exec("CREATE INDEX IF NOT EXISTS outgoing_intents_input ON outgoing_intents(input_id)");
       await tx.exec("CREATE INDEX IF NOT EXISTS inbound_turn ON inbound(turn_id); CREATE INDEX IF NOT EXISTS outbox_turn ON outbox(turn_id)");
       await tx.exec("CREATE INDEX IF NOT EXISTS inbound_platform ON inbound(platform_message_id,user_id,chat_kind,chat_id); CREATE INDEX IF NOT EXISTS outbox_message ON outbox(message_id)");
       await tx.run("UPDATE inbound SET chat_id = user_id WHERE chat_id = ''");
@@ -210,6 +211,12 @@ export class ThreadDO extends DurableObject<Env> {
         await this.narrowAgentRecipient(args, input);
         return this.reserveAgentMessage(args, seed, at, input.session_generation);
       },
+      exportAgentFile: async (input, path, scope, name) => {
+        const file = await this.readAgentBlob(input, path);
+        assertNoCredentials(new TextDecoder().decode(file.bytes), path);
+        assertNoCredentials("", name);
+        return new MediaRepository({ bucket: this.env.ASSETS, scope }).put({ ...file, name: name ?? file.name });
+      },
       readAgentFile: async (input, path, options) => decodeFileRead((await this.readAgentBlob(input, path)).bytes, options),
       ownerTurnKind: input => this.ownerTurnKind(input), sandboxTaskForInput: input => this.sandboxTaskForInput(input),
       subagentCaller: (input, selection) => this.subagentCaller(input, selection), scheduleAccess: input => this.scheduleAccess(input),
@@ -225,7 +232,7 @@ export class ThreadDO extends DurableObject<Env> {
 
   /** 网页输出只入本线程；QQ 副作用由 Bridge 的稳定意图负责恢复与防重。 */
   private async deliver(input: InboundRow, text: string, outputId: string, options: { target?: Target; attachments?: AssetRef[] } = {}): Promise<{ status: string; message_id?: string; reason?: string }> {
-    if (input.kind === "agent") return { status: "rejected", reason: "agent_reply_requires_agent_send" };
+    if (input.kind === "agent") assertNoCredentials(text);
     if (input.session_generation !== await this.sessionGeneration()) return { status: "rejected", reason: "session_generation_revoked" };
     if (isWeb(input)) {
       if (options.target) return { status: "rejected", reason: "web_reply_only" };
@@ -235,9 +242,15 @@ export class ThreadDO extends DurableObject<Env> {
     const thread = await this.namespace(), target = options.target ?? targetOf(input), id = thread + ":" + input.session_generation + ":" + outputId;
     const source = { thread, inputId: input.message_id, generation: input.session_generation, scope: scopeOf(targetOf(input)) };
     if (!await this.validateDeliverySource(source, target)) return { status: "rejected", reason: "send_denied" };
-    await this.database.run("INSERT OR IGNORE INTO outgoing_intents(id,input_id,target_json,text,assets_json,state,created_at) VALUES(?,?,?,?,?,'queued',?)",
-      id, input.message_id, JSON.stringify(target), text, JSON.stringify(options.attachments ?? []), Date.now());
+    // 同一 SQL 写入同时预留名额，避免并发工具调用越限；稳定 id 重试仍读取原意图。
+    const agentTurn = input.kind === "agent";
+    const withinBudget = agentTurn ? ` WHERE (SELECT COUNT(*) FROM outgoing_intents WHERE input_id IN
+      (SELECT message_id FROM inbound WHERE message_id=? OR (kind='agent' AND turn_id=? AND session_generation=?))) < 2` : "";
+    await this.database.run("INSERT OR IGNORE INTO outgoing_intents(id,input_id,target_json,text,assets_json,state,created_at) SELECT ?,?,?,?,?,'queued',?" + withinBudget,
+      id, input.message_id, JSON.stringify(target), text, JSON.stringify(options.attachments ?? []), Date.now(),
+      ...(agentTurn ? [input.message_id, input.turn_id, input.session_generation] : []));
     const operation = await this.database.get<{created_at:number}>("SELECT created_at FROM outgoing_intents WHERE id=?",id);
+    if (!operation && agentTurn) return { status: "rejected", reason: "agent_turn_send_limit" };
     if(!operation)throw new Error("delivery_missing");
     const bridge = this.env.BRIDGE.getByName("napcat");
     let receipt: Delivery | undefined;
@@ -257,9 +270,17 @@ export class ThreadDO extends DurableObject<Env> {
     await this.initialize();
     if (source.thread !== await this.namespace() || source.generation !== await this.sessionGeneration()) return false;
     const input = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id=?", source.inputId);
-    if (!input || input.kind === "agent" || isWeb(input) || input.session_generation !== source.generation || source.scope !== scopeOf(targetOf(input)) || input.user_id === input.self_id) return false;
+    if (!input || isWeb(input) || input.session_generation !== source.generation || source.scope !== scopeOf(targetOf(input)) || input.user_id === input.self_id) return false;
+    if (input.kind === "agent") return scopeOf(target) === source.scope && !!await this.outgoingSelfId(this.database, input);
     if (scopeOf(target) === source.scope) return true;
     return input.kind === "message" && this.env.REGISTRY.getByName("main").canAccess({ user: "qq:" + input.user_id, cap: "send", scope: source.scope, target: "qq:" + scopeOf(target) });
+  }
+
+  // 新回合在接收时固定机器人身份；旧版已入箱的回合只查当时绑定的同代次记录。
+  private async outgoingSelfId(db: Pick<DurableObjectSqliteDatabase, "get">, input: InboundRow) {
+    if (input.kind !== "agent" || input.self_id !== "agent") return input.self_id;
+    return (await db.get<{ self_id: string }>("SELECT self_id FROM inbound WHERE message_id=? AND session_generation=? AND kind='message'",
+      input.agent_authority ?? null, input.session_generation))?.self_id;
   }
 
   private async projectDelivery(receipt: Delivery): Promise<void> {
@@ -272,9 +293,12 @@ export class ThreadDO extends DurableObject<Env> {
       if (!input || await tx.get("SELECT 1 FROM outbox WHERE delivery_id=?", receipt.id)) return;
       await tx.run("INSERT INTO outbox(message_id,text,sent_at,turn_id,input_id,delivery_id) VALUES(?,?,?,?,?,?)", receipt.messageId ?? "", pending.text, receipt.updatedAt, input.turn_id, input.message_id, receipt.id);
       const target: Target = JSON.parse(pending.target_json);
-      if (receipt.messageId) await recordMessage(tx, { messageId: receipt.messageId, selfId: input.self_id, userId: input.self_id,
+      if (!receipt.messageId) return;
+      const selfId = await this.outgoingSelfId(tx, input);
+      if (!selfId) return;
+      await recordMessage(tx, { messageId: receipt.messageId, selfId, userId: selfId,
         nickname: "机器人", target, text: pending.text || "[附件]", routeText: pending.text, time: Math.floor(receipt.updatedAt / 1000),
-        mentionedSelf: false, replyToId: scopeOf(target) === scopeOf(targetOf(input)) ? input.platform_message_id : null, imageCount: 0, scopeName: input.scope_name }, true);
+        mentionedSelf: false, replyToId: input.kind === "message" && scopeOf(target) === scopeOf(targetOf(input)) ? input.platform_message_id : null, imageCount: 0, scopeName: input.scope_name }, true);
     });
   }
 
@@ -751,8 +775,8 @@ export class ThreadDO extends DurableObject<Env> {
       if (!authority) throw new Error("agent_recipient_not_ready");
       const paths = await importFiles(this.env, message, (path, bytes, operationId) => this.env.SANDBOX.getByName(ns).saveAttachment(path, bytes, operationId));
       await this.database.transaction(async tx => {
-        await tx.run("INSERT INTO inbound(message_id,platform_message_id,user_id,self_id,text,received_at,status,chat_kind,chat_id,nickname,scope_name,kind,reply_channel,session_generation,when_busy,agent_from,agent_hash,agent_files,agent_authority) VALUES(?,?,'','agent',?,?,'queued',?,?,?,?,'agent','qq',?,NULL,?,?,?,?)",
-          message.id, message.id, incomingText(message, paths), Date.now(), authority.chat_kind, authority.chat_id, "", authority.scope_name,
+        await tx.run("INSERT INTO inbound(message_id,platform_message_id,user_id,self_id,text,received_at,status,chat_kind,chat_id,nickname,scope_name,kind,reply_channel,session_generation,when_busy,agent_from,agent_hash,agent_files,agent_authority) VALUES(?,?,'',?,?,?,'queued',?,?,?,?,'agent','qq',?,NULL,?,?,?,?)",
+          message.id, message.id, authority.self_id, incomingText(message, paths), Date.now(), authority.chat_kind, authority.chat_id, "", authority.scope_name,
           generation, message.from, hash, JSON.stringify(paths), authority.message_id);
         await this.armPump();
       });
