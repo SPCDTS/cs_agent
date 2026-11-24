@@ -400,7 +400,8 @@ export class ThreadMcp {
         if (authority.scope === 'owner') {
           if (!entry.server.tools.allow.includes('list_spaces')) continue;
           try {
-            spaces = await this.queued(entry, undefined, async signal => {
+            // 派发子任务最多等设备目录三秒，排队和连接也计入这段时间。
+            spaces = await this.queued(entry, AbortSignal.timeout(3_000), async signal => {
               const remote = await (await this.connect(entry,signal)).callTool('list_spaces',{}, {scope:mcpCallerScope(authority, this.options.callerNamespace ?? authority.scope)},signal);
               return cuaCards(remote).map(row => row.id);
             });

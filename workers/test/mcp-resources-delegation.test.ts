@@ -6,7 +6,9 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { ThreadMcp, type McpAuthority } from "../src/mcp";
-import { MCP_CATALOG_SCHEMA } from "../src/mcp/catalog";
+import { makeCatalog, MCP_CATALOG_SCHEMA, saveCatalog } from "../src/mcp/catalog";
+import { parseMcpConfig } from "../src/mcp/config";
+import { McpConnection } from "../src/mcp/connection";
 import { sameMcpOrigin } from "../src/mcp/access";
 import { createSubagentCapabilityHost, installDelegatedCapabilities, type SubagentCapabilityHost } from "../src/mcp/delegated";
 import { fakeRemote, login } from "./mcp-helpers";
@@ -94,6 +96,44 @@ describe("MCP resources and delegated capabilities", () => {
       await delegated.close(); await mcp.close();
     });
   });
+
+  it("主人派发子任务时，设备目录超时会取消在途或排队的请求并保留其他 MCP 工具", async () => {
+    await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
+      const db = new DurableObjectSqliteDatabase(state.storage);
+      await db.exec(MCP_CATALOG_SCHEMA);
+      const config = parseMcpConfig({ version: 1, enabled: true, servers: ["cua", "docs"].map(id => ({
+        id, transport: { kind: "reverse-websocket", url: "https://mcp.example.test/" + id },
+        credential: { kind: "managed", accountId: id, revision: "v1" }, access: { kind: "owner-private", revision: "v1" },
+        tools: { allow: [id === "cua" ? "list_spaces" : "lookup"] }, replay: "unsafe",
+      })) });
+      for (const server of config.servers) {
+        const tools = server.tools.allow.map(name => ({ name, inputSchema: { type: "object" as const } }));
+        await saveCatalog(db, makeCatalog(server, tools, config.limits).revision);
+      }
+      const mcp = new ThreadMcp(db, env, createRegistry(), async () => authority, config, { scope: "owner" });
+      const started = Promise.withResolvers<AbortSignal>(), release = Promise.withResolvers<void>();
+      const open = vi.spyOn(McpConnection, "open").mockImplementation(async (_server, _env, _limits, signal) => {
+        started.resolve(signal);
+        await release.promise;
+        throw new Error("fixture_offline");
+      });
+      try {
+        await mcp.restore();
+        const inFlight = mcp.captureCapabilities(authority);
+        const signal = await started.promise;
+        const queued = mcp.captureCapabilities(authority);
+        for (const snapshot of await Promise.all([inFlight, queued])) {
+          expect(snapshot.cua).toBeUndefined();
+          expect(snapshot.tools).toEqual([expect.stringMatching(/^mcp_docs_lookup_/)]);
+        }
+        expect(signal.aborted).toBe(true);
+      } finally {
+        release.resolve();
+        await mcp.close();
+      }
+      expect(open).toHaveBeenCalledOnce();
+    });
+  }, 8_000);
 
   it("narrows delegated tool contracts and sends trusted caller scope separately from arguments", async () => {
     const remote = fakeRemote(); await login(); await env.THREAD.getByName("owner").syncAdminView("owner");
