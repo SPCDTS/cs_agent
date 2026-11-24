@@ -101,10 +101,11 @@ export class WorkspaceManager {
     if (await sha256(bytes) !== file.sha256) throw new Error("blob_corrupt");
     return bytes;
   }
-  readBlob(path: string, revision?: string): Promise<{ bytes: Uint8Array; mime: string; name: string }> {
+  readBlob(path: string, revision?: string, maxBytes = FILE_MAX_BYTES): Promise<{ bytes: Uint8Array; mime: string; name: string }> {
     return this.serial(async () => {
       const manifest = await this.manifest(revision), relative = relativeWorkPath(path), file = manifest.files.find(file => file.path === relative);
       if (!file) throw new Error("not_found");
+      if (file.bytes > maxBytes) throw new Error("file_too_large");
       return { bytes: await this.blob(file), mime: file.mime, name: file.path.split("/").at(-1) ?? "file" };
     });
   }

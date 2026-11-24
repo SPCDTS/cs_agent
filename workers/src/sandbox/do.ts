@@ -137,7 +137,7 @@ export class SandboxDO extends DurableObject<Env> {
   }
   list(path: string): Promise<DirEntry[]> { return this.workspace.list(path); }
   files(revision?: string): Promise<WorkspaceManifest> { return this.workspace.files(revision); }
-  readBlob(path: string, revision?: string): Promise<{ bytes: Uint8Array; mime: string; name: string }> { return this.workspace.readBlob(path, revision); }
+  readBlob(path: string, revision?: string, maxBytes?: number): Promise<{ bytes: Uint8Array; mime: string; name: string }> { return this.workspace.readBlob(path, revision, maxBytes); }
   async exportAsset(path: string, scope: string, name?: string): Promise<AssetRef> {
     const file = await this.readBlob(path);
     return new MediaRepository({ bucket: this.env.ASSETS, scope }).put({ ...file, name: name ?? file.name, kind: imageMime(file.bytes) ? "image" : "file" });
