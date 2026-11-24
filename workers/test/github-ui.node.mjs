@@ -52,6 +52,7 @@ for (const integratedConsole of [false, true]) {
     const pager = () => [...card.children].find(n => n.dataset.listPager === "true");
     const buttons = () => [...pager().querySelectorAll("button")];
     assert.equal(body().children.length, 10);
+    assert.equal(body().firstElementChild.lastElementChild.textContent, "尚未结算");
     await click(buttons()[1], 2);
     assert.equal(body().children.length, 1);
     assert.equal(body().children[0].children[1].textContent, "d10");
@@ -68,9 +69,10 @@ for (const integratedConsole of [false, true]) {
     assert.equal(body().children.length, 10);
     assert.equal(body().children[0].children[1].textContent, "d0");
 
-    github.receipts = github.receipts.slice(0, 1);
+    github.receipts = [{ ...github.receipts[0], state: "finished", outcome: "silent" }];
     card = render();
     assert.equal(body().children.length, 1);
+    assert.equal(body().firstElementChild.lastElementChild.textContent, "silent");
     assert.equal(pager().hidden, true);
   });
 }

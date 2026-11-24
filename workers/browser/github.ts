@@ -24,12 +24,12 @@ export function renderGitHub(source: { paused: boolean }, github: GitHubView) {
       " · 升级前记录 "+github.diagnostics.legacyCount+"。辅助去重窗口以到期或同类容量淘汰先到为准；不挤占业务配额。"})]:[]),
     el("div", { className: "muted small", text: "清空或删除会永久抑制未取得执行许可的积压；已实际执行的操作无法撤回，后续执行许可仍须有效安装授权。暂停保留积压，满载返回 503，需人工 Redeliver。下面状态为收件/执行状态，不是 QQ 送达证明。" }),
     el("div", { className: "scroll" }, [el("table", {}, [
-      el("thead", {}, [el("tr", {}, ["时间", "Delivery", "仓库 / 事件", "收件 / 队列状态与原因", "Agent 结果 / QQ确认"].map(text => el("th", { text })))]),
+      el("thead", {}, [el("tr", {}, ["时间", "Delivery", "仓库 / 事件", "收件 / 队列状态与原因", "Agent 结果"].map(text => el("th", { text })))]),
       el("tbody", {}, github.receipts.map(r => el("tr", {}, [
         el("td", { text: bjTime(r.received_at) }), el("td", { className: "mono", text: r.delivery_id }),
         el("td", { text: r.repository + " " + r.event + (r.action ? "." + r.action : "") }),
         el("td", { text: r.state + (r.reason ? " / " + r.reason : "") }),
-        el("td", { text: (r.outcome ?? "尚未结算") + " · QQ送达未确认" }),
+        el("td", { text: r.outcome ?? "尚未结算" }),
       ]))),
     ])]),
   ]);
