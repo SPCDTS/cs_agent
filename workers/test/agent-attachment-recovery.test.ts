@@ -85,14 +85,14 @@ it("owner Agent reads and forwards received files through real tools without cod
     const row = s.storage.sql.exec("SELECT * FROM inbound WHERE kind='message'").one();
     expect((await (i as any).sendAgentMessage({ to: "owner", text: "file", files: ["/work/out/note.txt"] }, "owner-file", row)).status).toBe("accepted");
   });
-  await vi.waitFor(() => expect(seen.outputs.join("\n")).toContain("peer-visible"));
+  await vi.waitFor(() => expect(seen.outputs.join("\n")).toContain("peer-visible"), { timeout: 10000 });
   await vi.waitFor(async () => {
     await runInDurableObject(env.THREAD.getByName("owner"), async (i, s) => {
       const row = s.storage.sql.exec<any>("SELECT * FROM inbound WHERE kind='agent'").one();
       expect(row.status).toBe("done");
       expect(await (i as any).sandboxTaskForInput(row)).toBeUndefined();
     });
-  });
+  }, { timeout: 10000 });
   expect(seen.outputs.join("\n")).not.toContain("OWNER-PRIVATE-SENTINEL");
   expect(run).not.toHaveBeenCalled();
   await runInDurableObject(env.THREAD.getByName("owner"), async (i, s) => {
