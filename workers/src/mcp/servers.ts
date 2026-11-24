@@ -2,7 +2,7 @@ import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { ListToolsResultSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MCP_CONFIG, parseMcpConfig, publicOrigin, type McpServerConfig } from "./config";
-import { cuaReadTools, isCuaTool } from "../cua/discovery";
+import { isCuaReadOnlyTool, isCuaTool } from "../cua/discovery";
 import { secretsEqual } from "../auth";
 import { TokenVault } from "./crypto";
 import { makeCatalog } from "./catalog";
@@ -69,7 +69,7 @@ export class McpServerStore {
     const server = this.parse(row);
     if (!server.enabled || server.transport.kind !== 'reverse-websocket' || serverDigest(server) !== expectedDigest) return;
     const {tools} = ListToolsResultSchema.parse(JSON.parse(row.discovered));
-    return JSON.stringify({tools:tools.filter(tool => server.tools.allow.includes(tool.name) && cuaReadTools.some(name => name === tool.name))});
+    return JSON.stringify({tools:tools.filter(tool => server.tools.allow.includes(tool.name) && isCuaTool(tool.name))});
   }
   put(input: ServerSetupInput, expected: string) {
     if (!Check(ServerSetup, input)) throw new McpSetupError("invalid");
@@ -95,17 +95,25 @@ export class McpServerStore {
     return this.get(id);
   }
   activate(id: string, expected: string, input: ServerSelectionInput) {
-    if (!Check(ServerSelection, input)) throw new McpSetupError("invalid");
+    if (!Check(ServerSelection, input) || input.readOnly?.some(name => !input.allow.includes(name))) throw new McpSetupError("invalid");
     const row = this.row(id, expected), server = this.parse(row);
     if (id === 'cua') {
       if (server.transport.kind !== 'reverse-websocket' || !row.secret || input.allow.some(tool => !isCuaTool(tool)) || input.resourceAllow?.length) throw new McpSetupError('invalid');
-      // 移除已启用的工具即撤销其旧调用，即使管理员稍后勾回完全相同的工具组合。
-      if (server.enabled && server.tools.allow.some(tool => !input.allow.includes(tool))) server.access.revision = crypto.randomUUID();
-      input = { ...input, readOnly: input.allow };
+      const windowsReadOnly = input.readOnly?.includes('call_tool') === true;
+      const lostWindowWrites = windowsReadOnly && server.tools.allow.includes('call_tool') && !server.tools.readOnly?.includes('call_tool');
+      // 缩减工具或收回窗口写入后，即使再次开放，已派出的旧任务也不能恢复权限。
+      if (server.enabled && (lostWindowWrites || server.tools.allow.some(tool => !input.allow.includes(tool)))) server.access.revision = crypto.randomUUID();
+      input = { ...input, readOnly: input.allow.filter(name => isCuaReadOnlyTool(name) || (name === 'call_tool' && windowsReadOnly)) };
     }
     if (!row.discovered) throw new McpSetupError("probe_required");
     const tools: Tool[] = ListToolsResultSchema.parse(JSON.parse(row.discovered)).tools;
-    if (input.allow.some(name => !tools.some(tool => tool.name === name)) || input.readOnly?.some(name => !input.allow.includes(name))) throw new McpSetupError("invalid");
+    if (id === 'cua' && input.allow.includes('call_tool') && !input.readOnly?.includes('call_tool')) {
+      // 初次启用、移除后重新勾选和旧版升级都需要包含窗口操作的探测契约。
+      const selector = tools.find(tool => tool.name === 'call_tool')?.inputSchema.properties?.tool;
+      const modes = selector && typeof selector === 'object' && 'enum' in selector ? selector.enum : undefined;
+      if (!Array.isArray(modes) || !modes.some(mode => mode === 'bring_to_front' || mode === 'set_window_frame')) throw new McpSetupError('probe_required');
+    }
+    if (input.allow.some(name => !tools.some(tool => tool.name === name))) throw new McpSetupError("invalid");
     const next = parseMcpConfig({ version: 1, enabled: true, servers: [{ ...server, enabled: true,
       tools: { allow: input.allow, readOnly: input.readOnly ?? [], eventAllow: [] }, resourceAllow: input.resourceAllow ?? [] }] }).servers[0]!;
     const accepted = makeCatalog(next, tools, MCP_CONFIG.limits);

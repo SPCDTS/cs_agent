@@ -55,7 +55,7 @@ relay.example.org {
 	}
 }
 
-# 可选。在允许读取主机名或 Mac 窗口的设备回环站点内导入，spacesd 校验该机 Bearer。
+# 可选。在允许读取主机名或操作窗口的设备回环站点内导入，spacesd 校验该机 Bearer。
 (device-inspection) {
 	@inspection {
 		remote_ip 127.0.0.1

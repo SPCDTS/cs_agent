@@ -13,6 +13,8 @@ import { adminEnv } from './mcp-helpers';
 import { manageMcp } from '../src/mcp/manage';
 import { cuaCards, type CuaDirectory } from '../src/cua/contracts';
 import { CuaGrants } from '../src/cua/grants';
+import { cuaResult } from '../src/cua/discovery';
+import { MCP_CONFIG } from '../src/mcp/config';
 import { MediaRepository } from '../src/media/repository';
 
 afterEach(reset);
@@ -25,7 +27,7 @@ const admin = (path:string, input?:unknown, authorized = true) => worker.fetch(n
   body:input ? JSON.stringify(input) : undefined,
 }),adminEnv());
 
-async function directoryNode(onQuery?: (name:string) => void | Promise<void>) {
+async function directoryNode(onQuery?: (name:string,args?:Record<string,unknown>) => void | Promise<void>) {
   const registry = env.REGISTRY.getByName('main');
   const initial = await registry.mcpServerPut({id,transport:'reverse-websocket'},'absent');
   const record = await registry.mcpCredentialPut(id,initial.revision,{Authorization:bearer});
@@ -37,10 +39,14 @@ async function directoryNode(onQuery?: (name:string) => void | Promise<void>) {
     if (frame.close) { await transport?.close(); sessions.delete(frame.session); return; }
     if (!transport) {
       const server = new Server({name:'cua-spaces',version:'0.31.0'},{capabilities:{tools:{}}});
-      server.setRequestHandler(ListToolsRequestSchema,() => ({tools:fixtureTools.map(name => ({name,inputSchema:{type:'object' as const}}))}));
+      server.setRequestHandler(ListToolsRequestSchema,() => ({tools:fixtureTools.map(name => ({
+        name,inputSchema:{type:'object' as const,...(name === 'call_tool' ? {properties:{tool:{type:'string',enum:['list_windows','get_window_state','bring_to_front','set_window_frame']}}} : {})},
+      }))}));
       server.setRequestHandler(CallToolRequestSchema,async ({params}) => {
-        await onQuery?.(params.name);
+        await onQuery?.(params.name,params.arguments);
         if (params.name === 'space_bash') return {content:[{type:'text',text:'mac-fixture.local'}]};
+        if (params.name === 'call_tool' && params.arguments?.tool === 'bring_to_front')
+          return {content:[{type:'text',text:JSON.stringify({pid:121,window_id:5,activated:true})}]};
         if (params.name === 'call_tool' && params.arguments?.tool === 'get_window_state')
           return {content:[{type:'image',mimeType:'image/png',data:windowPng}]};
         if (params.name === 'call_tool') {
@@ -338,4 +344,152 @@ it('主人发消息可读主机名，其他命令、定时任务与未持有快�
       } finally { await mcp.close(); }
     });
   } finally { ws.close(1000); }
+});
+
+it('设备变更先核对当前授权，成功、未知及撤权重授均不会重放操作',async () => {
+  let writes = 0, afterDispatch: () => Promise<void> = async () => {};
+  const {ws,ready,accessRevision} = await directoryNode(async (name,args) => {
+    if (name === 'call_tool' && args?.tool === 'bring_to_front') { writes++; await afterDispatch(); }
+  });
+  expect(ready.server.tools.readOnly).toEqual(['list_spaces','list_tools','space_bash']);
+  const assign = async (spaces:string[]) => {
+    const registry = env.REGISTRY.getByName('main');
+    const {revision} = await registry.cuaGrantsList();
+    expect(await registry.cuaGrantsPut({scope,spaces,expectedRevision:revision},accessRevision)).toMatchObject({status:'ok'});
+  };
+  await assign([device]);
+  const who: McpAuthority = {scope,kind:'message',actor:'123456',owner:false,generation:2,replyChannel:'qq'};
+  try {
+    await runInDurableObject(env.THREAD.getByName(scope),async (_instance,state) => {
+      const registry = env.REGISTRY.getByName('main');
+      const db = new DurableObjectSqliteDatabase(state.storage);
+      await db.exec(MCP_CATALOG_SCHEMA + 'CREATE TABLE IF NOT EXISTS events(at INTEGER,kind TEXT,detail TEXT)');
+      const config = await registry.mcpConfig(scope);
+      const cua = config.servers.find(server => server.id === id)!;
+      const mcp = new ThreadMcp(db,env,createRegistry(),async () => who,{...config,servers:[cua]},
+        {scope,current:(server,digest) => registry.mcpServerCurrent(server,digest)});
+      try {
+        await mcp.restore();
+        const snapshot = await mcp.captureCapabilities(who);
+        const name = snapshot.tools.find(name => name.startsWith('mcp_cua_call_tool_'))!;
+        const args = {space:device,service:'driver',tool:'bring_to_front',arguments:{pid:121,window_id:5}};
+        const invoke = (operationId:string, space = device, actor = who) => mcp.invoke({
+          name,args:{...args,space},operationId,...(actor.subagentId ? {snapshot} : {}),
+        },async () => actor);
+        expect((await invoke('not-assigned',second)).isError).toBe(true);
+        expect((await invoke('passive',device,{...who,kind:'event'})).isError).toBe(true);
+        expect(writes).toBe(0);
+        const child = {...who,kind:'subagent' as const,subagentId:'test-child'};
+        const result = await invoke('delegated',device,child);
+        expect(result.structuredOutput).toEqual({pid:121,window_id:5,activated:true});
+        expect((await invoke('delegated',device,child)).structuredOutput).toEqual(result.structuredOutput);
+        expect(writes).toBe(1);
+
+        expect((await invoke('user')).structuredOutput).toEqual(result.structuredOutput);
+        afterDispatch = async () => { throw new Error('fixture_lost_reply'); };
+        expect(JSON.stringify(await invoke('uncertain'))).toContain('outcome_unknown');
+        afterDispatch = async () => {};
+        expect(JSON.stringify(await invoke('uncertain'))).toContain('outcome_unknown');
+        expect(writes).toBe(3);
+        afterDispatch = async () => { await assign([]); await assign([device]); };
+        expect(JSON.stringify(await invoke('in-flight'))).toContain('outcome_unknown');
+        afterDispatch = async () => {};
+        // 新分配无法取回上一份分配的成功回执，也不能重新发出相同操作。
+        expect(JSON.stringify(await invoke('user'))).toContain('operation_conflict');
+        expect((await invoke('delegated',device,child)).isError).toBe(true);
+        expect(writes).toBe(4);
+
+        const beforeRestriction = await mcp.captureCapabilities(who);
+        const current = await registry.mcpServerGet(id);
+        const limited = await registry.mcpServerActivate(id,current.revision,{allow:fixtureTools,readOnly:['call_tool']});
+        if ('error' in limited) throw new Error('fixture_activation_failed');
+        expect(limited.server.access.revision).not.toBe(accessRevision);
+        expect(await registry.cuaAssigned(scope,limited.server.access.revision!)).toEqual([device]);
+        const sync = async () => {
+          const config = await registry.mcpConfig(scope);
+          await mcp.syncConfig({...config,servers:config.servers.filter(server => server.id === id)});
+        };
+        const delegated = (snapshot:typeof beforeRestriction) => mcp.invoke({
+          name:snapshot.tools.find(name => name.startsWith('mcp_cua_call_tool_'))!,args,operationId:'after-reopen',snapshot,
+        },async () => child);
+        await sync();
+        expect((await delegated(await mcp.captureCapabilities(who))).isError).toBe(true);
+        const reopened = await registry.mcpServerActivate(id,limited.revision,{allow:fixtureTools,readOnly:[]});
+        if ('error' in reopened) throw new Error('fixture_activation_failed');
+        expect(reopened.server.access.revision).toBe(limited.server.access.revision);
+        await sync();
+        expect((await delegated(beforeRestriction)).isError).toBe(true);
+        expect(writes).toBe(4);
+        expect((await delegated(await mcp.captureCapabilities(who))).structuredOutput).toEqual(result.structuredOutput);
+        expect(writes).toBe(5);
+        expect(await mcp.policy.list(scope)).toEqual([]);
+      } finally { await mcp.close(); }
+    });
+  } finally { ws.close(1000); }
+});
+
+it('旧 call_tool 只读授权在更新节点后仍只许读，重新检测并启用才开放变更',async () => {
+  let writes = 0;
+  const {ws,registry,ready} = await directoryNode((_name,args) => { if (args?.tool === 'bring_to_front') writes++; });
+  try {
+    // 还原上一版留下的配置，以及只含两项读取的探测契约。节点本身已经升级。
+    await runInDurableObject(registry,(_instance,state) => {
+      state.storage.sql.exec("UPDATE mcp_servers SET config=json_set(config,'$.tools.readOnly',json_extract(config,'$.tools.allow')) WHERE id='cua'");
+    });
+    const oldProbe = await registry.mcpServerProbe(id,ready.revision,{tools:fixtureTools.map(name => ({
+      name,inputSchema:{type:'object',...(name === 'call_tool' ? {properties:{tool:{type:'string',enum:['list_windows','get_window_state']}}} : {})},
+    }))});
+    const expectStaleProbeRejected = async (expectedRevision:string) => {
+      const blocked = await worker.fetch(new Request(env.PUBLIC_ORIGIN+'/admin/mcp/manage',{method:'POST',
+        headers:{Authorization:'Bearer synthetic-admin','Content-Type':'application/json'},
+        body:JSON.stringify({action:'activate',id,expectedRevision,selection:{allow:fixtureTools}})}),adminEnv());
+      expect(blocked.status).toBe(400);
+      expect(await blocked.json()).toEqual({error:'probe_required'});
+    };
+    await expectStaleProbeRejected(oldProbe.revision);
+    const readOnlyOld = await registry.mcpServerActivate(id,oldProbe.revision,{allow:fixtureTools,readOnly:['call_tool']});
+    if ('error' in readOnlyOld) throw new Error('fixture_activation_failed');
+    expect(readOnlyOld.server.tools.readOnly).toEqual(fixtureTools);
+    expect(readOnlyOld.server.access.revision).toBe(ready.server.access.revision);
+    const owner: McpAuthority = {scope:'owner',kind:'message',actor:'10000001',owner:true,generation:1,replyChannel:'qq'};
+    await runInDurableObject(env.THREAD.getByName('owner'),async (_instance,state) => {
+      const registry = env.REGISTRY.getByName('main');
+      const db = new DurableObjectSqliteDatabase(state.storage);
+      await db.exec(MCP_CATALOG_SCHEMA + 'CREATE TABLE IF NOT EXISTS events(at INTEGER,kind TEXT,detail TEXT)');
+      const config = await registry.mcpConfig();
+      const tools = createRegistry(), mcp = new ThreadMcp(db,env,tools,async () => owner,
+        {...config,servers:config.servers.filter(row => row.id === id)},{scope:'owner',current:(id,hash) => registry.mcpServerCurrent(id,hash)});
+      try {
+        await mcp.refreshAll();
+        const name = tools.snapshot().tools().map(row => row.tool.name).find(name => name.startsWith('mcp_cua_call_tool_'))!;
+        const invoke = (tool:string,input:object) => mcp.invoke({name,args:{space:device,service:'driver',tool,arguments:input},operationId:'old-'+tool},async () => owner);
+        expect((await invoke('list_windows',{})).structuredOutput).toMatchObject({windows:[{pid:121,window_id:5}]});
+        expect((await invoke('bring_to_front',{pid:121,window_id:5})).isError).toBe(true);
+        expect(writes).toBe(0);
+      } finally { await mcp.close(); }
+    });
+    const reduced = await registry.mcpServerActivate(id,readOnlyOld.revision,{allow:['list_spaces']});
+    if ('error' in reduced) throw new Error('fixture_activation_failed');
+    await expectStaleProbeRejected(reduced.revision);
+    expect(await manageMcp(env,{action:'probe',id,expectedRevision:reduced.revision})).toMatchObject({status:'ready'});
+    const readOnlyNew = await registry.mcpServerActivate(id,(await registry.mcpServerGet(id)).revision,{allow:fixtureTools,readOnly:['call_tool']});
+    if ('error' in readOnlyNew) throw new Error('fixture_activation_failed');
+    expect(readOnlyNew.server.tools.readOnly).toEqual(fixtureTools);
+    const active = await registry.mcpServerActivate(id,readOnlyNew.revision,{allow:fixtureTools,readOnly:[]});
+    expect(active).toMatchObject({server:{tools:{readOnly:['list_spaces','list_tools','space_bash']}}});
+  } finally { ws.close(1000); }
+});
+
+it('窗口回执必须与发起操作的目标和尺寸相符',async () => {
+  const selector = {pid:42,window_id:3};
+  const geometry = {x:-14,y:10,width:560,height:420};
+  const validate = (tool:string,input:object,reply:object) => cuaResult('call_tool',
+    {space:device,service:'driver',tool,arguments:input},{content:[{type:'text',text:JSON.stringify(reply)}]},
+    [device],MCP_CONFIG.limits,env,scope,'fixture');
+  const target = {...selector,...geometry};
+  const frame = {...selector,frame:geometry};
+  expect((await validate('set_window_frame',target,frame)).structuredOutput).toEqual(frame);
+  expect((await validate('set_window_frame',target,{...frame,frame:{...geometry,width:561}})).isError).toBe(true);
+  expect((await validate('bring_to_front',selector,{...selector,window_id:4,activated:true})).isError).toBe(true);
+  expect((await validate('bring_to_front',selector,{...selector,activated:true,title:'private'})).isError).toBe(true);
 });

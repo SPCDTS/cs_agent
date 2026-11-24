@@ -102,8 +102,10 @@ http://127.0.0.1:18281 {
 | `space_bash` 传入 `space` 和 `command="hostname"` | `ProcessService/StartProcess`，固定运行 `hostname`，5 秒超时 | 校验正常退出后返回主机名 |
 | `call_tool` 传入 `space`、`service="driver"`、`tool="list_windows"` 和 `arguments` | `DriverService/CallTool`，可在 `arguments` 中传应用名 `app`、进程号 `pid` 或留空对象 | 返回 macOS 或 Windows 上匹配的窗口及其 PID、窗口 ID |
 | 同一 `call_tool` 传入 `tool="get_window_state"`，`arguments` 传选中行的 `pid` 和 `window_id` | `DriverService/CallTool`，按两个 ID 读取该窗口，再以相同 PID 调用 `list_windows` 复核归属 | 返回指定 macOS 窗口的单张 PNG |
+| `set_window_frame`，传入 `pid`、`window_id` 和目标 `x/y/width/height` | `DriverService/CallTool`，在 macOS 或 Windows 调整指定窗口 | 核验操作后的窗口几何并返回回执 |
+| `bring_to_front`，传入 `pid`、`window_id` | `DriverService/CallTool`，在 macOS 前置指定窗口并激活所属应用 | 应用的其他窗口也可能随之移动到前台 |
 
-先在管理台核对已获分配的群聊和私聊，再为 `cua` 重新检测并启用所需的 `space_bash` 或 `call_tool`。已有分配对新启用的读取工具同时生效。测试截图时，在对话里选定 Mac 与专用测试窗口，让模型先列出窗口再按返回的 ID 截图。设备的登录用户需已允许系统录制。返回的 `structuredContent.imageId` 可用于本会话的 `send_message.images`。关闭窗口后重复请求应返回错误。被动事件、agent 回合及定时任务不能执行这些读取。Windows 窗口列表依据固定版本的 Driver 契约和合成响应测试验证，本轮未做 Windows 真机测试。Windows Driver 的截图路径可能回退到读取桌面像素，cs-agent 仅在 macOS 开放单窗口截图。[Windows Driver 的截图回退](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua-driver/rust/crates/platform-windows/src/capture.rs#L645-L675)
+先在管理台核对已获分配的群聊和私聊，再为 `cua` 重新检测并启用所需的 `space_bash` 或 `call_tool`。升级桥后，原有只读配置仍可查看窗口。重新检测新契约、启用 `call_tool` 并取消勾选「仅允许读取窗口」后，已有分配也允许上表中的窗口写操作。测试截图时，在对话里选定 Mac 与专用测试窗口，让模型先列出窗口再按返回的 ID 截图。设备的登录用户需已允许系统录制。返回的 `structuredContent.imageId` 可用于本会话的 `send_message.images`。关闭窗口后重复请求应返回错误。被动事件、agent 回合及定时任务不能执行这些设备操作。Windows 窗口操作依据固定版本的 Driver 契约和合成响应测试验证，本轮未做 Windows 真机测试。Windows Driver 的截图路径可能回退到读取桌面像素，cs-agent 仅在 macOS 开放单窗口截图。[Windows Driver 的截图回退](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua-driver/rust/crates/platform-windows/src/capture.rs#L645-L675)
 
 要恢复设备的目录模式，移除该回环站点的 `import device-inspection`，校验后重新加载 Caddy。
 

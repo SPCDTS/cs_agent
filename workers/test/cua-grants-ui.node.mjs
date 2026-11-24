@@ -3,6 +3,25 @@ import { test } from 'node:test';
 import { ADMIN_PAGE_HTML } from '../src/admin/app.generated.ts';
 import { bundleModule, mountDom } from './browser-harness.mjs';
 
+test('Cua 窗口工具首次勾选时默认只读，重新打开时显示已保存的窗口权限',async () => {
+  const page = mountDom(ADMIN_PAGE_HTML,{token:'synthetic-admin'}), ui = await bundleModule('browser/mcp-servers.ts');
+  const tools = {allow:[],readOnly:[]};
+  ui.mcpServers.rows = [{server:{id:'cua',enabled:true,tools,resourceAllow:[],credential:{kind:'managed'},
+    transport:{kind:'reverse-websocket',url:'https://example.test/mcp/reverse/cua'}},revision:'initial',credentialSet:true,
+    discovered:[{name:'call_tool',description:'窗口'},{name:'list_tools',description:'目录'}]}];
+  const checkbox = name => page.document.querySelector('input[data-readonly="'+name+'"]');
+  ui.mcpServerRender('cua');
+  assert.equal(checkbox('call_tool').parentElement.textContent,'仅允许读取窗口');
+  assert.equal(checkbox('call_tool').checked,true);
+  assert.equal(checkbox('list_tools').parentElement.textContent,'确认为只读');
+  tools.allow = ['call_tool']; tools.readOnly = ['call_tool'];
+  ui.mcpServerRender('cua');
+  assert.equal(checkbox('call_tool').checked,true);
+  tools.readOnly = [];
+  ui.mcpServerRender('cua');
+  assert.equal(checkbox('call_tool').checked,false);
+});
+
 test('设备分配界面区分群与私聊，节点离线时仍可清空已有分配',async t => {
   const page = mountDom(ADMIN_PAGE_HTML,{token:'synthetic-admin'});
   const ui = await bundleModule('browser/cua-grants.ts');

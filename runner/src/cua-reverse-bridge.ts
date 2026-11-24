@@ -16,6 +16,9 @@ const deviceId = /^(?:relay:[a-z0-9][a-z0-9-]{6,62}[a-z0-9]|direct:(?:[a-zA-Z0-9
 const spaceProperty = {type:'string' as const,pattern:deviceId.source,maxLength:256,description:'设备卡上的完整 ID'};
 const maxScreenshotDimension = 768;
 const maxScreenshotBytes = 3 * 1024 * 1024;
+const frameKeys = ['x','y','width','height'] as const;
+const positionSchema = {type:'integer',minimum:-32768,maximum:32767};
+const sizeSchema = {type:'integer',minimum:1,maximum:32767};
 const bridgeTools: Record<string,Tool> = {
   list_spaces: {
     name:'list_spaces', description:'列出此会话可见的设备卡，返回设备名称、完整 ID、系统与状态。',
@@ -34,12 +37,12 @@ const bridgeTools: Record<string,Tool> = {
       required:['space','command'],additionalProperties:false}, annotations:{readOnlyHint:true},
   },
   call_tool: {
-    name:'call_tool', description:'在 macOS 或 Windows 上用 list_windows 查询窗口，可按 app 或 pid 筛选。在 macOS 上用 get_window_state 和选中窗口的 PID、窗口 ID 获取 PNG。',
+    name:'call_tool', description:'用 list_windows 查询窗口，按 PID 和窗口 ID 用 set_window_frame 调整位置与大小。macOS 提供 get_window_state 截图与 bring_to_front 前置窗口，前置也可能带起同一应用的其他窗口。',
     inputSchema:{type:'object',properties:{
-      space:spaceProperty, service:{type:'string',enum:['driver']}, tool:{type:'string',enum:['list_windows','get_window_state']},
+      space:spaceProperty, service:{type:'string',enum:['driver']}, tool:{type:'string',enum:['list_windows','get_window_state','bring_to_front','set_window_frame']},
       arguments:{type:'object',properties:{app:{type:'string',minLength:1,maxLength:128},pid:{type:'integer',minimum:1,maximum:0x7fffffff},
-        window_id:{type:'integer',minimum:1,maximum:0xffffffff}},additionalProperties:false},
-    },required:['space','service','tool','arguments'],additionalProperties:false},annotations:{readOnlyHint:true},
+        window_id:{type:'integer',minimum:1,maximum:Number.MAX_SAFE_INTEGER},x:positionSchema,y:positionSchema,width:sizeSchema,height:sizeSchema},additionalProperties:false},
+    },required:['space','service','tool','arguments'],additionalProperties:false},annotations:{readOnlyHint:false},
   },
 };
 const methods = new Set(['initialize', 'notifications/initialized', 'notifications/cancelled', 'ping', 'tools/list', 'tools/call']);
@@ -107,8 +110,12 @@ function validToolArgs(name: string, args: Record<string, unknown>): boolean {
     case 'call_tool': {
       const input = args.arguments;
       if (keys.length !== 4 || args.service !== 'driver' || !isRecord(input)) return false;
-      if (args.tool === 'get_window_state')
+      if (args.tool === 'get_window_state' || args.tool === 'bring_to_front')
         return Object.keys(input).length === 2 && positiveInteger(input.pid,0x7fffffff) && positiveInteger(input.window_id,0xffffffff);
+      if (args.tool === 'set_window_frame')
+        return Object.keys(input).length === 6 && positiveInteger(input.pid,0x7fffffff) && positiveInteger(input.window_id,Number.MAX_SAFE_INTEGER)
+          && frameKeys.every(key => Number.isSafeInteger(input[key]) && (input[key] as number) >= (key === 'x' || key === 'y' ? -32768 : 1)
+            && (input[key] as number) <= 32767);
       return args.tool === 'list_windows' && Object.keys(input).every(key => key === 'app' || key === 'pid')
         && (input.pid === undefined || positiveInteger(input.pid,0x7fffffff))
         && (input.app === undefined || typeof input.app === 'string' && !!input.app.trim() && input.app.length <= 128);
@@ -172,6 +179,18 @@ function screenshotUnavailable() {
   return new McpError(ErrorCode.InternalError,'无法确认目标窗口或获取其截图。',{reason:'window_screenshot_unavailable'});
 }
 
+function windowChangeUnverified() {
+  return new McpError(ErrorCode.InternalError,'无法确认所选窗口或操作结果。',{reason:'window_change_unverified'});
+}
+
+function selectedWindow(result: CallToolResult, pid: number, windowId: number) {
+  const windows = result.structuredContent?.windows;
+  if (!Array.isArray(windows) || windows.length > 1024) throw windowChangeUnverified();
+  const matches = windows.filter((row:unknown) => isRecord(row) && row.window_id === windowId);
+  if (matches.length !== 1 || matches[0].pid !== pid || matches[0].layer !== 0) throw windowChangeUnverified();
+  return matches[0] as Record<string,unknown>;
+}
+
 function windowImage(result: CallToolResult, pid: number, windowId: number) {
   const meta = result.structuredContent;
   const images = result.content.filter(part => part.type === 'image');
@@ -226,9 +245,14 @@ class DirectorySession {
         const os = matching[0]!.os;
         if (args.tool === 'get_window_state' && os !== 'macos')
           throw new McpError(ErrorCode.InvalidParams,'此设备尚未提供经验证的精确窗口截图。',{reason:'window_screenshot_unsupported'});
+        if (args.tool === 'bring_to_front' && os !== 'macos')
+          throw new McpError(ErrorCode.InvalidParams,'此设备的 Driver 无法按 PID 验证要前置的窗口。',{reason:'window_change_unsupported'});
         if (os !== 'macos' && os !== 'windows')
           throw new McpError(ErrorCode.InvalidParams,'此设备不支持窗口查询。',{reason:'window_list_unsupported'});
-        return this.windowTool(os,space,args.tool as string,args.arguments as Record<string,unknown>,signal);
+        const input = args.arguments as Record<string,unknown>;
+        if (os === 'macos' && input.window_id !== undefined && !positiveInteger(input.window_id,0xffffffff))
+          throw new McpError(ErrorCode.InvalidParams,'窗口 ID 超出 macOS 的范围。');
+        return this.windowTool(os,space,args.tool as string,input,signal);
       }
       const directory = driverDirectory(await this.readDirectory('list_tools',args,signal));
       return {content:[{type:'text',text:JSON.stringify(directory)}]};
@@ -258,6 +282,38 @@ class DirectorySession {
       return {content:[{type:'text',text:JSON.stringify({windows:rows})}]};
     }
     const pid = input.pid as number, windowId = input.window_id as number;
+    if (name === 'bring_to_front' || name === 'set_window_frame') {
+      // Cua 的 name 只匹配工具名子串；bring_to_front 不在 window 目录中。
+      if (name === 'bring_to_front') {
+        const focus = driverDirectory(await this.readDirectory('list_tools',{space,service:'driver',name},signal));
+        tools.push(...focus.tools);
+      }
+      if (!supports(name,Object.keys(input)) || !supports('list_windows',['pid']))
+        throw new McpError(ErrorCode.InvalidParams,'当前设备的 Driver 缺少此窗口操作。',{reason:'window_change_unsupported'});
+      const checkTarget = async () => selectedWindow(await callDriver('list_windows',{pid}),pid,windowId);
+      await checkTarget();
+      const report = (await callDriver(name,input)).structuredContent;
+      if (name === 'bring_to_front') {
+        const effect = report?.exact_window_effect, observed = report?.observed;
+        if (report?.code !== 'bring_to_front_exact_window_verified' || report.status !== 'activated' || report.activated !== true
+            || report.pid !== pid || report.window_id !== windowId || report.process_activated !== true
+            || !isRecord(effect) || effect.verified !== true || effect.focused !== true || effect.front_in_process_on_display !== true
+            || !isRecord(observed) || observed.frontmost_pid !== pid || observed.focused_window_id !== windowId
+            || observed.process_front_window_on_display !== windowId) throw windowChangeUnverified();
+        await checkTarget();
+        return {content:[{type:'text',text:JSON.stringify({pid,window_id:windowId,activated:true})}]};
+      }
+      if (report?.effect !== 'confirmed' || !Array.isArray(report.evidence) || !report.evidence.some(
+        (item:unknown) => isRecord(item) && item.kind === 'value_readback')) throw windowChangeUnverified();
+      const {bounds} = await checkTarget();
+      // WindowServer 的原生核验容许每项最多两个点的误差；Windows 的 DWM 读回要求逐项相等。
+      const tolerance = os === 'macos' ? 2 : 0;
+      if (!isRecord(bounds) || !frameKeys.every(key => typeof bounds[key] === 'number' && Number.isFinite(bounds[key])
+        && ((key !== 'width' && key !== 'height') || bounds[key] > 0)
+        && Math.abs(bounds[key] - (input[key] as number)) <= tolerance)) throw windowChangeUnverified();
+      const {x,y,width,height} = input;
+      return {content:[{type:'text',text:JSON.stringify({pid,window_id:windowId,frame:{x,y,width,height}})}]};
+    }
     const capture = {pid,window_id:windowId,include_accessibility_tree:false,include_screenshot:true,
       display_only:true,screenshot_format:'png',max_dimension:maxScreenshotDimension};
     if (!supports('get_window_state',Object.keys(capture)) || !supports('list_windows',['pid']))

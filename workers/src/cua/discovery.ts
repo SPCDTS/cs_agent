@@ -10,9 +10,15 @@ import { MediaRepository } from '../media/repository';
 import type { Env } from '../env';
 import { Card, CuaDeviceId, CuaScope, cuaCards, deviceAlias } from './contracts';
 
-export const cuaReadTools = ['list_spaces','list_tools','space_bash','call_tool'] as const;
-export function isCuaInspection(name: string) { return name === 'space_bash' || name === 'call_tool'; }
-export function isCuaTool(name: string) { return cuaReadTools.some(tool => tool === name); }
+export const cuaTools = ['list_spaces','list_tools','space_bash','call_tool'] as const;
+export function isCuaDeviceOperation(name: string) { return name === 'space_bash' || name === 'call_tool'; }
+export function isCuaTool(name: string) { return cuaTools.some(tool => tool === name); }
+export function isCuaReadOnlyTool(name:string) {
+  return name === 'list_spaces' || name === 'list_tools' || name === 'space_bash';
+}
+export function cuaCallIsReadOnly(name:string,args:Record<string,unknown>) {
+  return isCuaReadOnlyTool(name) || (name === 'call_tool' && (args.tool === 'list_windows' || args.tool === 'get_window_state'));
+}
 export function cuaSubject(a: McpAuthority) {
   if (a.kind === 'agent' || a.kind === 'event' || (a.kind === 'subagent' && !a.subagentId)) return false;
   return (a.scope === 'owner' ? a.owner : Check(CuaScope, a.scope));
@@ -28,10 +34,17 @@ const hostnameQuery = Type.Object({space:CuaDeviceId, command:Type.Literal('host
 const pid = Type.Integer({minimum:1,maximum:0x7fffffff});
 const windowId = Type.Integer({minimum:1,maximum:0xffffffff});
 const windowSelector = Type.Object({pid,window_id:windowId}, {additionalProperties:false});
+const hwnd = Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER});
+const coordinate = Type.Integer({minimum:-32768,maximum:32767});
+const dimension = Type.Integer({minimum:1,maximum:32767});
+const frame = Type.Object({x:coordinate,y:coordinate,width:dimension,height:dimension},{additionalProperties:false});
+const frameQuery = Type.Object({pid,window_id:hwnd,...frame.properties},{additionalProperties:false});
 const windowFilter = Type.Object({pid:Type.Optional(pid),app:Type.Optional(Type.String({minLength:1,maxLength:128,pattern:'\\S'}))}, {additionalProperties:false});
 const driverQuery = Type.Union([
   Type.Object({space:CuaDeviceId,service:Type.Literal('driver'),tool:Type.Literal('list_windows'),arguments:windowFilter},{additionalProperties:false}),
   Type.Object({space:CuaDeviceId,service:Type.Literal('driver'),tool:Type.Literal('get_window_state'),arguments:windowSelector},{additionalProperties:false}),
+  Type.Object({space:CuaDeviceId,service:Type.Literal('driver'),tool:Type.Literal('bring_to_front'),arguments:windowSelector},{additionalProperties:false}),
+  Type.Object({space:CuaDeviceId,service:Type.Literal('driver'),tool:Type.Literal('set_window_frame'),arguments:frameQuery},{additionalProperties:false}),
 ]);
 // undefined 表示主人可浏览整个目录；空数组表示没有设备。
 export function cuaQueryAllowed(tool: string, args: unknown, spaces?: readonly string[]) {
@@ -47,21 +60,23 @@ const driverDirectory = Type.Object({service:Type.Literal('driver'), tools:toolL
 const spacesOutput = Type.Object({spaces:Type.Array(Card)});
 const toolsOutput = Type.Object({tools:toolList});
 const hostnameOutput = Type.Object({hostname:Type.String()});
-const windowsOutput = Type.Object({windows:Type.Array(Type.Object({pid,window_id:Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER}),title:Type.String({maxLength:128})},
+const windowsOutput = Type.Object({windows:Type.Array(Type.Object({pid,window_id:hwnd,title:Type.String({maxLength:128})},
   {additionalProperties:false}),{maxItems:1024})},{additionalProperties:false});
+const activatedOutput = Type.Object({pid,window_id:windowId,activated:Type.Literal(true)},{additionalProperties:false});
+const frameOutput = Type.Object({pid,window_id:hwnd,frame},{additionalProperties:false});
 const imageOutput = Type.Object({imageId:Type.String({pattern:'^[a-f0-9]{64}$'})});
 export function cuaOutput(server:string, name:string) {
   if (server !== 'cua') return;
   if (name === 'list_spaces') return spacesOutput;
   if (name === 'list_tools') return toolsOutput;
   if (name === 'space_bash') return hostnameOutput;
-  if (name === 'call_tool') return Type.Union([windowsOutput,imageOutput]);
+  if (name === 'call_tool') return Type.Union([windowsOutput,imageOutput,activatedOutput,frameOutput]);
 }
 export async function cuaResult(tool: string, args: Record<string,unknown>, remote: CallToolResult, spaces: string[] | undefined, limits: McpLimits,
   env: Env, scope: string, revision: string): Promise<ToolExecutionResult> {
   if (remote.isError) return mcpFailure('cua_unavailable');
   try {
-    if (isCuaInspection(tool)) {
+    if (isCuaDeviceOperation(tool)) {
       const block = remote.content[0];
       if (remote.content.length !== 1) return mcpFailure('cua_result_invalid');
       if (tool === 'space_bash') {
@@ -75,6 +90,21 @@ export async function cuaResult(tool: string, args: Record<string,unknown>, remo
         const structuredOutput = boundedJson(rows,limits.structuredBytes,limits.schemaDepth * 3 + 3);
         return {structuredOutput,output:[{type:'text',text:'窗口列表见 structuredContent.windows。'}]};
       }
+      if (args.tool === 'bring_to_front' || args.tool === 'set_window_frame') {
+        if (block?.type !== 'text') return mcpFailure('cua_result_invalid');
+        const receipt:unknown = JSON.parse(block.text), target = args.arguments;
+        if (args.tool === 'bring_to_front') {
+          if (!Check(windowSelector,target) || !Check(activatedOutput,receipt)
+              || receipt.pid !== target.pid || receipt.window_id !== target.window_id) return mcpFailure('cua_result_invalid');
+          return {structuredOutput:receipt,output:[{type:'text',text:'指定窗口已前置。'}]};
+        }
+        if (!Check(frameQuery,target) || !Check(frameOutput,receipt)
+            || receipt.pid !== target.pid || receipt.window_id !== target.window_id
+            || receipt.frame.x !== target.x || receipt.frame.y !== target.y
+            || receipt.frame.width !== target.width || receipt.frame.height !== target.height) return mcpFailure('cua_result_invalid');
+        return {structuredOutput:receipt,output:[{type:'text',text:'指定窗口的位置与大小已更新。'}]};
+      }
+      if (args.tool !== 'get_window_state') return mcpFailure('cua_result_invalid');
       // 只交付桥返回的单张 PNG，不把上游窗口标题、辅助功能树或截图元数据带入会话。
       if (block?.type !== 'image' || block.mimeType !== 'image/png' || block.data.length > Math.min(limits.messageBytes, 4 * 1024 * 1024)
           || !block.data.startsWith('iVBORw0KGgo') || block.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(block.data)) return mcpFailure('cua_result_invalid');

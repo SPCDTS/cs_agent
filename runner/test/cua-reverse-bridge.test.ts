@@ -215,7 +215,7 @@ test('两个反向会话独立协商本机目录，兼容 JSON 与 SSE，仅列�
   }
 });
 
-test('设备读取只用登记目标、固定命令和同一进程的精确窗口，并过滤上游结果', async t => {
+test('设备操作只用登记目标、固定命令和同一进程的精确窗口，并过滤上游结果', async t => {
   const dir = await mkdtemp(join(tmpdir(),'cua-read-'));
   const path = process.platform === 'win32' ? '\\\\.\\pipe\\cua-read-' + randomUUID() : join(dir,'daemon.sock');
   const space = 'relay:fixture01', pid = 122, window_id = 501;
@@ -226,6 +226,15 @@ test('设备读取只用登记目标、固定命令和同一进程的精确窗�
   let capture: CallToolResult = {content:[png,{type:'text',text:'private title'}],structuredContent:meta};
   let host = 'mbp14.local\n[exit 0]', os = 'macos', matched = true, screenshotSupported = true;
   let hwnd = Number.MAX_SAFE_INTEGER, windowsPid = pid;
+  const frame = {x:-10,y:40,width:600,height:300};
+  const target = {pid,window_id};
+  const exactActivation = {...target,status:'activated',code:'bring_to_front_exact_window_verified',activated:true,process_activated:true,
+    exact_window_effect:{verified:true,focused:true,front_in_process_on_display:true,frontmost_ordinary:false},
+    observed:{frontmost_pid:pid,focused_window_id:window_id,process_front_window_on_display:window_id}};
+  const exactFrame = {effect:'confirmed',evidence:[{kind:'value_readback',detail:'private bounds'}]};
+  let bounds = {...frame}, windowLayer = 0, afterMutation = () => {};
+  let actionReport:Record<string,unknown> = exactActivation, actionSupported = true;
+  const mutations:object[] = [];
   const captureArguments = {pid,window_id,include_accessibility_tree:false,include_screenshot:true,display_only:true,
     screenshot_format:'png',max_dimension:768};
   const seen: string[] = [];
@@ -244,17 +253,20 @@ test('设备读取只用登记目标、固定命令和同一进程的精确窗�
         assert.deepEqual(args,{space,command:'hostname',timeout:5});
         return {content:[{type:'text',text:host}]};
       case 'list_tools':
+        if (args?.name === 'bring_to_front')
+          return json({service:'driver',tools:actionSupported ? [{name:'bring_to_front',description:'test',inputSchema:{properties:target}}] : []});
         assert.deepEqual(args,{space,service:'driver',name:'window'});
         return json({service:'driver',tools:[
           {name:'get_window_state',description:'test',inputSchema:{properties:screenshotSupported ? captureArguments : {}}},
           {name:'list_windows',description:'test',inputSchema:{properties:{pid:{},app:{}}}},
+          {name:'set_window_frame',description:'test',inputSchema:{properties:{...target,...frame}}},
         ]});
       case 'call_tool': {
         if (args?.tool === 'list_windows') {
           if (os === 'windows') {
             const filter = args.arguments as {pid?:number;app?:string};
             const records = filter.app === 'absent' ? [] : [{window_id:hwnd,pid:windowsPid,app_name:'notepad.exe',
-              title:'Windows fixture',bounds:{x:10,y:20,width:600,height:300},layer:0,z_index:0,is_on_screen:true,minimized:false}];
+              title:'Windows fixture',bounds,layer:0,z_index:0,is_on_screen:true,minimized:false}];
             return {content:[{type:'text',text:'private foreground app'}],structuredContent:{windows:records,current_space_id:null,_legacy_windows:records}};
           }
           if ((args.arguments as {app?:string}).app) {
@@ -262,7 +274,13 @@ test('设备读取只用登记目标、固定命令和同一进程的精确窗�
             return {content:[],structuredContent:{windows:[{pid,window_id,title:'Fixture window',unrelated:'private'}]}};
           }
           assert.deepEqual(args,driverArgs('list_windows',{pid}));
-          return {content:[{type:'text',text:'unrelated window title'}],structuredContent:{windows:matched ? [{pid,window_id}] : [{pid:pid+1,window_id}]}};
+          return {content:[{type:'text',text:'unrelated window title'}],structuredContent:{windows:matched
+            ? [{pid,window_id,layer:windowLayer,bounds}] : [{pid:pid+1,window_id}]}};
+        }
+        if (args?.tool === 'bring_to_front' || args?.tool === 'set_window_frame') {
+          mutations.push(args);
+          afterMutation();
+          return {content:[{type:'text',text:'private native diagnostics'}],structuredContent:actionReport};
         }
         assert.deepEqual(args,{space,service:'driver',tool:'get_window_state',arguments:captureArguments});
         return capture;
@@ -282,8 +300,9 @@ test('设备读取只用登记目标、固定命令和同一进程的精确窗�
   http.listen(path); await once(http,'listening');
   const session = randomUUID();
   await ws.rpc(session,'initialize',{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'test',version:'1'}});
-  const tools = (await ws.rpc(session,'tools/list')).result.tools.map((tool:{name:string}) => tool.name);
-  assert.deepEqual(tools,['list_spaces','list_tools','space_bash','call_tool']);
+  const tools = (await ws.rpc(session,'tools/list')).result.tools;
+  assert.deepEqual(tools.map((tool:{name:string}) => tool.name),['list_spaces','list_tools','space_bash','call_tool']);
+  assert.equal(tools.find((tool:{name:string}) => tool.name === 'call_tool').annotations.readOnlyHint,false);
   const call = (name: string,args: object) => ws.rpc(session,'tools/call',{name,arguments:args});
   for (const [name,args] of [
     ['space_bash',{space,command:'anything'}],['call_tool',windowArgs({pid,window_id:0})],
@@ -336,4 +355,57 @@ test('设备读取只用登记目标、固定命令和同一进程的精确窗�
   const failed = await snap();
   assert.equal(failed.error.data.reason,'device_operation_failed');
   assert.ok(!JSON.stringify(failed).includes('private title'));
+
+  await t.test('macOS 精确前置只接受已核实的焦点，Windows 不执行未检查 PID 的前置',async () => {
+    const focus = (args:object=target) => call('call_tool',driverArgs('bring_to_front',args));
+    for (const args of [{pid},{window_id},{...target,app:'Test'},{pid,window_id:2**32}]) assert.ok((await focus(args)).error);
+    os = 'windows';
+    assert.equal((await focus()).error.data.reason,'window_change_unsupported');
+    os = 'macos'; actionSupported = false;
+    assert.equal((await focus()).error.data.reason,'window_change_unsupported');
+    actionSupported = true; windowLayer = 3;
+    assert.equal((await focus()).error.data.reason,'window_change_unverified');
+    windowLayer = 0; matched = false;
+    assert.equal((await focus()).error.data.reason,'window_change_unverified');
+    assert.equal(mutations.length,0);
+    matched = true;
+    assert.deepEqual((await focus()).result,{content:[{type:'text',text:JSON.stringify({...target,activated:true})}]});
+    assert.deepEqual(mutations,[driverArgs('bring_to_front',target)]);
+    for (actionReport of [{...exactActivation,status:'partial'}, {...exactActivation,window_id:window_id+1},
+      {...exactActivation,observed:{...exactActivation.observed,focused_window_id:window_id+1}}])
+      assert.equal((await focus()).error.data.reason,'window_change_unverified');
+    actionReport = exactActivation; afterMutation = () => { matched = false; };
+    assert.equal((await focus()).error.data.reason,'window_change_unverified');
+    matched = true; afterMutation = () => {};
+  });
+
+  await t.test('两平台调整窗口只返回经 Driver 与同 PID 窗口再次读回的位置和大小',async () => {
+    const move = (args:object) => call('call_tool',driverArgs('set_window_frame',args));
+    const macArgs = {...target,...frame};
+    let prior = mutations.length;
+    for (const args of [{...macArgs,width:0},{...macArgs,height:32768},{...macArgs,x:-32769},{...macArgs,y:0.5},
+      {...macArgs,session:'other'},{...macArgs,window_id:2**32}]) assert.ok((await move(args)).error);
+    assert.equal(mutations.length,prior);
+    const moved = (id:number) => ({content:[{type:'text',text:JSON.stringify({pid,window_id:id,frame})}]});
+    actionReport = exactFrame; bounds = {...frame,x:frame.x+2};
+    assert.deepEqual((await move(macArgs)).result,moved(window_id));
+    assert.deepEqual(mutations.at(-1),driverArgs('set_window_frame',macArgs));
+    bounds.x++;
+    assert.equal((await move(macArgs)).error.data.reason,'window_change_unverified');
+    os = 'windows'; hwnd = Number.MAX_SAFE_INTEGER; windowsPid = pid + 1;
+    const winArgs = {...macArgs,window_id:hwnd};
+    prior = mutations.length;
+    assert.equal((await move(winArgs)).error.data.reason,'window_change_unverified');
+    assert.equal(mutations.length,prior);
+    windowsPid = pid; bounds = {...frame};
+    assert.deepEqual((await move(winArgs)).result,moved(hwnd));
+    assert.deepEqual(mutations.at(-1),driverArgs('set_window_frame',winArgs));
+    bounds.width++;
+    assert.equal((await move(winArgs)).error.data.reason,'window_change_unverified');
+    bounds = {...frame};
+    for (actionReport of [{...exactFrame,effect:'unverifiable'},{effect:'confirmed',evidence:[]}])
+      assert.equal((await move(winArgs)).error.data.reason,'window_change_unverified');
+    actionReport = exactFrame; afterMutation = () => { windowsPid++; };
+    assert.equal((await move(winArgs)).error.data.reason,'window_change_unverified');
+  });
 });

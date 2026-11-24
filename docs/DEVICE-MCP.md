@@ -7,11 +7,13 @@ cs-agent 通过名为 `cua` 的反向 MCP 访问自托管的 Cua Spaces。设备
 | `list_spaces` | 返回当前会话可见的设备卡 | 主人及获分配设备的会话 |
 | `list_tools` | 传入 `space` 和 `service=driver`，可用 `name` 筛选 Driver 工具并查看参数 | 同上 |
 | `space_bash` | 传入 `space` 和固定命令 `hostname`，返回设备主机名 | 主人、已获设备分配的群聊或私聊，以及在该授权范围内派出的子任务 |
-| `call_tool` | 传入 `space`、`service=driver`、`tool` 与 `arguments`。用 `list_windows` 列出 macOS 或 Windows 窗口。在 macOS 上还可用 `get_window_state` 获取指定窗口的一张 PNG | 同上 |
+| `call_tool` | 传入 `space`、`service=driver`、`tool` 与 `arguments`。用 `list_windows` 选取 macOS 或 Windows 窗口，`set_window_frame` 调整其位置和大小。macOS 还支持 `bring_to_front` 前置窗口和 `get_window_state` 截图 | 同上 |
 
-后两项沿用 Cua 原生工具名。桥只接受表中列出的命令和 Driver 操作。在控制机给目标设备启用读取路由后，还需在管理台为 `cua` 启用对应工具。此时已有的会话分配也允许读取该设备主机名、窗口列表或截图。启用前请核对获分配的群聊与私聊。被动事件及 agent 回合拒绝这些操作，定时任务也不能读取主机名或窗口。
+后两项沿用 Cua 原生工具名。桥只接受表中列出的命令和 Driver 操作。在控制机为目标设备启用操作路由后，还需在管理台启用对应工具。旧的只读 `call_tool` 配置仍可读取窗口。启用窗口写操作前，请核对获分配的群聊与私聊，然后重新检测当前桥，启用 `call_tool` 并取消勾选「仅允许读取窗口」。这些会话及其获准的子任务可操作该设备。定时任务、被动事件及 agent 回合不能执行这些窗口操作。
 
 例如，模型可对选定的 Space 调用 `call_tool`，将 `tool` 设为 `list_windows`，`arguments` 传 `{"app":"TextEdit"}`、`{"pid":1234}` 或空对象。如需截取 Mac 窗口，用同一 Space 调用 `get_window_state`，把选中行的 `pid` 与 `window_id` 原样放入 `arguments`。截图前后均会核验窗口归属，长边最多 768 像素。窗口关闭或系统拒绝抓取时返回错误。Worker 将图片写入当前会话的私有媒体库。回复需要带图时，将结果中的 `structuredContent.imageId` 放入 `send_message.images`。
+
+调整窗口时向 `set_window_frame` 传入同一行的 `pid` 和 `window_id`，以及目标桌面坐标 `x`、`y` 和尺寸 `width`、`height`。回执的 `frame` 是已核对的请求值。macOS 原生窗口布局按每项最多 2 个点的误差核对，Windows 逐项精确核对。在 Mac 上，`bring_to_front` 只需这两个窗口标识。系统会激活该应用，同一应用的其他窗口也可能前移。遇到执行结果未知，先查看设备上的窗口状态再决定下一步。
 
 ## 控制端与设备
 
@@ -27,7 +29,7 @@ cs-agent 通过名为 `cua` 的反向 MCP 访问自托管的 Cua Spaces。设备
 
 ## 会话分配与生产验收
 
-主人在「权限与运维」的「设备按会话分配（Cua）」为指定的 `group:<id>` 或 `private:<id>` 勾选设备。主人可查看整个目录，其他会话的操作仅限获分配的设备。子任务可用的设备取派出时清单与当前分配的交集。启用 `space_bash` 或 `call_tool` 后，这些范围同样适用于主机名和窗口读取。普通第三方 MCP 与 WSB 的授权独立配置。
+主人在「权限与运维」的「设备按会话分配（Cua）」为指定的 `group:<id>` 或 `private:<id>` 勾选设备。主人可查看整个目录，其他会话的操作仅限获分配的设备。子任务可用的设备取派出时清单与当前分配的交集。启用 `space_bash` 或 `call_tool` 后，这些范围同样适用于主机名和窗口操作。撤销后重新分配同一台设备时，须重新派发子任务。普通第三方 MCP 与 WSB 的授权独立配置。
 
 上线前使用两个可区分的设备身份验收目录与授权。每个身份使用各自的注册令牌、设备令牌、Relay 和目录端口。可以使用同一平台的设备。协议测试可用返回不同主机名与 Driver 清单的两个探针，Mac 窗口操作使用真实设备。
 

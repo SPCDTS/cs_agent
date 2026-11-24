@@ -24,8 +24,10 @@ export function mcpServerRender(id:string){
   const list=$("mcp-server-tools");list.replaceChildren();
   if(server)for(const tool of record?.discovered||[]){
     const enabled=el("input",{type:"checkbox","data-tool":tool.name});enabled.checked=server.tools.allow.includes(tool.name);
-    const readonly=el("input",{type:"checkbox","data-readonly":tool.name});readonly.checked=(server.tools.readOnly??[]).includes(tool.name);
-    list.append(el("div",{className:"source"},[el("div",{className:"row"},[el("label",{className:"row"},[enabled,el("strong",{text:tool.name})]),el("label",{className:"row"},[readonly,el("span",{text:"确认为只读"})])]),
+    const windowAccess = server.id === "cua" && tool.name === "call_tool";
+    const readonly=el("input",{type:"checkbox","data-readonly":tool.name});
+    readonly.checked=(server.tools.readOnly??[]).includes(tool.name) || (windowAccess && !enabled.checked);
+    list.append(el("div",{className:"source"},[el("div",{className:"row"},[el("label",{className:"row"},[enabled,el("strong",{text:tool.name})]),el("label",{className:"row"},[readonly,el("span",{text:windowAccess ? "仅允许读取窗口" : "确认为只读"})])]),
       el("div",{className:"muted small",text:tool.description})]));
   }
   paginateChildren($("mcp-server-tools"),{key:"mcp-server-tools:"+id});

@@ -18,7 +18,7 @@ import { McpPolicyError, McpPolicyStore, type McpGrantInput } from "./policy";
 import { digest, jsonBytes, toolNames, serverDigest } from "./names";
 import { convertMcpResult, mcpFailure } from "./result";
 import { mcpCodemodeResult, mcpCodemodeSchema, MCP_RESULT_INSTRUCTIONS } from "./codemode-result";
-import { cuaReadTools, cuaOutput, cuaQueryAllowed, cuaResult, cuaSubject, isCuaInspection, isCuaTool } from "../cua/discovery";
+import { cuaTools, cuaCallIsReadOnly, cuaOutput, cuaQueryAllowed, cuaResult, cuaSubject, isCuaDeviceOperation, isCuaTool } from "../cua/discovery";
 import { cuaCards } from "../cua/contracts";
 
 const KNOWN_MCP_CODES = new Set(["denied", "queue_busy", "connections_busy", "tool_retired", "catalog_changed_during_refresh", "timeout"]);
@@ -46,7 +46,7 @@ export class ThreadMcp {
       sections: [section("mcp-policy", () => {
         const visible = this.entries.has("cua") && (this.scope === "owner" || !!this.config.cuaSpaces?.length);
         const directory = visible ? " Cua 的 list_spaces 返回 structuredContent.spaces。用完整设备 ID 和 service=driver 调用 list_tools；用 name 筛选工具并读取参数契约。" : "";
-        const inspect = visible ? " 已启用的 space_bash 接受 command=hostname。在 macOS 和 Windows 上用 call_tool 的 service=driver、tool=list_windows 查询窗口。macOS 可传 tool=get_window_state、arguments={pid,window_id} 获取截图。structuredContent.imageId 可用于 send_message.images。" : "";
+        const inspect = visible ? " 已启用的 space_bash 接受 command=hostname。在 macOS 和 Windows 上用 call_tool 的 service=driver、tool=list_windows 查询窗口。macOS 可传 tool=get_window_state、arguments={pid,window_id} 获取截图。structuredContent.imageId 可用于 send_message.images。管理员重新检测并启用操作后，可用精确的 PID 与窗口 ID 调用 bring_to_front（Mac）或 set_window_frame（Mac / Windows）。" : "";
         return MCP_RULE + MCP_RESULT_INSTRUCTIONS + directory + inspect;
       })],
       tools: [
@@ -110,7 +110,7 @@ export class ThreadMcp {
   private async loadGrantedCuaTools() {
     const entry = this.entries.get('cua'), scope = this.scope;
     if (!scope || scope === 'owner' || !this.config.cuaSpaces?.length || !entry?.server.access.revision || entry.catalog ||
-        !entry.server.tools.allow.some(tool => cuaReadTools.some(name => name === tool))) return;
+        !entry.server.tools.allow.some(isCuaTool)) return;
     return entry.loadingCatalog ??= this.env.REGISTRY.getByName('main').cuaDirectoryToolsJson(scope,entry.server.access.revision,serverDigest(entry.server))
       .then(json => {
         if (!json || this.stopped || this.entries.get('cua') !== entry || !this.config.cuaSpaces?.length || entry.catalog) return;
@@ -254,15 +254,52 @@ export class ThreadMcp {
               (!frozen || (frozen.spaces.includes(id) && frozen.grants?.[id] === current[id])));
           };
           if (!cuaQueryAllowed(tool.name, owned, permitted(before))) { classification = 'denied'; return mcpFailure(classification); }
+          const mutation = !cuaCallIsReadOnly(tool.name, owned);
+          // 旧版保存的 call_tool 是只读授权。更新节点的工具目录不会自动授予设备写操作。
+          if (mutation && entry.server.tools.readOnly?.includes(tool.name)) { classification = 'denied'; return mcpFailure(classification); }
+          const currentAccess = async () => {
+            const recipient = await authorized();
+            if (!recipient || callerScope(recipient) !== scope || !await this.current(entry)) return;
+            const effective = permitted(await assignments());
+            if (cuaQueryAllowed(tool.name, owned, effective)) return {effective};
+          };
+          if (mutation) {
+            const grant = before && typeof owned.space === 'string' ? before[owned.space] : null;
+            const contract = digest([toolNames(entry.catalog,current).fullDigest, revision, grant]);
+            const claim = await this.policy.claim({authority,server:entry.server.id,name,contract,args:owned,operationId}, false);
+            if (claim.kind === 'execute') claimId = claim.id;
+            if (claim.kind === 'pending' || !await currentAccess()) {
+              classification = 'denied';
+              const result = mcpFailure(classification);
+              if (claimId) await this.policy.finish(claimId,result);
+              return result;
+            }
+            if (claim.kind === 'result') { classification = 'receipt'; return claim.result; }
+          }
+          signal.throwIfAborted();
+          dispatched = mutation;
           const remote = await connection.callTool(tool.name, owned, {scope}, signal);
           outputBytes = jsonBytes(remote);
-          // 目录读取期间可能重置会话、撤销设备、轮换节点。绝不返回旧分配中的设备内容。
-          const recipient = await authorized();
-          const effective = permitted(await assignments());
-          if (!recipient || callerScope(recipient) !== scope || !await this.current(entry) || !cuaQueryAllowed(tool.name, owned, effective)) {
-            classification = 'denied'; return mcpFailure(classification);
+          // 在途撤权时丢弃设备内容。窗口变更一旦发出，失去回执后就不能安全地重试。
+          const access = await currentAccess();
+          if (!access) {
+            classification = mutation ? 'outcome_unknown' : 'denied';
+            const result = mcpFailure(classification);
+            if (claimId) await this.policy.finish(claimId,result,true);
+            return result;
           }
+          const {effective} = access;
           const result = await cuaResult(tool.name,owned,remote,effective,this.config.limits,this.env,authority.scope,revision);
+          if (claimId) {
+            if (result.isError) {
+              classification = 'outcome_unknown';
+              const unknown = mcpFailure(classification);
+              await this.policy.finish(claimId,unknown,true);
+              return unknown;
+            }
+            await this.policy.finish(claimId,result);
+            if (!await currentAccess()) { classification = 'denied'; return mcpFailure(classification); }
+          }
           if (tool.name === 'list_spaces' || (tool.name === 'call_tool' && owned.tool === 'get_window_state')) {
             // 读取别名和保存截图需要额外的存储请求。发布结果前按最新会话和设备授权收口。
             const latest = permitted(await assignments()), target = await authorized();
@@ -323,7 +360,7 @@ export class ThreadMcp {
   private async allowed(entry: Entry, authority: McpAuthority, tool?: string): Promise<boolean> {
     if (entry.server.id === 'cua') return entry.server.transport.kind === 'reverse-websocket' && !!entry.server.access.revision
       && authority.scope === this.scope && cuaSubject(authority) && !!tool && isCuaTool(tool) && entry.server.tools.allow.includes(tool)
-      && (!isCuaInspection(tool) || (authority.kind === 'message' || authority.kind === 'subagent'))
+      && (!isCuaDeviceOperation(tool) || (authority.kind === 'message' || authority.kind === 'subagent'))
       && (authority.scope === 'owner' || !!this.config.cuaSpaces?.length);
     if (!await this.policy.allows(authority, entry.server, tool)) return false;
     if (!tool || !isEnvironmentTool(tool)) return true;
@@ -342,7 +379,7 @@ export class ThreadMcp {
     if (!this.options.scope || this.options.scope === "owner") return;
     for (const entry of this.entries.values()) {
       if (entry.server.id === 'cua') {
-        entry.visible = new Set(this.config.cuaSpaces?.length ? cuaReadTools : []);
+        entry.visible = new Set(this.config.cuaSpaces?.length ? cuaTools : []);
         if (entry.catalog) this.install(entry, entry.catalog);
         continue;
       }
