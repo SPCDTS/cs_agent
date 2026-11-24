@@ -13,7 +13,10 @@ const frameBytes = bytes + 4096;
 const requestBytes = 32 * 1024;
 const sessionId = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const deviceId = /^(?:relay:[a-z0-9-]{8,64}|direct:(?:[a-zA-Z0-9._-]+|\[[0-9a-fA-F:]+\]):[0-9]{1,5})$/;
-const directoryTools: Record<string,Tool> = {
+const spaceProperty = {type:'string' as const,pattern:deviceId.source,maxLength:256,description:'设备卡上的完整 ID'};
+const maxScreenshotDimension = 768;
+const maxScreenshotBytes = 3 * 1024 * 1024;
+const bridgeTools: Record<string,Tool> = {
   list_spaces: {
     name:'list_spaces', description:'列出此会话可见的设备卡，返回设备名称、完整 ID、系统与状态。',
     inputSchema:{type:'object', properties:{}, additionalProperties:false}, annotations:{readOnlyHint:true},
@@ -21,10 +24,25 @@ const directoryTools: Record<string,Tool> = {
   list_tools: {
     name:'list_tools', description:'查询选定设备的 Driver 工具清单。用 name 按名称片段筛选并读取匹配工具的参数契约。',
     inputSchema:{type:'object', properties:{
-      space:{type:'string',pattern:deviceId.source,maxLength:256,description:'设备卡上的完整 ID'},
+      space:spaceProperty,
       service:{type:'string',enum:['driver']}, name:{type:'string',maxLength:128},
     }, required:['space','service'], additionalProperties:false}, annotations:{readOnlyHint:true},
   },
+  get_hostname: {
+    name:'get_hostname', description:'在选定设备上读取系统主机名。',
+    inputSchema:{type:'object',properties:{space:spaceProperty},required:['space'],additionalProperties:false},
+    annotations:{readOnlyHint:true},
+  },
+  get_window_screenshot: {
+    name:'get_window_screenshot', description:'读取指定 macOS 进程中一个窗口的 PNG 截图。需要该设备上的进程 ID 和窗口 ID。',
+    inputSchema:{type:'object',properties:{
+      space:spaceProperty, pid:{type:'integer',minimum:1,maximum:0x7fffffff},
+      window_id:{type:'integer',minimum:1,maximum:0xffffffff},
+    },required:['space','pid','window_id'],additionalProperties:false}, annotations:{readOnlyHint:true},
+  },
+};
+const publicToolFor: Record<string,string> = {
+  list_spaces:'list_spaces', list_tools:'list_tools', space_bash:'get_hostname', call_tool:'get_window_screenshot',
 };
 const methods = new Set(['initialize', 'notifications/initialized', 'notifications/cancelled', 'ping', 'tools/list', 'tools/call']);
 
@@ -82,11 +100,23 @@ function localFetch(socketPath: string): FetchLike {
   };
 }
 
-function discoveryArgs(name: string, args: Record<string, unknown>): boolean {
-  if (name === 'list_spaces') return Object.keys(args).length === 0;
-  return name === 'list_tools' && Object.keys(args).every(k => ['space','service','name'].includes(k))
-    && typeof args.space === 'string' && args.space.length > 0 && args.space.length <= 256
-    && args.service === 'driver' && (args.name === undefined || typeof args.name === 'string' && args.name.length <= 128);
+function validToolArgs(name: string, args: Record<string, unknown>): boolean {
+  const keys = Object.keys(args);
+  if (name === 'list_spaces') return keys.length === 0;
+  if (typeof args.space !== 'string' || !args.space || args.space.length > 256) return false;
+  switch (name) {
+    case 'get_hostname': return keys.length === 1;
+    case 'get_window_screenshot':
+      return keys.length === 3 && positiveInteger(args.pid,0x7fffffff) && positiveInteger(args.window_id,0xffffffff);
+    case 'list_tools':
+      return keys.every(k => ['space','service','name'].includes(k)) && args.service === 'driver'
+        && (args.name === undefined || typeof args.name === 'string' && args.name.length <= 128);
+    default: return false;
+  }
+}
+
+function positiveInteger(value: unknown, maximum: number): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= maximum;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -121,6 +151,39 @@ function driverDirectory(data: unknown) {
   return {service:'driver',services:['driver'],count:tools.length,tools};
 }
 
+function hostnameResult(result: CallToolResult): CallToolResult {
+  const block = result.content[0];
+  const match = result.content.length === 1 && block?.type === 'text' && block.text.length <= 265
+    && /^([^\r\n]+)\r?\n\[exit 0\]$/.exec(block.text);
+  const hostname = match && match[0] === block.text && match[1];
+  if (!hostname || hostname.length > 253 || !hostname.replace(/\.$/,'').split('.').every(
+    label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label))) {
+    throw new McpError(ErrorCode.InternalError,'设备未返回有效主机名。',{reason:'hostname_unavailable'});
+  }
+  return {content:[{type:'text',text:hostname}]};
+}
+
+function screenshotUnavailable() {
+  return new McpError(ErrorCode.InternalError,'无法确认目标窗口或获取其截图。',{reason:'window_screenshot_unavailable'});
+}
+
+function windowImage(result: CallToolResult, pid: number, windowId: number) {
+  const meta = result.structuredContent;
+  const images = result.content.filter(part => part.type === 'image');
+  const image = images[0];
+  if (meta?.pid !== pid || meta.window_id !== windowId || meta.screenshot_frame_valid !== true
+      || !positiveInteger(meta.screenshot_width,maxScreenshotDimension) || !positiveInteger(meta.screenshot_height,maxScreenshotDimension)
+      || images.length !== 1 || image?.mimeType !== 'image/png' || image.data.length > 4 * Math.ceil(maxScreenshotBytes / 3))
+    throw screenshotUnavailable();
+  const png = Buffer.from(image.data,'base64');
+  // 对照实际 PNG 的 IHDR 和 IEND，防止伪报尺寸或无效 base64 穿过桥接层。
+  if (png.length < 45 || png.length > maxScreenshotBytes || png.toString('base64') !== image.data
+      || png.readBigUInt64BE(0) !== 0x89504e470d0a1a0an || png.readUInt32BE(8) !== 13 || png.toString('ascii',12,16) !== 'IHDR'
+      || png.readUInt32BE(16) !== meta.screenshot_width || png.readUInt32BE(20) !== meta.screenshot_height
+      || png.subarray(-12).toString('hex') !== '0000000049454e44ae426082') throw screenshotUnavailable();
+  return {type:'image' as const, mimeType:'image/png', data:image.data};
+}
+
 class DirectorySession {
   readonly server = new Server({name:'cua-spaces',version:'1'}, {capabilities:{tools:{}}});
   readonly client = new Client({name:'cs-agent-cua-directory',version:'1'}, {capabilities:{}});
@@ -137,35 +200,65 @@ class DirectorySession {
     this.server.setRequestHandler(ListToolsRequestSchema, async (req, {signal}) => {
       try {
         const page = await this.client.request({method:'tools/list',params:{cursor:req.params?.cursor}}, ListToolsResultSchema,{signal});
-        return {nextCursor:page.nextCursor, tools:page.tools.filter(t => Object.hasOwn(directoryTools,t.name)).map(t => directoryTools[t.name]!)};
+        return {nextCursor:page.nextCursor, tools:page.tools.filter(t => Object.hasOwn(publicToolFor,t.name)).map(t => bridgeTools[publicToolFor[t.name]!]!)};
       } catch { throw new McpError(ErrorCode.InternalError, '无法读取 Cua 工具目录'); }
     });
     this.server.setRequestHandler(CallToolRequestSchema, async ({params}, {signal}) => {
       const args = params.arguments ?? {};
-      if (!discoveryArgs(params.name, args)) throw new McpError(ErrorCode.InvalidParams,'仅支持设备目录和指定设备的 Driver 工具目录。');
-      const cards = spaceCards(await this.readDirectory('list_spaces',params.name === 'list_spaces' ? args : {},signal));
-      let directory: unknown = cards;
-      if (params.name === 'list_tools') {
-        // Cua 自身也解析裸名称、URL 和未登记的 direct 地址。只把本次目录中的唯一规范 ID 交给它。
-        const target = args.space as string;
-        const matching = cards.filter(card => card.id === target);
-        if (!deviceId.test(target) || !matching.length)
-          throw new McpError(ErrorCode.InvalidParams,'未登记此设备 ID，请使用 list_spaces 返回的完整 ID。',{reason:'space_not_registered'});
-        if (matching.length > 1)
-          throw new McpError(ErrorCode.InternalError,'Cua 目录中此设备 ID 出现多次，无法确认目标。',{reason:'space_ambiguous'});
-        directory = driverDirectory(await this.readDirectory('list_tools',args,signal));
+      if (!validToolArgs(params.name, args)) throw new McpError(ErrorCode.InvalidParams,'不支持此设备操作或参数。');
+      const cards = spaceCards(await this.readDirectory('list_spaces',{},signal));
+      if (params.name === 'list_spaces') return {content:[{type:'text',text:JSON.stringify(cards)}]};
+
+      // Cua 还接受裸名称、URL 和未登记的地址。只使用本次目录中的唯一规范 ID。
+      const space = args.space as string, matching = cards.filter(card => card.id === space);
+      if (!deviceId.test(space) || !matching.length)
+        throw new McpError(ErrorCode.InvalidParams,'未登记此设备 ID，请使用 list_spaces 返回的完整 ID。',{reason:'space_not_registered'});
+      if (matching.length > 1)
+        throw new McpError(ErrorCode.InternalError,'Cua 目录中此设备 ID 出现多次，无法确认目标。',{reason:'space_ambiguous'});
+      if (params.name === 'get_hostname')
+        return hostnameResult(await this.call('space_bash',{space,command:'hostname',timeout:5},signal));
+      if (params.name === 'get_window_screenshot') {
+        if (matching[0]!.os !== 'macos')
+          throw new McpError(ErrorCode.InvalidParams,'此设备尚未提供经验证的精确窗口截图。',{reason:'window_screenshot_unsupported'});
+        return this.windowScreenshot(space,args.pid as number,args.window_id as number,signal);
       }
+      const directory = driverDirectory(await this.readDirectory('list_tools',args,signal));
       return {content:[{type:'text',text:JSON.stringify(directory)}]};
     });
   }
-  private async readDirectory(name: string, args: Record<string,unknown>, signal: AbortSignal): Promise<unknown> {
-    let result: CallToolResult;
+
+  private async windowScreenshot(space: string, pid: number, windowId: number, signal: AbortSignal): Promise<CallToolResult> {
+    const {tools} = driverDirectory(await this.readDirectory('list_tools',{space,service:'driver',name:'window'},signal));
+    const supports = (name: string, keys: string[]) => {
+      const matches = tools.filter(tool => tool.name === name);
+      const properties = matches[0]?.inputSchema?.properties;
+      return matches.length === 1 && isRecord(properties) && keys.every(key => Object.hasOwn(properties,key));
+    };
+    const capture = {pid,window_id:windowId,include_accessibility_tree:false,include_screenshot:true,
+      display_only:true,screenshot_format:'png',max_dimension:maxScreenshotDimension};
+    if (!supports('get_window_state',Object.keys(capture)) || !supports('list_windows',['pid']))
+      throw new McpError(ErrorCode.InvalidParams,'设备的 Driver 缺少精确窗口截图支持。',{reason:'window_screenshot_unsupported'});
+    const callDriver = (tool: string, args: Record<string,unknown>) =>
+      this.call('call_tool',{space,service:'driver',tool,arguments:args},signal);
+    const image = windowImage(await callDriver('get_window_state',capture),pid,windowId);
+    // Driver 拍摄前已检查窗口归属；拍摄期间退出或易主时，也须丢弃图像。
+    const {windows} = (await callDriver('list_windows',{pid})).structuredContent ?? {};
+    if (!Array.isArray(windows) || windows.filter(w => isRecord(w) && w.pid === pid && w.window_id === windowId).length !== 1)
+      throw screenshotUnavailable();
+    return {content:[image]};
+  }
+
+  private async call(name: string, args: Record<string,unknown>, signal: AbortSignal): Promise<CallToolResult> {
     try {
-      result = await this.client.request({method:'tools/call',params:{name,arguments:args}},CallToolResultSchema,{signal});
-      if (result.isError) throw new Error();
-    } catch {
-      throw new McpError(ErrorCode.InternalError,'无法读取 Cua 目录，请检查 Spaces 连接。',{reason:'directory_unavailable'});
-    }
+      const result = await this.client.request({method:'tools/call',params:{name,arguments:args}},CallToolResultSchema,{signal});
+      if (!result.isError) return result;
+    } catch { /* 上游报错可能包含窗口标题、设备路径或命令输出。 */ }
+    const directory = name === 'list_spaces' || name === 'list_tools';
+    throw new McpError(ErrorCode.InternalError,directory ? '无法读取 Cua 目录，请检查 Spaces 连接。' : 'Cua 未能完成设备操作。',
+      {reason: directory ? 'directory_unavailable' : 'device_operation_failed'});
+  }
+  private async readDirectory(name: string, args: Record<string,unknown>, signal: AbortSignal): Promise<unknown> {
+    const result = await this.call(name,args,signal);
     const block = result.content[0];
     if (result.content.length !== 1 || block?.type !== 'text') throw invalidDirectory();
     try { return JSON.parse(block.text); } catch { throw invalidDirectory(); }

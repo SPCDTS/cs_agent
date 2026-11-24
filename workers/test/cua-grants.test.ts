@@ -2,7 +2,8 @@ import { env, reset, runInDurableObject } from 'cloudflare:test';
 import { createRegistry } from '@earendil-works/pi-durable';
 import { DurableObjectSqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite/cloudflare';
 import { ThreadMcp, type McpAuthority } from '../src/mcp';
-import { MCP_CATALOG_SCHEMA } from '../src/mcp/catalog';
+import { MCP_CATALOG_SCHEMA, restoreCatalog } from '../src/mcp/catalog';
+import { toolNames } from '../src/mcp/names';
 import { afterEach, expect, it } from 'vitest';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
@@ -15,6 +16,7 @@ import { cuaCards, type CuaDirectory } from '../src/cua/contracts';
 afterEach(reset);
 const id = 'cua', scope = 'group:123456', device = 'direct:fixture-a.test:8080', second = 'direct:fixture-b.test:8080';
 const bearer = 'Bearer '+'g'.repeat(43);
+const fixtureTools = ['list_spaces','list_tools','get_hostname','get_window_screenshot'];
 const admin = (path:string, input?:unknown, authorized = true) => worker.fetch(new Request(env.PUBLIC_ORIGIN+'/admin/cua/'+path,{
   method:input ? 'PUT' : 'GET',headers:authorized ? {Authorization:'Bearer synthetic-admin','Content-Type':'application/json'} : {},
   body:input ? JSON.stringify(input) : undefined,
@@ -32,9 +34,10 @@ async function directoryNode(onQuery?: (name:string) => void | Promise<void>) {
     if (frame.close) { await transport?.close(); sessions.delete(frame.session); return; }
     if (!transport) {
       const server = new Server({name:'cua-spaces',version:'0.31.0'},{capabilities:{tools:{}}});
-      server.setRequestHandler(ListToolsRequestSchema,() => ({tools:['list_spaces','list_tools'].map(name => ({name,inputSchema:{type:'object' as const}}))}));
+      server.setRequestHandler(ListToolsRequestSchema,() => ({tools:fixtureTools.map(name => ({name,inputSchema:{type:'object' as const}}))}));
       server.setRequestHandler(CallToolRequestSchema,async ({params}) => {
         await onQuery?.(params.name);
+        if (params.name === 'get_hostname') return {content:[{type:'text',text:'mac-fixture.local'}]};
         const data = params.name === 'list_tools' ? {service:'driver', tools:[{name:'inspect',description:'查看窗口',inputSchema:{type:'object'}}]} : [
           {id:device,name:'fixture-a',display_name:'测试设备',os:'windows',phase:'ready',power_state:'stopped',labels:{private:'sensitive'}},
           {id:second,name:'fixture-b'},
@@ -50,7 +53,7 @@ async function directoryNode(onQuery?: (name:string) => void | Promise<void>) {
   ws.addEventListener('message',event => { void receive(String(event.data)); });
   ws.accept();
   expect(await manageMcp(env,{action:'probe',id,expectedRevision:record.revision})).toMatchObject({status:'ready'});
-  const ready = await registry.mcpServerActivate(id,(await registry.mcpServerGet(id)).revision,{allow:['list_spaces','list_tools']});
+  const ready = await registry.mcpServerActivate(id,(await registry.mcpServerGet(id)).revision,{allow:fixtureTools});
   if ('error' in ready || !ready.server.access.revision) throw new Error('fixture_activation_failed');
   return {ws,registry,ready,accessRevision:ready.server.access.revision};
 }
@@ -120,6 +123,7 @@ it('私聊主模型与子任务的目录使用实时授权，撤权中的 Driver
       try {
         await mcp.refreshAll();
         const snapshot = await mcp.captureCapabilities(who);
+        expect(snapshot.tools.some(tool => tool.includes('get_hostname') || tool.includes('get_window_screenshot'))).toBe(false);
         expect(snapshot.cua?.spaces).toEqual([device]);
         const list = snapshot.tools.find(tool => tool.startsWith('mcp_cua_list_spaces_'))!;
         const tools = snapshot.tools.find(tool => tool.startsWith('mcp_cua_list_tools_'))!;
@@ -141,6 +145,36 @@ it('私聊主模型与子任务的目录使用实时授权，撤权中的 Driver
         expect(withheld.isError).toBe(true);
         expect(JSON.stringify(withheld)).not.toContain('查看窗口');
         expect((await call(list,{})).isError).toBe(true);
+      } finally { await mcp.close(); }
+    });
+  } finally { ws.close(1000); }
+});
+
+it('主人发消息可读主机名，额外的命令参数、定时任务与委派调用在到达桥之前被拒',async () => {
+  let inspections = 0;
+  const {ws} = await directoryNode(name => { if (name === 'get_hostname') inspections++; });
+  try {
+    await runInDurableObject(env.THREAD.getByName('owner'),async (_instance,state) => {
+      const db = new DurableObjectSqliteDatabase(state.storage);
+      await db.exec(MCP_CATALOG_SCHEMA + 'CREATE TABLE IF NOT EXISTS events(at INTEGER,kind TEXT,detail TEXT)');
+      const config = await env.REGISTRY.getByName('main').mcpConfig('owner');
+      const server = config.servers.find(row => row.id === id)!;
+      const who: McpAuthority = {scope:'owner',kind:'message',actor:'owner',owner:true,generation:1,replyChannel:'web'};
+      const mcp = new ThreadMcp(db,env,createRegistry(),async () => who,{...config,servers:[server]},{scope:'owner'});
+      try {
+        await mcp.refreshAll();
+        const catalog = (await restoreCatalog(db,server,config.limits))!;
+        const tool = catalog.tools.find(tool => tool.name === 'get_hostname')!;
+        const name = toolNames(catalog,tool).nativeName;
+        const call = (args:object,actor = who) => mcp.invoke({name,args,operationId:crypto.randomUUID()},async () => actor);
+        expect((await call({space:device})).structuredOutput).toEqual({hostname:'mac-fixture.local'});
+        for (const kind of ['schedule','subagent','event','agent'] as const) {
+          expect((await call({space:device},{...who,kind})).isError).toBe(true);
+        }
+        expect((await call({space:device,command:'hostname'})).isError).toBe(true);
+        const snapshot = await mcp.captureCapabilities(who);
+        expect(snapshot.tools).not.toContain(name);
+        expect(inspections).toBe(1);
       } finally { await mcp.close(); }
     });
   } finally { ws.close(1000); }

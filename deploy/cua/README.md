@@ -1,10 +1,10 @@
 # Cua 设备目录部署
 
-这套模板让 cs-agent 读取已登记设备及其 Driver 工具清单。控制机需有 Linux、支持 `LoadCredential` 的 systemd、Caddy 2 和 Node.js 24。上游 `cua-sdk-v0.31.0` 对应的 CLI 与 daemon 为 0.31.0，同一提交的 `cua-relay` 和设备端 `cua-spacesd` 为 0.17.2。示例域名、机器 ID 和展示名均需按本次接入填写。[Cua 固定版本](https://github.com/trycua/cua/tree/78fe31378569aab57ddb5131a08fc90fc3c6fbb9) [spacesd 版本](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua-spacesd/VERSION)
+这套模板默认让 cs-agent 读取已登记设备及其 Driver 工具清单，可按设备启用主人交互回合的主机名读取和 Mac 单窗口截图。控制机需有 Linux、支持 `LoadCredential` 的 systemd、Caddy 2 和 Node.js 24。上游 `cua-sdk-v0.31.0` 对应的 CLI 与 daemon 为 0.31.0，同一提交的 `cua-relay` 和设备端 `cua-spacesd` 为 0.17.2。示例域名、机器 ID 和展示名均需按本次接入填写。[Cua 固定版本](https://github.com/trycua/cua/tree/78fe31378569aab57ddb5131a08fc90fc3c6fbb9) [spacesd 版本](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua-spacesd/VERSION)
 
 ## 规划设备身份
 
-每台设备分配一个长期保留的 machine-id、一个私有 Relay 实例和一个目录端口。公网仅有一个 TLS 域名。Caddy 按精确的 join 路径和机器头选择 Relay，Relay 用本机专属的注册令牌验证 Bearer。每个私有目录端口仅放行该机器的 `SystemService/GetCapabilities`、`DriverService/ListTools` 两条 gRPC 请求。
+每台设备分配一个长期保留的 machine-id、一个私有 Relay 实例和一个目录端口。公网仅有一个 TLS 域名。Caddy 按精确的 join 路径和机器头选择 Relay，Relay 用本机专属的注册令牌验证 Bearer。默认每个私有目录端口仅放行该机器的 `SystemService/GetCapabilities`、`DriverService/ListTools` 两条 gRPC 请求。
 
 | 设备示例 | 公网 join 使用的 machine-id | 原生 Relay 回环端口 | 目录回环端口 | cs-agent 授权使用的 Space ID |
 | --- | --- | --- | --- | --- |
@@ -53,6 +53,28 @@ CUA_ENV_TOKEN=<设备专属令牌>
 ```
 
 运行 `systemctl start cua-directory-register@18281`，仅在设备已加入且能力握手成功后登记该条目。第二台设备使用另一份文件和端口。到 cs-agent「权限与运维」→「Cua 设备分配」，点「刷新设备与分配」，选择群聊或私聊，核对设备名与完整 Space ID，勾选该设备并点击「保存分配」。会话可列出已分配设备并查看其 Driver 工具清单。列表中的状态反映 Cua 最近的握手结果。
+
+## 为一台测试设备启用主机名与窗口读取
+
+在目标设备已用独立设备令牌完成登记后，修改控制机 Caddyfile 中该设备现有的回环站点。以下配置对应表中的工作用 Mac。两条 `import` 必须使用同一台设备的 machine-id 和 Relay 端口。
+
+```caddyfile
+http://127.0.0.1:18281 {
+	import owner-inspection computer-alpha 18181
+	import directory computer-alpha 18181
+}
+```
+
+用 `caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile` 检查后重新加载配置，并核对 `ss -ltn` 中该端口仅监听 `127.0.0.1`。公网入口继续只在 443/TCP 接受指定机器的 join。Caddy 在回环路径上放行两条额外的 gRPC 方法，并将请求的设备 Bearer 交给该机的 spacesd 验证。设备端需使用 `--token-file`。掌握设备令牌的本地进程可以直接调用这两条原生 RPC，设备令牌应只供该设备和专用目录账号使用。
+
+| cs-agent 工具 | 控制机调用的原生接口 | 结果 |
+| --- | --- | --- |
+| `get_hostname` | `ProcessService/StartProcess`，命令由桥固定为 `hostname`，5 秒超时 | 校验正常退出后返回主机名 |
+| `get_window_screenshot` | `DriverService/CallTool`，macOS Driver 按 PID 和窗口 ID 调用 `get_window_state`；随后调用 `list_windows` 按同一 PID 复核归属 | 返回单张 PNG，丢弃上游的窗口标题和其他文本 |
+
+在管理台为 `cua` 重新检测并启用所需的 `get_hostname`、`get_window_screenshot`。主人在当前对话里选择这台设备；测试截图时还需给出专用测试窗口的 PID 和窗口 ID。设备的登录用户需要允许系统录制这个窗口。得到的 `structuredContent.imageId` 可用于本会话的 `send_message.images`。关闭窗口后重复请求应返回错误；Windows 设备目前只支持本节的主机名读取协议，Windows 真机验收待完成。
+
+要恢复设备的目录模式，移除该回环站点的 `import owner-inspection`，校验后重新加载 Caddy。其余设备和原有的 Space ID 均沿用原配置。
 
 ## 撤销与轮换
 

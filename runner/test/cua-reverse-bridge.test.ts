@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { registration, serveConnection } from '../src/cua-reverse-bridge.ts';
 
 class FixtureSocket extends EventTarget {
@@ -199,4 +202,99 @@ test('两个反向会话独立协商本机目录，兼容 JSON 与 SSE，仅列�
     http.closeAllConnections(); await new Promise<void>(resolve => http.close(() => resolve()));
     await rm(dir,{recursive:true,force:true});
   }
+});
+
+test('设备读取只用登记目标、固定命令和同一进程的精确窗口，并过滤上游结果', async t => {
+  const dir = await mkdtemp(join(tmpdir(),'cua-read-'));
+  const path = process.platform === 'win32' ? '\\\\.\\pipe\\cua-read-' + randomUUID() : join(dir,'daemon.sock');
+  const space = 'relay:fixture01', pid = 122, window_id = 501;
+  const windowArgs = {space,pid,window_id};
+  const png = {type:'image' as const,mimeType:'image/png',data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC'};
+  const meta = {pid,window_id,screenshot_frame_valid:true,screenshot_width:1,screenshot_height:1,window_title:'private title'};
+  let capture: CallToolResult = {content:[png,{type:'text',text:'private title'}],structuredContent:meta};
+  let host = 'mbp14.local\n[exit 0]', os = 'macos', matched = true, screenshotSupported = true;
+  const captureArguments = {pid,window_id,include_accessibility_tree:false,include_screenshot:true,display_only:true,
+    screenshot_format:'png',max_dimension:768};
+  const seen: string[] = [];
+  const server = new Server({name:'cua-spaces',version:'test'},{capabilities:{tools:{}}});
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools:['list_spaces','list_tools','space_bash','call_tool','delete_space'].map(name => ({name,inputSchema:{type:'object' as const}})),
+  }));
+  server.setRequestHandler(CallToolRequestSchema,async ({params:{name,arguments:args}}) => {
+    seen.push(name);
+    const json = (data: unknown) => ({content:[{type:'text' as const,text:JSON.stringify(data)}]});
+    switch (name) {
+      case 'list_spaces':
+        assert.deepEqual(args,{});
+        return json([{id:space,name:'fixture',os}]);
+      case 'space_bash':
+        assert.deepEqual(args,{space,command:'hostname',timeout:5});
+        return {content:[{type:'text',text:host}]};
+      case 'list_tools':
+        assert.deepEqual(args,{space,service:'driver',name:'window'});
+        return json({service:'driver',tools:[
+          {name:'get_window_state',description:'test',inputSchema:{properties:screenshotSupported ? captureArguments : {}}},
+          {name:'list_windows',description:'test',inputSchema:{properties:{pid:{}}}},
+        ]});
+      case 'call_tool': {
+        if (args?.tool === 'list_windows') {
+          assert.deepEqual(args,{space,service:'driver',tool:'list_windows',arguments:{pid}});
+          return {content:[{type:'text',text:'unrelated window title'}],structuredContent:{windows:matched ? [{pid,window_id}] : [{pid:pid+1,window_id}]}};
+        }
+        assert.deepEqual(args,{space,service:'driver',tool:'get_window_state',arguments:captureArguments});
+        return capture;
+      }
+      default: throw new Error('unexpected upstream tool');
+    }
+  });
+  const transport = new StreamableHTTPServerTransport({sessionIdGenerator:()=>randomUUID(),enableJsonResponse:true});
+  await server.connect(transport);
+  const http = createServer((req,res) => { void transport.handleRequest(req,res); });
+  const ws = new FixtureSocket(), stop = serveConnection(ws as unknown as WebSocket,path);
+  t.after(async () => {
+    await stop(); await server.close(); http.closeAllConnections();
+    await new Promise<void>(resolve => http.close(() => resolve()));
+    await rm(dir,{recursive:true,force:true});
+  });
+  http.listen(path); await once(http,'listening');
+  const session = randomUUID();
+  await ws.rpc(session,'initialize',{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'test',version:'1'}});
+  const tools = (await ws.rpc(session,'tools/list')).result.tools.map((tool:{name:string}) => tool.name);
+  assert.deepEqual(tools,['list_spaces','list_tools','get_hostname','get_window_screenshot']);
+  const call = (name: string,args: object) => ws.rpc(session,'tools/call',{name,arguments:args});
+  for (const [name,args] of [
+    ['get_hostname',{space,command:'anything'}],['get_window_screenshot',{...windowArgs,window_id:0}],
+    ['get_window_screenshot',{...windowArgs,pid:2**31}],['get_window_screenshot',{...windowArgs,path:'test'}],
+    ['space_bash',{space,command:'hostname'}],['call_tool',{space,service:'driver',tool:'get_desktop_state'}],
+  ] as const) assert.ok((await call(name,args)).error);
+  assert.equal(seen.length,0);
+  for (const [name,args] of [['get_hostname',{}],['get_window_screenshot',{pid,window_id}]] as const)
+    assert.equal((await call(name,{...args,space:'direct:unknown:18181'})).error.data.reason,'space_not_registered');
+  assert.deepEqual((await call('get_hostname',{space})).result,{content:[{type:'text',text:'mbp14.local'}]});
+  for (host of ['mbp14\n[exit 1]','token\nprivate text\n[exit 0]','-invalid\n[exit 0]','mbp14\n[exit 0]\n']) {
+    const reply = await call('get_hostname',{space});
+    assert.equal(reply.error.data.reason,'hostname_unavailable');
+    assert.ok(!JSON.stringify(reply).includes('private text'));
+  }
+  const snap = () => call('get_window_screenshot',windowArgs);
+  os = 'windows';
+  assert.equal((await snap()).error.data.reason,'window_screenshot_unsupported');
+  os = 'macos'; screenshotSupported = false;
+  assert.equal((await snap()).error.data.reason,'window_screenshot_unsupported');
+  assert.ok(!seen.includes('call_tool'));
+  screenshotSupported = true;
+  assert.deepEqual((await snap()).result,{content:[png]});
+  matched = false;
+  assert.equal((await snap()).error.data.reason,'window_screenshot_unavailable');
+  matched = true;
+  for (capture of [
+    {content:[png],structuredContent:{...meta,pid:pid+1}}, {content:[png],structuredContent:{...meta,screenshot_width:769}},
+    {content:[png],structuredContent:{...meta,screenshot_width:2}}, {content:[png,png],structuredContent:meta},
+    {content:[{...png,data:'not a PNG'}],structuredContent:meta}, {content:[{type:'text',text:'private title'}],structuredContent:meta},
+    {content:[png],structuredContent:{...meta,screenshot_frame_valid:false}},
+  ] satisfies CallToolResult[]) assert.equal((await snap()).error.data.reason,'window_screenshot_unavailable');
+  capture = {isError:true,content:[{type:'text',text:'private title'}]};
+  const failed = await snap();
+  assert.equal(failed.error.data.reason,'device_operation_failed');
+  assert.ok(!JSON.stringify(failed).includes('private title'));
 });

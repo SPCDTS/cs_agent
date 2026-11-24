@@ -39,7 +39,7 @@ relay.example.org {
 	}
 }
 
-# Cua 的 direct ID 由 host:port 决定。每台设备有一个独占的、仅接受目录请求的端口。
+# Cua 的 direct ID 由 host:port 决定。每台设备独占一个回环端口，默认只接受目录请求。
 (directory) {
 	bind 127.0.0.1
 	@catalog {
@@ -55,7 +55,21 @@ relay.example.org {
 	}
 }
 
+# 可选。只在主人亲自测试的设备回环站点内导入，原生 spacesd 继续校验设备 Bearer。
+(owner-inspection) {
+	@inspection {
+		remote_ip 127.0.0.1
+		method POST
+		header Content-Type application/grpc*
+		path /m/{args[0]}/cua.env.v1.ProcessService/StartProcess /m/{args[0]}/cua.env.v1.DriverService/CallTool
+	}
+	handle @inspection {
+		reverse_proxy h2c://127.0.0.1:{args[1]}
+	}
+}
+
 http://127.0.0.1:18281 {
+	# import owner-inspection computer-alpha 18181
 	import directory computer-alpha 18181
 }
 

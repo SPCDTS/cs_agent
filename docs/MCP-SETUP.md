@@ -48,7 +48,9 @@ Token 不通过聊天或模型工具参数接收，不回显。凭据使用现�
 
 ## 个人设备与 Windows Sandbox
 
-个人设备和持久 VM 通过 `cua` 服务共享一个只读目录。模型用 `list_spaces` 获取可见设备，再通过 `list_tools` 查询选中设备的 Driver 工具说明。设备分配、控制端身份与两台真实设备的隔离验收见 [Cua 设备接入](DEVICE-MCP.md)。Cloudflare 容器继续提供会话私有的编码工作区。临时 Windows Sandbox 单独登记为提供 `env_*` 的宿主机服务。[WSB 配置](WINDOWS-MCP.md)
+个人设备和持久 VM 共用 `cua`。模型用 `list_spaces` 选择获准设备，再用 `list_tools` 查询该卡的 Driver 工具。主人当前的交互回合还可使用单独启用的 `get_hostname` 和 `get_window_screenshot`，按完整设备 ID 读取主机名或指定的 Mac 窗口。设备分配和隔离验证见 [Cua 设备接入](DEVICE-MCP.md)。
+
+Cloudflare 容器提供会话私有的编码工作区。临时 Windows Sandbox 单独登记为提供 `env_*` 的宿主机服务。[WSB 配置](WINDOWS-MCP.md)
 
 Windows runner 的固定 env_* 工具使用环境级授权：管理页群授权中的 environments 是 envId 清单，留空即不开放；environmentApproval 默认为 required，可明确设为 none 允许授权范围内的环境操作直接执行。两字段沿用现有 PUT /admin/mcp/access 和 mcp_access JSON 存储，不新增服务。固定工具名及宿主元数据协议见 [Windows MCP](WINDOWS-MCP.md)。这些名称由平台按环境协议识别；其他普通 MCP 工具继续按原工具权限与逐次审批策略执行。
 
