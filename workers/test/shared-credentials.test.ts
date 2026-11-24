@@ -99,6 +99,30 @@ it("授权与目的地在出站前核对，重定向、回显和未经授权的�
   await expect(Promise.resolve(r.sharedCredentialRequest("owner", "weather", endpoint.replace("api.", "other.api."), "qq"))).rejects.toThrow("credential_target_denied");
 });
 
+it("正常计数与语言标志可以返回，短认证值和完整 Cookie 回显仍被扣留", async () => {
+  const r = registry(), binding = { kind: "cookie" as const, endpoints: [endpoint] };
+  await r.sharedCredentialSave({ ref: "prefs", binding }, bytes("sid=p7x; logged_in=1; lang=en"));
+  await r.sharedCredentialGrant("prefs", group, true);
+  const fetcher = vi.spyOn(globalThis, "fetch");
+  const request = () => Promise.resolve(r.sharedCredentialRequest(group, "prefs", endpoint, "qq"));
+  const normal = { count: 1, offset: 0, language: "en", country: "CN", deleted: true };
+  fetcher.mockImplementationOnce(async () => {
+    const headers = new Headers();
+    headers.append("Set-Cookie", "region=CN; Path=/");
+    headers.append("Set-Cookie", "sid=deleted; Max-Age=0");
+    headers.append("Set-Cookie", "old=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+    return Response.json(normal, { headers });
+  });
+  expect(await request()).toEqual({ status: 200, body: JSON.stringify(normal) });
+  for (const echo of ["p7x", "logged_in=1", "t2"]) {
+    fetcher.mockImplementationOnce(async () => Response.json({ echo }, { headers: { "Set-Cookie": "sid=t2; Secure" } }));
+    await expect(request()).rejects.toThrow("credential_response_withheld");
+  }
+  await r.sharedCredentialSave({ ref: "explicit", binding: { ...binding, cookieNames: ["lang"] } }, bytes("lang=en"));
+  fetcher.mockImplementationOnce(async () => Response.json({ echo: "en" }));
+  await expect(Promise.resolve(r.sharedCredentialRequest("owner", "explicit", endpoint, "qq"))).rejects.toThrow("credential_response_withheld");
+});
+
 it("curl 导出的 Cookie 保留 HttpOnly、域、路径和到期约束", () => {
   const jar = [
     "# Netscape HTTP Cookie File",

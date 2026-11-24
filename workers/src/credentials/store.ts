@@ -1,7 +1,7 @@
 import { Check } from "typebox/value";
 import { TokenVault } from "../mcp/crypto";
 import { readBoundedText } from "../shared/http-body";
-import { Binding, boundMaterial, endpoint, Group, outbound, Ref, type Material } from "./material";
+import { Binding, boundMaterial, cookieEchoNeedle, endpoint, Group, outbound, Ref, type Material } from "./material";
 
 export const SHARED_CREDENTIAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS shared_credentials(ref TEXT PRIMARY KEY, binding TEXT NOT NULL, revision TEXT NOT NULL, encrypted TEXT NOT NULL);
@@ -17,6 +17,20 @@ function echoed(text: string, values: string[]) {
     if (text.includes(value) || text.includes(encodeURIComponent(value)) || text.includes(JSON.stringify(value).slice(1, -1))) return true;
     try { return text.includes(decodeURIComponent(value)); } catch { return false; }
   });
+}
+
+// 删除 Cookie 时常见的占位值会与业务正文重合。有效期明确的删除指令优先于名称判断。
+function responseCookieNeedle(field: string, binding: Binding): string | undefined {
+  const [pair = "", ...attributes] = field.split(";");
+  const equal = pair.indexOf("="), name = pair.slice(0, equal).trim(), value = pair.slice(equal + 1).trim();
+  if (equal < 1 || !value) return;
+  if (/^(?:deleted|0|false)$/i.test(value)) {
+    const age = attributes.map(a => a.trim()).find(a => /^max-age=-?\d+$/i.test(a));
+    const expires = attributes.map(a => a.trim()).find(a => /^expires=/i.test(a));
+    const cleared = age ? Number(age.slice(8)) <= 0 : !!expires && Date.parse(expires.slice(8)) <= Date.now();
+    if (cleared || value === "deleted" && !binding.cookieNames?.includes(name)) return name + "=" + value;
+  }
+  return cookieEchoNeedle(name, value, binding);
 }
 
 export class SharedCredentials {
@@ -121,8 +135,8 @@ export class SharedCredentials {
       const freshCookies = response.headers.getSetCookie();
       if (freshCookies.length > 64) throw new Error("credential_response_withheld");
       for (const field of freshCookies) {
-        const pair = field.split(";", 1)[0]!, equal = pair.indexOf("=");
-        if (equal > 0 && pair.length > equal + 1) sensitive.push(pair.slice(equal + 1));
+        const needle = responseCookieNeedle(field, binding);
+        if (needle) sensitive.push(needle);
       }
       if (echoed(body, sensitive)) throw new Error("credential_response_withheld");
       // JSON 转义后的字符串会被脚本解码，按同一边界再检查一次。

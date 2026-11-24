@@ -89,6 +89,19 @@ export function boundMaterial(bytes: Uint8Array, binding: Binding): Material {
   return material;
 }
 
+// 偏好值 1、en 等可正常出现在业务数据中，只检查这些 Cookie 的完整名值对。
+// 未知名称及主人显式选中的凭证继续检查裸值，包括很短的会话凭证。
+export function cookieEchoNeedle(name: string, value: string, binding: Binding): string {
+  const pair = name + "=" + value;
+  if (binding.cookieNames?.includes(name)) return value;
+  if (/^(?:lang(?:uage)?|locale|region|country(?:_code)?|currency)$/i.test(name)
+    && /^[a-z]{2,3}(?:[-_][a-z]{2,4})?$/i.test(value)) return pair;
+  if (/^(?:flag|pref|logged_?in|wants_mature_content|enabled|opt_?in)$/i.test(name)
+    && /^(?:0|1|true|false|yes|no|on|off)$/i.test(value)) return pair;
+  if (/^(?:v|version)$/i.test(name) && /^\d{1,3}$/.test(value)) return pair;
+  return value;
+}
+
 export function outbound(material: Material, binding: Binding, target: URL) {
   if ("token" in material) {
     const bearer = binding.kind === "bearer";
@@ -99,5 +112,5 @@ export function outbound(material: Material, binding: Binding, target: URL) {
   if (!eligible.length) throw new Error("credential_cookie_scope");
   const selected = eligible.filter(unexpired).sort((a, b) => (b.path?.length ?? 0) - (a.path?.length ?? 0));
   if (!selected.length) throw new Error("credential_cookie_unavailable");
-  return { name: "Cookie", value: selected.map(c => c.name + "=" + c.value).join("; "), sensitive: selected.map(c => c.value).filter(Boolean) };
+  return { name: "Cookie", value: selected.map(c => c.name + "=" + c.value).join("; "), sensitive: selected.filter(c => c.value).map(c => cookieEchoNeedle(c.name, c.value, binding)) };
 }
