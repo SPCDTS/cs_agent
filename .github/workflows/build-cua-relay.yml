@@ -1,0 +1,83 @@
+name: Build Cua Relay for Linux amd64
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/build-cua-relay.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      UPSTREAM_COMMIT: 78fe31378569aab57ddb5131a08fc90fc3c6fbb9
+      DOCKERFILE: libs/cua-spacesd/crates/cua-relay/Dockerfile
+      ARCHIVE: cua-relay-0.17.2-linux-amd64.tar.gz
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the pinned Cua source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: trycua/cua
+          ref: ${{ env.UPSTREAM_COMMIT }}
+          persist-credentials: false
+          sparse-checkout: |
+            libs/cua/crates
+            libs/cua/proto
+            libs/cua-driver/rust
+            libs/cua-spacesd
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build the self-hosted Relay
+        run: |
+          test "$(git rev-parse HEAD)" = "$UPSTREAM_COMMIT"
+          source_epoch=$(git log -1 --format=%ct)
+          echo "SOURCE_DATE_EPOCH=$source_epoch" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/relay-bin"
+          docker buildx build --platform linux/amd64 --file "$DOCKERFILE" \
+            --build-arg "SOURCE_DATE_EPOCH=$source_epoch" --build-arg CUA_RELAY_HOSTED=0 \
+            --target binary --output "type=local,dest=$RUNNER_TEMP/relay-bin,rewrite-timestamp=true" libs
+
+      - name: Verify and archive the executable
+        run: |
+          export LC_ALL=C
+          binary="$RUNNER_TEMP/relay-bin/cua-relay"
+          readelf -h "$binary" > "$RUNNER_TEMP/elf-header"
+          grep -Eq 'Class:[[:space:]]+ELF64$' "$RUNNER_TEMP/elf-header"
+          grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64$' "$RUNNER_TEMP/elf-header"
+          version=$("$binary" --version)
+          test "$version" = "cua-relay 0.17.2"
+          "$binary" --help > "$RUNNER_TEMP/relay-help"
+          grep -Fq -- '--token-file' "$RUNNER_TEMP/relay-help"
+          {
+            echo "upstream=https://github.com/trycua/cua"
+            echo "commit=$UPSTREAM_COMMIT"
+            echo "platform=linux/amd64"
+            echo "version=$version"
+            echo "source_date_epoch=$SOURCE_DATE_EPOCH"
+            echo "dockerfile=$DOCKERFILE"
+            echo "target=binary"
+            echo "CUA_RELAY_HOSTED=0"
+          } > "$RUNNER_TEMP/relay-bin/BUILD-INFO"
+          cd "$RUNNER_TEMP/relay-bin"
+          sha256sum cua-relay > SHA256SUMS
+          tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner \
+            -cf - BUILD-INFO SHA256SUMS cua-relay | gzip -n > "$RUNNER_TEMP/$ARCHIVE"
+          cd "$RUNNER_TEMP"
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+
+      - name: Upload the checked archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cua-relay-0.17.2-linux-amd64
+          path: |
+            ${{ runner.temp }}/${{ env.ARCHIVE }}
+            ${{ runner.temp }}/${{ env.ARCHIVE }}.sha256
+          if-no-files-found: error
+          compression-level: 0

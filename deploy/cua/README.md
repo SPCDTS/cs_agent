@@ -15,6 +15,8 @@ Cua 根据 URL 的主机和端口生成 direct ID，路径中的 machine-id 仅�
 
 ## 安装控制机
 
+Linux amd64 可从 [Relay 构建工作流](../../.github/workflows/build-cua-relay.yml) 下载产物，先用附带的 `.sha256` 校验压缩包，再解包并运行 `sha256sum -c SHA256SUMS` 校验可执行文件，`BUILD-INFO` 记录上游提交和构建参数。
+
 1. 创建专用系统账号和组 `cua-directory`。安装核对过发布校验的 CLI 到 `/usr/local/bin/cua`。Relay 可在相同 CPU 架构的 Linux 构建机检出上述上游提交，用 `cargo build --locked --release --manifest-path libs/cua-spacesd/Cargo.toml -p cua-relay` 构建并将二进制安装到控制机的 `/usr/local/bin/cua-relay`。从本仓库执行 `npm --prefix runner ci`、`npm --prefix runner run build:cua`，把生成的 `runner/dist/reverse-mcp-bridge.cjs` 安装到 `/opt/cs-agent/cua/`，并确认 `/usr/bin/node` 是 Node.js 24 或更高版本。
 2. 将本目录的四个 `.service` 文件安装到 `/etc/systemd/system/` 并运行 `systemctl daemon-reload`。在 `/etc/cs-agent/cua/` 建立 `relays/` 和 `spaces/`，目录仅准 root 访问。以下凭据文件均由 root 持有，权限为 `0600`。
 3. 每台设备准备两个独立、随机的秘密。*注册令牌*只给该设备和它的 Relay，放入 `relays/18181.token` 或 `relays/18182.token`，每个文件恰好一行。*设备令牌*供设备验证目录请求，稍后写入对应的 `spaces/<目录端口>.env`。可使用密码管理器分发。令牌应直接写入受保护的文件，避免终端输出和命令行参数。
