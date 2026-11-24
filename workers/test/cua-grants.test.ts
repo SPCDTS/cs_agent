@@ -144,13 +144,15 @@ it('私聊主模型与子任务的目录使用实时授权，撤权中的 Driver
       const db = new DurableObjectSqliteDatabase(state.storage);
       await db.exec(MCP_CATALOG_SCHEMA + 'CREATE TABLE IF NOT EXISTS events(at INTEGER,kind TEXT,detail TEXT)');
       const config = await registry.mcpConfig(chat);
-      const mcp = new ThreadMcp(db,env,createRegistry(),async () => who,{...config,servers:config.servers.filter(row => row.id === id)},
+      const toolRegistry = createRegistry();
+      const mcp = new ThreadMcp(db,env,toolRegistry,async () => who,{...config,servers:config.servers.filter(row => row.id === id)},
         {scope:chat,current:(server,digest) => registry.mcpServerCurrent(server,digest)});
       try {
-        await mcp.refreshAll();
+        await mcp.restore();
         const snapshot = await mcp.captureCapabilities(who);
         expect(snapshot.tools.some(tool => tool.includes('get_hostname') || tool.includes('get_window_screenshot'))).toBe(false);
         expect(snapshot.cua?.spaces).toEqual([device]);
+        expect(toolRegistry.snapshot().tools().map(row => row.tool.name)).toEqual(expect.arrayContaining(snapshot.tools));
         const list = snapshot.tools.find(tool => tool.startsWith('mcp_cua_list_spaces_'))!;
         const tools = snapshot.tools.find(tool => tool.startsWith('mcp_cua_list_tools_'))!;
         const child = {...who,kind:'subagent' as const,subagentId:'child'};
@@ -174,6 +176,48 @@ it('私聊主模型与子任务的目录使用实时授权，撤权中的 Driver
       } finally { await mcp.close(); }
     });
   } finally { ws.close(1000); }
+});
+
+it('群首次获配和重新启用后获配时可离线安装已探测的目录，撤权即时移除工具',async () => {
+  const {ws,ready,accessRevision} = await directoryNode();
+  ws.close(1000);
+  const who: McpAuthority = {scope,kind:'message',actor:'123456',owner:false,generation:1,replyChannel:'qq'};
+  await runInDurableObject(env.THREAD.getByName(scope),async (_instance,state) => {
+    const registry = env.REGISTRY.getByName('main');
+    const grant = async (revision:string) => {
+      const saved = await registry.cuaGrantsList();
+      expect(await registry.cuaGrantsPut({scope,spaces:[device],expectedRevision:saved.revision},revision)).toMatchObject({status:'ok'});
+    };
+    const db = new DurableObjectSqliteDatabase(state.storage);
+    await db.exec(MCP_CATALOG_SCHEMA + 'CREATE TABLE IF NOT EXISTS events(at INTEGER,kind TEXT,detail TEXT)');
+    const config = async () => {
+      const config = await registry.mcpConfig(scope);
+      return {...config,servers:config.servers.filter(server => server.id === id)};
+    };
+    const tools = createRegistry(), mcp = new ThreadMcp(db,env,tools,async () => who,await config(),
+      {scope,current:(id,digest) => registry.mcpServerCurrent(id,digest)});
+    const visible = () => tools.snapshot().tools().map(row => row.tool.name).filter(name => name.startsWith('mcp_cua_'));
+    try {
+      await mcp.restore();
+      expect(visible()).toEqual([]);
+      await grant(accessRevision);
+      await mcp.syncConfig(await config());
+      const first = visible();
+      expect(first).toHaveLength(2);
+      expect((await mcp.captureCapabilities(who)).tools).toEqual(first);
+
+      const disabled = await registry.mcpServerDisable(id,ready.revision);
+      const enabled = await registry.mcpServerActivate(id,disabled.revision,{allow:['list_spaces']});
+      if ('error' in enabled) throw new Error('fixture_reactivation_failed');
+      await mcp.syncConfig(await config());
+      expect(visible()).toEqual([]);
+      await grant(enabled.server.access.revision!);
+      await mcp.syncConfig(await config());
+      expect(visible()).toEqual([expect.stringMatching(/^mcp_cua_list_spaces_/)]);
+      expect(first).not.toContain(visible()[0]);
+      expect((await mcp.captureCapabilities(who)).tools).toEqual(visible());
+    } finally { await mcp.close(); }
+  });
 });
 
 it('主人发消息可读主机名，额外的命令参数、定时任务与委派调用在到达桥之前被拒',async () => {

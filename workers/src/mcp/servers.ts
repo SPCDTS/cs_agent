@@ -2,7 +2,7 @@ import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { ListToolsResultSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MCP_CONFIG, parseMcpConfig, publicOrigin, type McpServerConfig } from "./config";
-import { isCuaTool } from "../cua/discovery";
+import { cuaDirectoryTools, isCuaTool } from "../cua/discovery";
 import { secretsEqual } from "../auth";
 import { TokenVault } from "./crypto";
 import { makeCatalog } from "./catalog";
@@ -62,6 +62,14 @@ export class McpServerStore {
     if (!row || !MCP_CONFIG.enabled) return false;
     const server = this.parse(row);
     return server.enabled && serverDigest(server) === digest;
+  }
+  cuaDirectoryToolsJson(expectedDigest: string) {
+    const row = this.sql.exec<Pick<Row,'config'|'discovered'>>("SELECT config,discovered FROM mcp_servers WHERE id='cua'").toArray()[0];
+    if (!row?.discovered) return;
+    const server = this.parse(row);
+    if (!server.enabled || server.transport.kind !== 'reverse-websocket' || serverDigest(server) !== expectedDigest) return;
+    const {tools} = ListToolsResultSchema.parse(JSON.parse(row.discovered));
+    return JSON.stringify({tools:tools.filter(tool => server.tools.allow.includes(tool.name) && cuaDirectoryTools.some(name => name === tool.name))});
   }
   put(input: ServerSetupInput, expected: string) {
     if (!Check(ServerSetup, input)) throw new McpSetupError("invalid");
