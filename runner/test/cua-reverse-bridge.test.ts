@@ -142,6 +142,11 @@ test('两个反向会话独立协商本机目录，兼容 JSON 与 SSE，仅列�
       assert.equal(listSpaces.inputSchema.additionalProperties,false);
       assert.deepEqual(listTools.inputSchema.required,['space','service']);
       assert.deepEqual(listTools.inputSchema.properties.service.enum,['driver']);
+      const spacePattern = new RegExp(listTools.inputSchema.properties.space.pattern);
+      assert.ok(spacePattern.test('relay:a-b1234z'));
+      assert.ok(spacePattern.test('relay:'+'a'.repeat(64)));
+      for (const id of ['relay:-b12345z','relay:ab12345-','relay:1234567','relay:'+'a'.repeat(65)])
+        assert.equal(spacePattern.test(id),false);
       assert.ok(calls.includes(upA + '/tools/list'));
       const spaces = await ws.rpc(b,'tools/call',{name:'list_spaces',arguments:{}});
       assert.deepEqual(JSON.parse(spaces.result.content[0].text), [{id:'relay:fixture01',name:'fixture',os:'linux'}]);
@@ -164,6 +169,9 @@ test('两个反向会话独立协商本机目录，兼容 JSON 与 SSE，仅列�
       assert.equal((await driver(card.id)).error.data.reason,'directory_unavailable');
       directoryFails = false;
       assert.deepEqual(directoryCalls.slice(gateStart), Array(7).fill(upA + '/list_spaces'));
+      cards = [{...card,id:'relay:-fixture1'}];
+      assert.equal((await driver('relay:-fixture1')).error.data.reason,'space_not_registered');
+      cards = [card];
       assert.ok((await driver(card.id)).result);
       assert.deepEqual(directoryCalls.slice(-2),[upA + '/list_spaces',upA + '/list_tools']);
       const deleted = once(removal,'deleted',{signal:AbortSignal.timeout(3000)});
