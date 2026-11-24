@@ -102,7 +102,7 @@ test('两个反向会话独立协商本机目录，兼容 JSON 与 SSE，仅列�
       if (rpc.method === 'notifications/initialized' || rpc.method === 'notifications/cancelled') { res.writeHead(202).end(); return; }
       calls.push(session + '/' + rpc.method);
       if (rpc.method === 'tools/list') {
-        result = {tools:['list_spaces','list_tools','fixture_hello'].map(name => ({name,inputSchema:{type:'object'}}))};
+        result = {tools:['list_spaces','list_tools','fixture_hello','create_space','delete_space'].map(name => ({name,inputSchema:{type:'object'}}))};
       } else {
         assert.equal(rpc.method,'tools/call');
         directoryCalls.push(session + '/' + rpc.params.name);
@@ -153,6 +153,9 @@ test('两个反向会话独立协商本机目录，兼容 JSON 与 SSE，仅列�
       assert.ok(calls.includes(upB + '/tools/call'));
       const before = calls.length;
       assert.ok((await ws.rpc(a,'tools/call',{name:'fixture_hello',arguments:{}})).error);
+      assert.ok((await ws.rpc(a,'tools/call',{name:'create_space',arguments:{on:'local',durable:false,reuse:false}})).error);
+      for (const space of ['local:session-test',card.id])
+        assert.ok((await ws.rpc(a,'tools/call',{name:'delete_space',arguments:{space}})).error);
       assert.ok((await ws.rpc(a,'resources/list')).error);
       assert.ok((await ws.rpc(a,'tools/call',{name:'list_tools',arguments:{space:'relay:fixture01',service:'other'}})).error);
       assert.equal(calls.length,before);

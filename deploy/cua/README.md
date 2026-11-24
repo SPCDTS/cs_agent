@@ -75,6 +75,14 @@ http://127.0.0.1:18281 {
 
 要恢复设备的目录模式，移除该回环站点的 `import owner-inspection`，校验后重新加载 Caddy。其余设备和原有的 Space ID 均沿用原配置。
 
+## 临时 Space 的供应边界
+
+在开放设备 shell 时，请将控制机目录 daemon 的 Unix socket 和供应凭据保留在专用服务账号下。拥有这些凭据的操作系统账号可以直接使用 Cua 管理资源。
+
+本部署将本机 Space 的创建和销毁留在 Cua 管理端。Cua 0.31.0 用 `local:<名称>` 标识本机实例，同名重建后 ID 可以复用。原生 MCP 的 `delete_space` 只接收 `space`，会递归删除子 Space。即便 cs-agent 记下本会话创建过哪个 ID，稍后删除也可能命中同名的新实例或其他会话的子 Space。[本机 Space ID](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/id.rs#L70-L90) [原生 MCP 删除参数](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/mcp/tools.rs#L363-L366) [子树删除逻辑](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/tree.rs#L235-L275)
+
+本机 `create_space.timeout` 限制等待实例就绪的时长。设置到期删除需要后续一步，若控制机在两步之间中断，实例可能持续运行。因此当前目录桥和 Worker 都拒绝原生 `create_space`、`delete_space`。要开放主人会话自动回收，供应端需要在创建时保证到期回收，或支持针对具体实例的持久回收任务，并保证回收仅作用于本会话创建的资源。这些结论针对本机后端，云供应端尚待单独验证。[本机创建参数](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/spaces.rs#L3318-L3347) [设置 Space 到期时间](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/lifetimes.rs#L115-L157)
+
 ## 撤销与轮换
 
 先在管理台移除设备的所有会话分配，再从公网和目录两组 Caddy 路由移除该机并 reload，停止相应的 Relay 实例。使用运行目录 daemon 的账号清理控制机上的登记。以下示例仅移除第一台设备的本地目录条目。归档已使用的端口与 machine-id，后续设备分配全新组合。
