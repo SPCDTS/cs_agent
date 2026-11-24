@@ -6,7 +6,7 @@ import { logDiag } from "../shared/diagnostics";
 // 只投影管理展示需要的表；不复制凭据、运行任务、工具恢复状态和完整请求快照。
 export const VIEW_TABLES = ["messages", "inbound", "outbox", "web_outputs", "session_state", "session_resets", "events", "subagents",
   "memories", "memory_versions", "memory_links", "memory_imported_versions", "memory_jobs", "memory_proposals", "profile", "profile_sources", "profile_review", "memory_evidence", "memory_candidates", "extract_attempts", "extract_queue", "summaries",
-  "mcp_access", "mcp_approvals", "mcp_catalog", "pi_entries", "pi_conversations", "meta"] as const;
+  "mcp_access", "mcp_approvals", "mcp_catalog", "pi_entries", "pi_submissions", "pi_conversations", "meta"] as const;
 export type ViewTable = typeof VIEW_TABLES[number];
 export type ViewInfo = { agingLastRun: number | null; consolidateLastRun: number | null; compacting: boolean };
 type Value = string | number | null;
@@ -50,12 +50,18 @@ export class ProjectionPublisher {
     const sql = this.ctx.storage.sql;
     sql.exec("CREATE TABLE IF NOT EXISTS admin_projection_tables(name TEXT PRIMARY KEY, columns_json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS admin_projection_changes(seq INTEGER PRIMARY KEY AUTOINCREMENT,table_name TEXT NOT NULL,row_key INTEGER NOT NULL,value TEXT,UNIQUE(table_name,row_key))");
     for (const table of VIEW_TABLES) {
-      const columns = sql.exec<{ name: string }>("SELECT name FROM pragma_table_info(?)", table).toArray().map(column => column.name);
-      if (!columns.length) continue;
+      if (table === "pi_submissions" && !sql.exec("SELECT 1 FROM sqlite_master WHERE name='inbound'").toArray().length) continue;
+      const actual = sql.exec<{ name: string }>("SELECT name FROM pragma_table_info(?)", table).toArray().map(column => column.name);
+      if (!actual.length) continue;
+      // 只发布稳定 ID 关联，不复制 submission.record（可能带完整模型回答）。
+      const links = table === "pi_submissions";
+      const columns = links ? ["conversation_id", "input_key", "entry_id", "answer_id"] : actual;
       if (columns.some(name => !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name))) throw new Error("invalid_projection_column");
       const definition = JSON.stringify(columns);
       if (sql.exec<{ columns_json: string }>("SELECT columns_json FROM admin_projection_tables WHERE name=?", table).toArray()[0]?.columns_json === definition) continue;
-      const values = (prefix: string) => "json_array(" + columns.map(name => prefix + quote(name)).join(",") + ")";
+      const values = (prefix: string) => links
+        ? `json_array(${prefix}conversation_id,json_extract(${prefix}record,'$.requestId'),CASE WHEN json_extract(${prefix}record,'$.type')='input' THEN json_extract(${prefix}record,'$.entry') END, CASE WHEN json_extract(${prefix}record,'$.type')='input' THEN json_extract(${prefix}record,'$.answer') END)`
+        : "json_array(" + columns.map(name => prefix + quote(name)).join(",") + ")";
       const put = (key: string, value: string) => "INSERT INTO admin_projection_changes(table_name,row_key,value) VALUES ('" + table + "'," + key + "," + value + ") ON CONFLICT(table_name,row_key) DO UPDATE SET seq=excluded.seq,value=excluded.value;";
       for (const action of ["INSERT", "UPDATE", "DELETE"]) {
         const name = "admin_projection_" + table + "_" + action.toLowerCase();
@@ -176,7 +182,7 @@ export class ProjectionStore {
       }
       // 保留列表和关联读取的索引，避免管理查询随历史增长退化成全表扫描。
       const indexes: Partial<Record<ViewTable, string[][]>> = {
-        pi_entries: [["conversation_id", "id"]], inbound: [["message_id"], ["platform_message_id", "user_id", "chat_kind", "chat_id"], ["status", "reply_channel"]],
+        pi_submissions: [["conversation_id","entry_id"],["conversation_id","answer_id"],["input_key"]], pi_entries: [["conversation_id", "id"]], inbound: [["message_id"], ["platform_message_id", "user_id", "chat_kind", "chat_id"], ["status", "reply_channel"]],
         outbox: [["message_id", "id"]], messages: [["time", "id"]], subagents: [["created_at"]], events: [["kind", "at"]],
         memories: [["ns", "status", "updated_at"]], memory_versions: [["memory_id", "id"]],
         mcp_access: [["scope", "server_id"]], mcp_approvals: [["scope", "created_at"]],
@@ -186,6 +192,11 @@ export class ProjectionStore {
         for (const names of groups) if (names.every(name => columns.includes(name))) {
           sql.exec("CREATE INDEX IF NOT EXISTS " + quote("view_" + table + "_" + names.join("_")) + " ON " + quote(table) + " (" + names.map(quote).join(",") + ")");
         }
+      }
+      if (schemas.has("pi_submissions") && schemas.get("pi_entries")?.includes("record")) {
+        sql.exec("CREATE INDEX IF NOT EXISTS view_pi_kind ON pi_entries(conversation_id,json_extract(record,'$.kind'),id)");
+        sql.exec("CREATE INDEX IF NOT EXISTS view_pi_kind_time ON pi_entries(conversation_id,json_extract(record,'$.kind'),json_extract(record,'$.model[0].timestamp'),id)");
+        sql.exec("CREATE INDEX IF NOT EXISTS view_pi_agent_results ON pi_entries(conversation_id,json_extract(record,'$.model[0].toolName'),json_extract(record,'$.model[0].timestamp'),id)");
       }
       if (schemas.has("memories")) {
         sql.exec("CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(text,subject,content='memories',content_rowid='id',tokenize='trigram'); CREATE TRIGGER IF NOT EXISTS memory_view_insert AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid,text,subject) VALUES(new.id,new.text,new.subject); END; CREATE TRIGGER IF NOT EXISTS memory_view_delete AFTER DELETE ON memories BEGIN INSERT INTO memories_fts(memories_fts,rowid,text,subject) VALUES('delete',old.id,old.text,old.subject); END");

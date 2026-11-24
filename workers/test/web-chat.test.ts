@@ -138,6 +138,7 @@ it("QQ 排队消息经展示副本读取后可原样用于增量查询，并沿�
     release();await running;await sourceThread.syncAdminView(key);
     const completedResponse=await get("?"+params);expect(completedResponse.status).toBe(200);
     const completed=await completedResponse.json<Awaited<ReturnType<AgentReadView["chatView"]>>>();
-    expect(completed.messages).toEqual([expect.objectContaining({id:queued[0].id,status:"done"})]);
+    expect(completed.messages.filter(m=>m.source==="qq")).toEqual([expect.objectContaining({id:queued[0].id,status:"done"})]);
+    expect(completed.messages.filter(m=>m.source==="model")).toMatchObject([{text:"核对完成",turnId:queued[0].turnId}]);
   }finally{release();await running;}
 });

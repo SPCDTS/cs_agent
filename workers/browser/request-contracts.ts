@@ -50,7 +50,7 @@ export type Asset = Static<typeof Asset>;
 export const ChatMessage = Type.Object({ id: Type.String(), role: Type.String(), source: Type.String(), name: Type.String(), text: Type.String(), at: Type.Number(),
   status: textOrNull, turnId: textOrNull, assets: Type.Array(Asset) });
 export type ChatMessage = Static<typeof ChatMessage>;
-export const ChatView = Type.Object({ messages: Type.Array(ChatMessage), delta: Type.Boolean(), active: Type.Number(), syncedAt: Type.Optional(Type.Number()) });
+export const ChatView = Type.Object({ messages: Type.Array(ChatMessage), revision: Type.Optional(Type.Number()), delta: Type.Boolean(), active: Type.Number(), syncedAt: Type.Optional(Type.Number()) });
 export const Trace = Type.Object({ requests: Type.Array(RequestRecord), tools: Type.Array(ToolSummary), cursor: Type.Number(), more: Type.Boolean() });
 export const PendingChat = Type.Object({ requestId: Type.String(), text: Type.String() });
 export type ChatTarget = {kind:"thread";thread:string} | {kind:"subagent";thread:string;id:string;summary:string};

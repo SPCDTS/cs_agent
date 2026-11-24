@@ -211,9 +211,10 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     return json(detail);
   } },
   { method: "GET", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/chat$"), handle: async ({ env, params, url }) => {
-    const after = url.searchParams.get("after"), pending = url.searchParams.getAll("pending");
-    if (after !== null && (!/^\d{1,16}(?:\.\d+)?$/.test(after) || !Number.isFinite(Number(after))) || pending.length > 100 || pending.some(id => !/^(?:qq:\d+|web:[A-Za-z0-9-]+)$/.test(id))) throw new HttpError(400, "invalid_query");
-    return json(await (await knownView(env, params.key!)).chatView(params.key!, after === null ? undefined : { after: Number(after), pending }));
+    const after = url.searchParams.get("after"), pending = url.searchParams.getAll("pending"), revision=url.searchParams.get("revision");
+    if(revision!==null && (!/^\d{1,16}$/.test(revision)||!Number.isSafeInteger(Number(revision))))throw new HttpError(400,"invalid_query");
+    if (after !== null && (!/^\d{1,16}(?:\.\d+)?$/.test(after) || !Number.isFinite(Number(after))) || pending.length > 100 || pending.some(id => !/^(?:qq:\d+|internal:[a-f0-9]{64}|web:[A-Za-z0-9-]+)$/.test(id))) throw new HttpError(400, "invalid_query");
+    return json(await (await knownView(env, params.key!)).chatView(params.key!, after === null ? undefined : { after: Number(after), pending, ...(revision!==null?{revision:Number(revision)}:{}) }));
   } },
   { method: "GET", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/trace$"), handle: async ({ env, params, url }) => {
     const turns = url.searchParams.getAll("turn"), after = url.searchParams.get("after") ?? "0";

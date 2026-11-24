@@ -20,7 +20,7 @@ export interface ConsoleState {
   chat: C.ChatTarget; chatVersion: number; fingerprint: string; timer: number | undefined; resizeTimer?: number; sending: boolean; epoch: number;
   pending: Static<typeof C.PendingChat> | null; chatActive: boolean; requestActive: boolean; chatLoading: boolean;
   messages: Map<string, C.ChatMessage>; requests: Map<string, C.RequestRecord>; tools: Map<string, C.ToolSummary>;
-  traceTurns: string; traceCursor: number; chatAfter: number | null; turn: string | null; detailId: string | null;
+  traceTurns: string; traceCursor: number; chatAfter: number | null; chatRevision?:number; turn: string | null; detailId: string | null;
   chart?: { u: C.Usage; since: number; until: number }; awaitingInput?: string | null; locateTurn?: string | null;
 }
 export const cs: ConsoleState = { view:"usage", until:Date.now(), before:undefined, next:undefined, pages:[], requestVersion:0, detailVersion:0,
