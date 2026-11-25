@@ -395,3 +395,22 @@ test('开放完整 6 个桥工具，校验参数与大载荷写入并过滤图�
   assert.equal(rpcErr.error.data.reason,'device_operation_failed');
   assert.ok(!JSON.stringify(rpcErr).includes('secret_path'));
 });
+
+test('配对走独立反向管理方法，旧桥与 tools/call 都不能签发设备凭据',async t => {
+  const {PairingSlots,pairMethod} = await import('../src/cua-pairing.ts');
+  const dir = await mkdtemp(join(tmpdir(),'cua-pair-bridge-'));
+  t.after(() => rm(dir,{recursive:true,force:true}));
+  const ws = new FixtureSocket(), old = new FixtureSocket();
+  const stop = serveConnection(ws as unknown as WebSocket,'/unused.sock',new PairingSlots(dir,'wss://relay.example.test'));
+  const stopOld = serveConnection(old as unknown as WebSocket,'/unused.sock');
+  try {
+    assert.equal((await old.rpc(randomUUID(),pairMethod,{action:'ready'})).error.code,-32601);
+    assert.deepEqual((await ws.rpc(randomUUID(),pairMethod,{action:'ready'})).result,{status:'ready'});
+    const invitation = randomUUID(), client = 'a'.repeat(64);
+    const {result} = await ws.rpc(randomUUID(),pairMethod,{action:'claim',invitation,client});
+    assert.equal(result.machineId,'paired-1');
+    const session = randomUUID();
+    ws.frame(session,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:pairMethod,arguments:{action:'claim',invitation,client}}});
+    assert.deepEqual(JSON.parse(ws.frames.at(-1)!),{session,close:true});
+  } finally { await stop(); await stopOld(); }
+});

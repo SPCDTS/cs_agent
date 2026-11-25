@@ -1,3 +1,4 @@
+import { devicePairing } from "./cua/pairing";
 import { finishCuaSetup } from "./cua/setup";
 import { registerReverse } from "./mcp/reverse-route";
 import { handleMediaRequest } from "./media/routes";
@@ -39,6 +40,7 @@ export default {
         "Content-Security-Policy":"default-src 'none'; script-src 'nonce-"+nonce+"'; base-uri 'none'; frame-ancestors 'none'"}});
     }
     if (request.method === "GET" && path === "/healthz") return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
+    if (path.startsWith("/cua/join/")) return devicePairing(request,env);
     const media = await handleMediaRequest(request, { bucket: env.ASSETS, authenticateAdmin: req => authenticated(req, env.ADMIN_TOKEN) });
     if (media) return media;
     if (request.method === "POST" && path === "/github/webhook") {

@@ -10,7 +10,7 @@ export function checkScope(paths) {
   if (paths === null) return { code: true, native: true };
   return {
     code: paths.some(path => !path.startsWith('docs/') && !documents.has(path)),
-    native: paths.some(path => path.startsWith('runner/') || path.startsWith('scripts/ci-scope') || path === '.github/workflows/ci.yml'),
+    native: paths.some(path => path.startsWith('runner/') || path === 'workers/device/join.ps1' || path.startsWith('scripts/ci-scope') || path === '.github/workflows/ci.yml'),
   };
 }
 

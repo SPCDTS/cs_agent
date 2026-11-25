@@ -1,3 +1,4 @@
+import { Type } from 'typebox';
 import { Check } from 'typebox/value';
 import { CuaBridgeToken, CuaDeviceId, CuaDirectory, CuaGrantList, CuaNameResult } from '../src/cua/contracts';
 import { api, ApiError, readApi } from './api';
@@ -136,6 +137,7 @@ export async function loadCuaGrants() {
   directory = undefined;
   renderDevices();
   select.replaceChildren();
+  $('cua-pair-form').hidden = true;
   $('cua-setup-form').hidden = true;
   $('cua-bridge-url').hidden = true;
   if (!token) return;
@@ -149,6 +151,8 @@ export async function loadCuaGrants() {
     for (const row of data.grants) if (!choices.has(row.scope)) choices.set(row.scope,row.scope);
     select.replaceChildren(el('option',{value:'',text:'选择群聊或私聊'}),...[...choices].map(([value,text]) => el('option',{value,text})));
     if (choices.has(prior)) select.value = prior;
+    $('cua-pair-form').hidden = !(data.enabled && data.online);
+    if ($('cua-pair-form').hidden) clearPairing();
     $('cua-setup-form').hidden = data.setup !== 'new';
     const bridgeUrl = $('cua-bridge-url');
     bridgeUrl.hidden = !data.bridgeUrl;
@@ -226,7 +230,49 @@ async function enableCua(event: SubmitEvent) {
   }
 }
 
+const PairTicket = Type.Object({ticket:Type.String({pattern:'^[0-9a-f.-]{160,220}$'}),
+  expires:Type.Integer(),origin:Type.String({pattern:'^https://[a-zA-Z0-9.-]+(:[0-9]+)?$'})});
+let pairingTimer: ReturnType<typeof setTimeout> | undefined;
+function clearPairing() {
+  clearTimeout(pairingTimer);
+  $('cua-pair-command').value = '';
+  $('cua-pair-result').hidden = true;
+}
+async function issueDevice() {
+  const button = $('cua-pair-issue'), epoch = cs.epoch, token = readToken();
+  if (!token || button.disabled || !directory?.online || !directory.enabled) return;
+  const isCurrent = () => cs.epoch === epoch && readToken() === token;
+  const windows = $('cua-pair-platform').value === 'windows';
+  clearPairing();
+  button.disabled = $('cua-pair-platform').disabled = true;
+  try {
+    const {ticket,expires,origin} = await readApi(PairTicket,'POST','/admin/cua/pair',undefined,isCurrent);
+    if (!isCurrent() || !directory?.online || !directory.enabled || expires <= Date.now()) return;
+    const command = windows
+      ? `$p = Join-Path $env:TEMP ([guid]::NewGuid().ToString() + '.ps1'); try { Invoke-WebRequest -ErrorAction Stop -UseBasicParsing '${origin}/cua/join/windows.ps1' -OutFile $p; & $p '${origin}' '${ticket}' } finally { Remove-Item -LiteralPath $p -ErrorAction SilentlyContinue }`
+      : `(p=$(mktemp) || exit 1; trap 'rm -f "$p"' EXIT; curl -fsS '${origin}/cua/join/mac.sh' -o "$p" && /bin/bash "$p" '${origin}' '${ticket}')`;
+    $('cua-pair-command').value = command;
+    $('cua-pair-label').textContent = '在目标设备的'+(windows ? ' PowerShell' : '终端')+'运行，有效至 '+new Date(expires).toLocaleTimeString()+'。请私下传递。';
+    $('cua-pair-result').hidden = false;
+    pairingTimer = setTimeout(clearPairing,expires-Date.now());
+  } catch (error) {
+    if (!isCurrent()) return;
+    if (error instanceof ApiError && error.body?.error === 'pairing_full') show('VPS 的设备名额已用完。','error');
+    else if (error instanceof ApiError && error.status === 503) show('VPS 配对服务不可用，请核对桥版本和设备接入配置。','error');
+    else fail(error);
+  } finally {
+    button.disabled = $('cua-pair-platform').disabled = false;
+  }
+}
+
 export function initCuaGrants() {
+  $('cua-pair-issue').addEventListener('click',() => void issueDevice());
+  $('cua-pair-platform').addEventListener('change',clearPairing);
+  $('cua-pair-copy').addEventListener('click',async () => {
+    const input = $('cua-pair-command');
+    try { await navigator.clipboard.writeText(input.value); show('接入命令已复制。','info'); }
+    catch { input.focus(); input.select(); show('已选中接入命令，请复制。','info'); }
+  });
   $('open-cua-settings').addEventListener('click',() => consoleView('access','access-cua-tab'));
   $('cua-setup-form').addEventListener('submit',enableCua);
   $('cua-grant-scope').addEventListener('change',renderDevices);

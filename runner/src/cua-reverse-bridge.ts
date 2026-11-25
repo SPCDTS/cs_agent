@@ -1,3 +1,4 @@
+import { pairMethod, type PairingSlots } from './cua-pairing.ts';
 import { request } from 'node:http';
 import { posix } from 'node:path';
 import { Readable } from 'node:stream';
@@ -427,7 +428,7 @@ class DirectorySession {
 }
 
 type Session = { directory: DirectorySession; request?: {id: string | number; timer: NodeJS.Timeout} };
-export function serveConnection(socket: WebSocket, socketPath: string) {
+export function serveConnection(socket: WebSocket, socketPath: string, pairing?: PairingSlots) {
   const sessions = new Map<string,Session>();
   let inFlight = 0, closed = false, pongDeadline: NodeJS.Timeout | undefined;
   function send(frame: object) {
@@ -460,6 +461,13 @@ export function serveConnection(socket: WebSocket, socketPath: string) {
     if (!parsed.success || !('method' in parsed.data)) { drop(id,true); return; }
     const msg = parsed.data;
     let s = sessions.get(id);
+    // 管理员控制帧独占一次性逻辑连接；普通 MCP 工具会话和 tools/call 都不能进入这里。
+    if (pairing && !s && msg.method === pairMethod && 'id' in msg) {
+      let result: Record<string,unknown> = {status:'unavailable'};
+      try { result = pairing.request(msg.params ?? {}); } catch { /* 不把本机错误或凭据返回给客户端。 */ }
+      send({session:id,message:{jsonrpc:'2.0',id:msg.id,result}});
+      return;
+    }
     if (!methods.has(msg.method)) {
       if ('id' in msg) send({session:id,message:{jsonrpc:'2.0',id:msg.id,error:{code:ErrorCode.MethodNotFound,message:'不提供此方法'}}});
       return;

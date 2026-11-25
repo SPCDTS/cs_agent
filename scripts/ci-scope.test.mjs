@@ -9,7 +9,7 @@ test('仅说明文档不触发代码检查或部署，混合代码变更仍需�
 });
 
 test('runner、CI 配置和未知基线保留 Windows 原生检查', () => {
-  for (const paths of [['runner/src/guest.ts'], ['.github/workflows/ci.yml'], ['scripts/ci-scope.mjs'], null]) {
+  for (const paths of [['runner/src/guest.ts'], ['workers/device/join.ps1'], ['.github/workflows/ci.yml'], ['scripts/ci-scope.mjs'], null]) {
     assert.deepEqual(checkScope(paths), { code: true, native: true });
   }
 });
