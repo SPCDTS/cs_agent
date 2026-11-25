@@ -23,7 +23,7 @@ import { SkillError, parseSkill } from "../skills";
 import { SUBAGENT_ID } from "../subagent/model";
 import { ADMIN_APP_JS, ADMIN_PAGE_HTML } from "./app.generated";
 import { CHATGPT_HELPER } from "./chatgpt-helper";
-import type { RequestQuery } from "../requests/types";
+import type { RequestFilters } from "../requests/types";
 import { classifyError, logDiag, type DiagQuery } from "../shared/diagnostics";
 import { API_HEADERS, HttpError, adminJson as json, adminPlain as plain, readAdminBody } from "./http";
 
@@ -103,19 +103,19 @@ async function modelLogin<T>(work: () => Promise<T>): Promise<Response> {
   try { return json(await work()); } catch (error) { throw new HttpError(400, modelLoginErrorCode(error), { diagnostic: catalogFailure(error) ?? refreshFailure(error) }); }
 }
 
-function requestQuery(url: URL): RequestQuery {
+function requestFilters(url: URL): RequestFilters {
   const p = url.searchParams, now = Date.now();
   const num = (key: string, fallback: number) => {
     const raw = p.get(key); if (raw !== null && !/^\d{1,16}$/.test(raw)) throw new HttpError(400, "invalid_query");
     const n = raw === null ? fallback : Number(raw); if (!Number.isSafeInteger(n)) throw new HttpError(400, "invalid_query"); return n;
   };
-  const since = num("since", now - 86400_000), until = num("until", now), limit = num("limit", ADMIN_PAGE_SIZE), before = num("before", 0);
+  const since = num("since", now - 86400_000), until = num("until", now);
   const thread = p.get("thread") || undefined, model = p.get("model") || undefined, status = p.get("status") || undefined, purpose = p.get("purpose") || undefined, turnId = p.get("turn") || undefined;
-  if (until < since || until - since > 31 * 86400_000 || limit < 1 || limit > 100 ||
+  if (until < since || until - since > 31 * 86400_000 ||
     thread && !new RegExp("^(" + THREAD_KEY + ")$").test(thread) || model && model.length > 200 ||
     status && !["running", "done", "error", "aborted", "interrupted"].includes(status) ||
     purpose && !["conversation", "background", "subagent", "compaction"].includes(purpose) || turnId && (!thread || !/^turn:[A-Za-z0-9:_-]{1,180}$/.test(turnId))) throw new HttpError(400, "invalid_query");
-  return { since, until, limit, ...(before ? { before } : {}), thread, model, status: status as RequestQuery["status"], purpose, turnId };
+  return { since, until, thread, model, status: status as RequestFilters["status"], purpose, turnId };
 }
 function diagQuery(url: URL): DiagQuery {
   const p = url.searchParams;
@@ -183,17 +183,33 @@ export const ADMIN_ROUTES: AdminRoute[] = [
 
   { method: "POST", path: "/admin/diagnostics/model-egress", handle: async ({ env }) => json(await env.THREAD.getByName("owner").modelEgressDiagnostics()) },
   { method: "GET", path: "/admin/logs", handle: async ({ env, url }) => json(await env.REQUESTS.getByName("main").queryLogs(diagQuery(url))) },
-  { method: "GET", path: "/admin/requests", handle: async ({ env, url }) => json(await env.REQUESTS.getByName("main").list(requestQuery(url))) },
+  { method: "GET", path: "/admin/agent-traces", handle: async ({env,url}) => {
+    const q=requestFilters(url), search=url.searchParams.get("q") || undefined, outcome=url.searchParams.get("outcome") || undefined;
+    if ((search?.length ?? 0)>150 || outcome && !["done","running","error"].includes(outcome)) throw new HttpError(400,"invalid_query");
+    let cursor; try { cursor=readAdminCursor(url); } catch { throw new HttpError(400,"invalid_cursor"); }
+    const actor=url.searchParams.get("actor") || undefined;
+    if (actor && (!q.thread || !/^(?:thread|[a-f0-9-]{36})$/.test(actor))) throw new HttpError(400,"invalid_query");
+    return json(await env.REQUESTS.getByName("main").agentTraces({...q,search,outcome,cursor,actor}));
+  } },
+  { method: "GET", path: /^\/admin\/agent-traces\/(?<mode>detail|analysis)$/, handle: async ({env,url}) => {
+    const thread=threadParam(url), root=url.searchParams.get("root")??"";
+    if (!/^(turn|request):[a-zA-Z0-9:_-]{1,180}$/.test(root)) throw new HttpError(400,"invalid_query");
+    let cursor; try { cursor=readAdminCursor(url); } catch { throw new HttpError(400,"invalid_cursor"); }
+    const store=env.REQUESTS.getByName("main");
+    return json(url.pathname.endsWith("/analysis")?await store.agentTraceAnalysis(thread,root):await store.agentTraceDetail(thread,root,cursor));
+  } },
+  { method: "GET", path: "/admin/agent-traces/runtime", handle: async ({env,url}) => {
+    const thread=threadParam(url), actor=url.searchParams.get("actor")??"", input=url.searchParams.get("input")??"", before=url.searchParams.get("before");
+    if (!/^(thread|[a-f0-9-]{36})$/.test(actor) || !input || input.length>256 || before!==null && !/^\d{1,15}$/.test(before)) throw new HttpError(400,"invalid_query");
+    const request=url.searchParams.get("request")||undefined;
+    if(request && !/^[a-f0-9-]{36}$/.test(request)) throw new HttpError(400,"invalid_query");
+    return json(await env.REQUESTS.getByName("pi-trace:"+thread).piSpans(actor,input,before===null?Number.MAX_SAFE_INTEGER:Number(before),request));
+  } },
   { method: "GET", path: "/admin/context-timeline", handle: async ({ env, url }) => {
     const thread = threadParam(url), actor = url.searchParams.get("actor") ?? "thread";
     if (actor !== "thread" && !/^[0-9a-f-]{36}$/.test(actor)) throw new HttpError(400, "invalid_actor");
     let cursor; try { cursor = readAdminCursor(url); } catch { throw new HttpError(400, "invalid_cursor"); }
     return json(await env.REQUESTS.getByName("main").contextTimeline(thread, actor, cursor));
-  } },
-  { method: "GET", path: /^\/admin\/tools\/(?<id>[0-9a-f-]{36})\/execution$/, handle: async ({ env, params }) => {
-    const execution = await env.REQUESTS.getByName("main").toolExecution(params.id!);
-    if (!execution) throw new HttpError(404, "not_found");
-    return json(execution);
   } },
   { method: "GET", path: /^\/admin\/requests\/(?<id>[0-9a-f-]{36})\/context$/, handle: async ({ env, params }) => {
     const inspection = await env.REQUESTS.getByName("main").contextInspection(params.id!);
@@ -206,9 +222,9 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     return json(part);
   } },
   { method: "GET", path: "/admin/agent-topology", handle: async ({ env }) => json(await env.REQUESTS.getByName("main").agentTopology()) },
-  { method: "GET", path: "/admin/usage", handle: async ({ env, url }) => json(await env.REQUESTS.getByName("main").usage(requestQuery(url))) },
+  { method: "GET", path: "/admin/usage", handle: async ({ env, url }) => json(await env.REQUESTS.getByName("main").usage(requestFilters(url))) },
   { method: "GET", path: /^\/admin\/requests\/(?<id>[0-9a-f-]{36})$/, handle: async ({ env, params, url }) => {
-    const detail = await env.REQUESTS.getByName("main").detail(params.id!, url.searchParams.get("summary") === "1");
+    const detail = await env.REQUESTS.getByName("main").requestSnapshot(params.id!, url.searchParams.get("summary") === "1");
     if (!detail) throw new HttpError(404, "not_found");
     return json(detail);
   } },
@@ -218,10 +234,10 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     if (after !== null && (!/^\d{1,16}(?:\.\d+)?$/.test(after) || !Number.isFinite(Number(after))) || pending.length > 100 || pending.some(id => !/^(?:qq:\d+|internal:[a-f0-9]{64}|web:[A-Za-z0-9-]+)$/.test(id))) throw new HttpError(400, "invalid_query");
     return json(await (await knownView(env, params.key!)).chatView(params.key!, after === null ? undefined : { after: Number(after), pending, ...(revision!==null?{revision:Number(revision)}:{}) }));
   } },
-  { method: "GET", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/trace$"), handle: async ({ env, params, url }) => {
-    const turns = url.searchParams.getAll("turn"), after = url.searchParams.get("after") ?? "0";
-    if (turns.length > 100 || turns.some(turn => !/^turn:[A-Za-z0-9:_-]{1,180}$/.test(turn)) || !/^\d{1,15}$/.test(after)) throw new HttpError(400, "invalid_query");
-    return json(await env.REQUESTS.getByName("main").turnTrace(params.key!, [...new Set(turns)], Number(after)));
+  { method: "GET", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/progress$"), handle: async ({ env, params, url }) => {
+    const turns = url.searchParams.getAll("turn");
+    if (turns.length > 100 || turns.some(turn => !/^turn:[A-Za-z0-9:_-]{1,180}$/.test(turn))) throw new HttpError(400, "invalid_query");
+    return json(await env.REQUESTS.getByName("main").turnProgress(params.key!, [...new Set(turns)]));
   } },
   { method: "GET", path: /^\/admin\/tools\/(?<id>[0-9a-f-]{36})$/, handle: async ({ env, params }) => {
     const detail = await env.REQUESTS.getByName("main").toolDetail(params.id!);
@@ -396,13 +412,6 @@ export const ADMIN_ROUTES: AdminRoute[] = [
       if (!result) throw new HttpError(404, "not_found");
       return json(result);
     } catch (error) { if (error instanceof Error && error.message.includes("invalid_cursor")) throw new HttpError(400, "invalid_cursor"); throw error; }
-  } },
-  { method: "GET", path: new RegExp(`^/admin/subagents/(?<id>${SUBAGENT_ID})/transcript$`), handle: async ({ env, url, params }) => {
-    const limit = url.searchParams.get("limit") ?? "20";
-    if (!/^\d{1,2}$/.test(limit) || Number(limit) < 1 || Number(limit) > 50) throw new HttpError(400, "invalid_query");
-    const result = await threadView(env, threadParam(url)).subagentTranscript(params.id, Number(limit));
-    if (!result) throw new HttpError(404, "not_found");
-    return json(result);
   } },
   { method: "POST", path: new RegExp(`^/admin/threads/(?<key>${THREAD_KEY})/sandbox/reset$`), handle: async ({ env, ctx, params }) => {
     try { return json(await env.SANDBOX.getByName(params.key!).resetRuntime()); }

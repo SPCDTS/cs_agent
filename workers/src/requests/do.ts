@@ -1,3 +1,6 @@
+import { ExecutionStore, type TraceQuery } from "./executions";
+import { PiStore } from "./pi-store";
+import type { PiSpan } from "./execution-contracts";
 import { ToolStore } from "./tool-store";
 import { ContextStore, contextMetadata } from "./context-store";
 import { ProjectionStore, viewName, type ProjectionBatch } from "./projection";
@@ -5,7 +8,7 @@ import { AgentReadView } from "./view";
 import { subagentName, RETENTION_MS, type SubagentMeta } from "../subagent/model";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
-import type { RequestDetail, RequestQuery, RequestRecord, ToolTrace, ToolSummary, TurnTiming } from "./types";
+import type { RequestDetail, RequestFilters, RequestQuery, RequestRecord, ToolTrace, ToolSummary, TurnTiming } from "./types";
 import { readAgentTopology, type AgentTopology } from "./topology";
 import type { SubagentActivity } from "../subagent/activity";
 import { RequestRetention, REQUEST_RETENTION } from "./retention";
@@ -14,10 +17,19 @@ const DAY = 86_400_000;
 const MAX_DIAG_LOGS = 1000;
 type Row = { seq: number; record: string; available: number };
 export class RequestsDO extends DurableObject<Env> {
+  private executions?: ExecutionStore;
+  private executionStore() { return this.executions ??= new ExecutionStore(this.ctx.storage.sql); }
+  agentTraces(q: TraceQuery) { return this.executionStore().list(q); }
+  agentTraceAnalysis(thread: string,root: string) { return this.executionStore().analysis(thread,root); }
+  agentTraceDetail(thread: string, root: string, cursor?: import("../admin/pagination").AdminCursor) { return this.executionStore().detail(thread,root,cursor); }
+  async recordPiSpans(spans: PiSpan[]) {
+    new PiStore(this.ctx.storage.sql).write(spans);
+    if (await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now()+86400_000);
+  }
+  piSpans(actor: string,input: string,before: number,request?: string) { return new PiStore(this.ctx.storage.sql).page(actor,input,before,request); }
   contextTimeline(...args: Parameters<ContextStore["timeline"]>) { return new ContextStore(this.ctx.storage.sql).timeline(...args); }
   contextInspection(id: string) { return new ContextStore(this.ctx.storage.sql).inspect(id); }
   contextPart(id: string, part: string) { return new ContextStore(this.ctx.storage.sql).part(id, part); }
-  toolExecution(id: string) { return new ToolStore(this.ctx.storage.sql).execution(id); }
   private topologyCache?: AgentTopology;
   private retentionStore?: RequestRetention;
   private retention() { return this.retentionStore ??= new RequestRetention(this.ctx.storage); }
@@ -45,12 +57,10 @@ export class RequestsDO extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS requests_started ON requests(started);
       CREATE INDEX IF NOT EXISTS requests_thread ON requests(thread, started);
       CREATE TABLE IF NOT EXISTS request_details (id TEXT PRIMARY KEY, started INTEGER NOT NULL, bytes INTEGER NOT NULL, payload TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS request_revision (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL);
-      INSERT OR IGNORE INTO request_revision VALUES(1,0);
       CREATE TABLE IF NOT EXISTS tool_traces (id TEXT PRIMARY KEY, thread TEXT NOT NULL, turn_id TEXT NOT NULL, call_id TEXT NOT NULL,
         started INTEGER NOT NULL, revision INTEGER NOT NULL, record TEXT NOT NULL, payload TEXT, bytes INTEGER NOT NULL,
         UNIQUE(thread,turn_id,call_id));
-      CREATE INDEX IF NOT EXISTS tool_traces_turn ON tool_traces(thread,turn_id,revision);
+      CREATE INDEX IF NOT EXISTS tool_traces_turn ON tool_traces(thread,turn_id);
       CREATE TABLE IF NOT EXISTS agent_activity (thread TEXT NOT NULL, actor TEXT NOT NULL, updated INTEGER NOT NULL,
         version INTEGER NOT NULL, record TEXT NOT NULL, PRIMARY KEY(thread,actor));
       CREATE INDEX IF NOT EXISTS agent_activity_updated ON agent_activity(updated);
@@ -61,17 +71,16 @@ export class RequestsDO extends DurableObject<Env> {
         ended INTEGER NOT NULL, revision INTEGER NOT NULL, record TEXT NOT NULL, PRIMARY KEY(thread, input_id));
       CREATE INDEX IF NOT EXISTS turn_timings_ended ON turn_timings(thread, ended DESC);
       CREATE INDEX IF NOT EXISTS turn_timings_all_ended ON turn_timings(ended DESC);
-      CREATE INDEX IF NOT EXISTS turn_timings_turn ON turn_timings(thread, turn_id, revision);
+      CREATE INDEX IF NOT EXISTS turn_timings_turn ON turn_timings(thread, turn_id);
     `);
     const columns = ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(requests)").toArray();
     if (!columns.some(c => c.name === "turn_id")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN turn_id TEXT");
-    if (!columns.some(c => c.name === "revision")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN revision INTEGER NOT NULL DEFAULT 0");
     if (!columns.some(c => c.name === "ttft_ms")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN ttft_ms INTEGER");
     if (!columns.some(c => c.name === "reasoning_tokens")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN reasoning_tokens INTEGER");
     if (!columns.some(c => c.name === "cost_usd")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN cost_usd REAL");
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS tool_traces_actor_call ON tool_traces(thread,COALESCE(json_extract(record,'$.actor'),'thread'),call_id,started)");
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS requests_actor_started ON requests(thread,json_extract(record,'$.actor'),started,id)");
-    ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS requests_turn ON requests(thread,turn_id,revision)");
+    ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS requests_turn ON requests(thread,turn_id)");
   }
   sessionHistory(...args: Parameters<AgentReadView["sessionHistory"]>) { return this.readView().sessionHistory(...args); }
   events(...args: Parameters<AgentReadView["events"]>) { return this.readView().events(...args); }
@@ -93,16 +102,12 @@ export class RequestsDO extends DurableObject<Env> {
     return view.subagentList(activity);
   }
   workspaceChild(...args: Parameters<AgentReadView["workspaceChild"]>) { return this.readView().workspaceChild(...args); }
-  transcriptSummary(...args: Parameters<AgentReadView["transcriptSummary"]>) { return this.readView().transcriptSummary(...args); }
   async chatView(...args: Parameters<AgentReadView["chatView"]>) { return {...await this.readView().chatView(...args), syncedAt: this.projection.status()!.synced_at}; }
   async stats() { return {...await this.readView().stats(), syncedAt: this.projection.status()!.synced_at}; }
   modelHistory(...args: Parameters<AgentReadView["modelHistory"]>) { return this.readView().modelHistory(...args); }
   subagentConversation(...args: Parameters<AgentReadView["subagentConversation"]>) { return this.readView().subagentConversation(...args); }
   async subagentHistory(id: string, cursor?: string): Promise<Awaited<ReturnType<AgentReadView["subagentConversation"]>> | undefined> {
     return (await this.childView(id))?.subagentConversation(cursor);
-  }
-  async subagentTranscript(id: string, limit: number): ReturnType<AgentReadView["transcriptSummary"]> {
-    return (await this.childView(id))?.transcriptSummary(limit);
   }
   private async childView(id: string): Promise<DurableObjectStub<RequestsDO> | undefined> {
     const state = this.projection.status(); if (!state?.scope.startsWith("thread:")) throw new Error("view_pending");
@@ -111,7 +116,6 @@ export class RequestsDO extends DurableObject<Env> {
     return this.env.REQUESTS.getByName(viewName(subagentName(state.scope.slice(7), id)));
   }
 
-  private revision() { return this.ctx.storage.sql.exec<{ revision: number }>("UPDATE request_revision SET revision=revision+1 WHERE id=1 RETURNING revision").one().revision; }
   async recordAgent(activity: SubagentActivity): Promise<void> {
     this.ctx.storage.sql.exec(`INSERT INTO agent_activity(thread,actor,updated,version,record) VALUES(?,?,?,?,?)
       ON CONFLICT(thread,actor) DO UPDATE SET updated=excluded.updated,version=excluded.version,record=excluded.record
@@ -164,11 +168,11 @@ export class RequestsDO extends DurableObject<Env> {
     // 重投与乱序开始事件不会覆盖终态。
     const previous = sql.exec<{ status: string }>("SELECT status FROM requests WHERE id = ?", r.id).toArray()[0];
     if (previous && previous.status !== "running" && (previous.status !== "interrupted" || r.status === "running")) return;
-    sql.exec(`INSERT INTO requests(id,started,thread,model,purpose,status,input_tokens,output_tokens,cache_read,duration,record,turn_id,revision,ttft_ms,reasoning_tokens,cost_usd)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, input_tokens=excluded.input_tokens,
-      output_tokens=excluded.output_tokens,cache_read=excluded.cache_read,duration=excluded.duration,record=excluded.record,turn_id=excluded.turn_id,revision=excluded.revision,
+    sql.exec(`INSERT INTO requests(id,started,thread,model,purpose,status,input_tokens,output_tokens,cache_read,duration,record,turn_id,ttft_ms,reasoning_tokens,cost_usd)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, input_tokens=excluded.input_tokens,
+      output_tokens=excluded.output_tokens,cache_read=excluded.cache_read,duration=excluded.duration,record=excluded.record,turn_id=excluded.turn_id,
       ttft_ms=excluded.ttft_ms,reasoning_tokens=excluded.reasoning_tokens,cost_usd=excluded.cost_usd`,
-      r.id, r.startedAt, r.thread, r.provider + "/" + r.model, r.purpose, r.status, r.inputTokens, r.outputTokens, r.cacheRead, r.durationMs, JSON.stringify(r), r.binding?.turnId ?? null, this.revision(), r.ttftMs ?? null, r.reasoningTokens ?? null, r.costUsd ?? null);
+      r.id, r.startedAt, r.thread, r.provider + "/" + r.model, r.purpose, r.status, r.inputTokens, r.outputTokens, r.cacheRead, r.durationMs, JSON.stringify(r), r.binding?.turnId ?? null, r.ttftMs ?? null, r.reasoningTokens ?? null, r.costUsd ?? null);
     const payload = JSON.stringify({ context: detail.context, response: detail.response });
     if (r.startedAt >= Date.now() - REQUEST_RETENTION.detailsMs) sql.exec(`INSERT INTO request_details(id,started,bytes,payload) VALUES(?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET started=excluded.started,bytes=excluded.bytes,payload=excluded.payload`,
@@ -185,18 +189,20 @@ export class RequestsDO extends DurableObject<Env> {
     const previousStatus = previous ? (JSON.parse(previous.record) as ToolSummary).status : undefined;
     if (previousStatus && previousStatus !== "running" && (previousStatus !== "interrupted" || trace.status === "running")) return;
     const payload = trace.startedAt >= Date.now() - REQUEST_RETENTION.detailsMs ? JSON.stringify({ arguments: args, result, structuredResult }) : null;
-    sql.exec(`INSERT INTO tool_traces(id,thread,turn_id,call_id,started,revision,record,payload,bytes) VALUES(?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,record=excluded.record,payload=excluded.payload,bytes=excluded.bytes`,
-      trace.id, trace.thread, trace.binding.turnId, trace.callId, trace.startedAt, this.revision(), JSON.stringify(summary), payload, payload === null ? 0 : new TextEncoder().encode(payload).byteLength);
+    // 已部署表的 revision 列必填，旧增量游标退役后新行统一写 0。
+    sql.exec(`INSERT INTO tool_traces(id,thread,turn_id,call_id,started,revision,record,payload,bytes) VALUES(?,?,?,?,?,0,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET record=excluded.record,payload=excluded.payload,bytes=excluded.bytes`,
+      trace.id, trace.thread, trace.binding.turnId, trace.callId, trace.startedAt, JSON.stringify(summary), payload, payload === null ? 0 : new TextEncoder().encode(payload).byteLength);
+    if (summary.dispatch) this.executionStore().bind(summary);
     const more = retention.trim({ kind: "tool", id: trace.id });
     if (more || await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + (more ? 1000 : 3600_000));
   }
   async recordTurnTiming(timing: TurnTiming): Promise<void> {
     if (timing.endedAt < Date.now() - REQUEST_RETENTION.metadataMs) return;
     this.ctx.storage.sql.exec(
-      `INSERT INTO turn_timings(thread,input_id,turn_id,ended,revision,record) VALUES(?,?,?,?,?,?)
-       ON CONFLICT(thread,input_id) DO UPDATE SET turn_id=excluded.turn_id,ended=excluded.ended,revision=excluded.revision,record=excluded.record`,
-      timing.thread, timing.inputId, timing.turnId, timing.endedAt, this.revision(), JSON.stringify(timing),
+      `INSERT INTO turn_timings(thread,input_id,turn_id,ended,revision,record) VALUES(?,?,?,?,0,?)
+       ON CONFLICT(thread,input_id) DO UPDATE SET turn_id=excluded.turn_id,ended=excluded.ended,record=excluded.record`,
+      timing.thread, timing.inputId, timing.turnId, timing.endedAt, JSON.stringify(timing),
     );
     if (await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 3600_000);
   }
@@ -214,6 +220,8 @@ export class RequestsDO extends DurableObject<Env> {
   private prune() {
     const sql = this.ctx.storage.sql, now = Date.now();
     const retention = this.retention();
+    this.executionStore();
+    sql.exec("DELETE FROM agent_dispatch WHERE at<? OR NOT EXISTS (SELECT 1 FROM tool_traces WHERE id=agent_dispatch.tool)",now-30*DAY);
     sql.exec("DELETE FROM agent_activity WHERE updated < ?", now - 30 * DAY);
     sql.exec("DELETE FROM ops_logs WHERE at < ?", now - 30 * DAY);
     sql.exec("DELETE FROM turn_timings WHERE ended < ?", now - 30 * DAY);
@@ -225,15 +233,21 @@ export class RequestsDO extends DurableObject<Env> {
     const stale = sql.exec<{ id: string; record: string }>("SELECT id,record FROM requests WHERE status='running' AND started < ?", now - 3600_000).toArray();
     for (const row of stale) {
       const r: RequestRecord = JSON.parse(row.record); r.status = "interrupted";
-      sql.exec("UPDATE requests SET status='interrupted',record=?,revision=? WHERE id=?", JSON.stringify(r), this.revision(), row.id);
+      sql.exec("UPDATE requests SET status='interrupted',record=? WHERE id=?", JSON.stringify(r), row.id);
     }
     for (const row of sql.exec<{ id: string; record: string }>("SELECT id,record FROM tool_traces WHERE started < ? AND json_extract(record,'$.status')='running'", now - 3600_000).toArray()) {
       const trace: ToolSummary = JSON.parse(row.record); trace.status = "interrupted";
-      sql.exec("UPDATE tool_traces SET record=?,revision=? WHERE id=?", JSON.stringify(trace), this.revision(), row.id);
+      sql.exec("UPDATE tool_traces SET record=? WHERE id=?", JSON.stringify(trace), row.id);
     }
     return retention.trim();
   }
   override async alarm() {
+    const native = new PiStore(this.ctx.storage.sql);
+    if (native.exists()) {
+      native.trim();
+      if (native.hasRows()) await this.ctx.storage.setAlarm(Date.now()+86400_000);
+      return;
+    }
     if (this.projection.status()?.scope.startsWith("sub:")) {
       const row = await this.projection.db.get<{value:string}>("SELECT value FROM meta WHERE key='subagent'");
       const meta: SubagentMeta | undefined = row ? JSON.parse(row.value) : undefined;
@@ -245,7 +259,7 @@ export class RequestsDO extends DurableObject<Env> {
     const more = this.prune();
     if (this.ctx.storage.sql.exec("SELECT 1 FROM requests UNION ALL SELECT 1 FROM tool_traces UNION ALL SELECT 1 FROM agent_activity UNION ALL SELECT 1 FROM ops_logs UNION ALL SELECT 1 FROM turn_timings LIMIT 1").toArray().length) await this.ctx.storage.setAlarm(Date.now() + (more ? 1000 : 3600_000));
   }
-  private filter(q: RequestQuery) {
+  private filter(q: RequestFilters) {
     const where = ["started >= ?", "started <= ?"], args: (string | number)[] = [q.since, q.until];
     for (const [column, value] of [["thread", q.thread], ["model", q.model], ["status", q.status], ["purpose", q.purpose], ["turn_id", q.turnId]] as const) {
       if (value) { where.push(column + " = ?"); args.push(value); }
@@ -266,7 +280,7 @@ export class RequestsDO extends DurableObject<Env> {
     return { requests: page.map(row => ({ ...JSON.parse(row.record) as RequestRecord, detailAvailable: !!row.available })),
       ...(rows.length > q.limit ? { next: page.at(-1)!.seq } : {}) };
   }
-  usage(q: RequestQuery) {
+  usage(q: RequestFilters) {
     const { where, args } = this.filter(q), sql = this.ctx.storage.sql;
     const columns = "COUNT(*) AS requests, COALESCE(SUM(CASE WHEN status IN ('error','aborted','interrupted') THEN 1 ELSE 0 END),0) AS failed, COALESCE(SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),0) AS running, COUNT(input_tokens) AS measured, COALESCE(SUM(input_tokens),0) AS inputTokens, COALESCE(SUM(output_tokens),0) AS outputTokens, COALESCE(SUM(reasoning_tokens),0) AS reasoningTokens, COALESCE(SUM(cache_read),0) AS cacheRead, COALESCE(SUM(CASE WHEN cache_read IS NOT NULL THEN input_tokens ELSE 0 END),0) AS cacheInputTokens, COUNT(cache_read) AS cacheMeasured, COALESCE(SUM(cost_usd),0) AS costUsd, AVG(duration) AS avgDuration, AVG(ttft_ms) AS avgTtft";
     const summary = sql.exec("SELECT " + columns + " FROM requests WHERE " + where, ...args).one();
@@ -278,17 +292,23 @@ export class RequestsDO extends DurableObject<Env> {
     const choices = sql.exec<{ model: string }>("SELECT DISTINCT model FROM requests ORDER BY model").toArray().map(r => r.model);
     return { summary, series, models, choices, bucket, retainedSince: first, retention: { metadataDays: 30, detailsDays: 7, maxRequests: 20000, maxDetailBytes: 33554432 } };
   }
-  detail(id: string, metadataOnly = false) {
+  requestSnapshot(id: string, metadataOnly = false) {
     const r = this.ctx.storage.sql.exec<{ record: string }>("SELECT record FROM requests WHERE id=?", id).toArray()[0];
     if (!r) return;
     const d = this.ctx.storage.sql.exec<{ payload: string }>("SELECT payload FROM request_details WHERE id=?", id).toArray()[0];
     const request: RequestRecord = JSON.parse(r.record);
-    const tools = new ToolStore(this.ctx.storage.sql).forRequest(request);
-    const related = request.binding ? this.ctx.storage.sql.exec<{ record: string }>("SELECT record FROM requests WHERE thread=? AND turn_id=? ORDER BY started,seq", request.thread, request.binding.turnId).toArray().map(row => JSON.parse(row.record) as RequestRecord) : [];
     const payload: Pick<RequestDetail, "context" | "response"> | undefined = d ? JSON.parse(d.payload) : undefined;
     return { request, context: payload ? metadataOnly ? contextMetadata(payload.context) : payload.context : undefined,
       response: payload?.response ? metadataOnly ? { ...payload.response, text: "" } : payload.response : undefined,
-      responseAvailable: !!payload?.response, bodyDeferred: metadataOnly, tools, related, detailAvailable: !!d };
+      responseAvailable: !!payload?.response, bodyDeferred: metadataOnly, detailAvailable: !!d };
+  }
+  detail(id: string, metadataOnly = false) {
+    const snapshot = this.requestSnapshot(id, metadataOnly);
+    if (!snapshot) return;
+    const { request } = snapshot;
+    const tools = new ToolStore(this.ctx.storage.sql).forRequest(request);
+    const related = request.binding ? this.ctx.storage.sql.exec<{ record: string }>("SELECT record FROM requests WHERE thread=? AND turn_id=? ORDER BY started,seq", request.thread, request.binding.turnId).toArray().map(row => JSON.parse(row.record) as RequestRecord) : [];
+    return { ...snapshot, tools, related };
   }
   toolDetail(id: string, metadataOnly = false): (ToolSummary & Partial<Pick<ToolTrace, "arguments" | "result" | "structuredResult">> & { bodyDeferred?: boolean; detailAvailable: boolean }) | undefined {
     const row = this.ctx.storage.sql.exec<{ record: string; payload: string | null }>("SELECT record,payload FROM tool_traces WHERE id=?", id).toArray()[0];
@@ -297,21 +317,17 @@ export class RequestsDO extends DurableObject<Env> {
     if (metadataOnly) return { ...summary, bodyDeferred: true, detailAvailable: !!row.payload };
     return { ...summary, ...(row.payload ? JSON.parse(row.payload) as Pick<ToolTrace, "arguments" | "result" | "structuredResult"> : {}), detailAvailable: !!row.payload };
   }
-  turnTrace(thread: string, turns: string[], after: number) {
-    if (!turns.length) return { requests: [], tools: [], cursor: after, more: false };
-    const turnIds = JSON.stringify(turns), sql = this.ctx.storage.sql;
-    // 整个回合列表只占一个绑定参数，避免多段 UNION 在多回合时超过 Cloudflare SQLite 的 100 参数上限。
-    const filter = "thread=? AND turn_id IN (SELECT value FROM json_each(?)) AND revision>?";
-    const changed = sql.exec<{ kind: string; record: string; revision: number }>(
-      `SELECT 'request' AS kind,record,revision FROM requests WHERE ${filter} UNION ALL
-       SELECT 'tool' AS kind,record,revision FROM tool_traces WHERE ${filter} UNION ALL
-       SELECT 'timing' AS kind,record,revision FROM turn_timings WHERE ${filter} ORDER BY revision LIMIT 201`,
-      thread, turnIds, after, thread, turnIds, after, thread, turnIds, after).toArray();
-    const page = changed.slice(0, 200);
-    const timings = page.filter(r => r.kind === "timing").map(r => JSON.parse(r.record) as TurnTiming);
-    return { requests: page.filter(r => r.kind === "request").map(r => JSON.parse(r.record) as RequestRecord),
-      tools: page.filter(r => r.kind === "tool").map(r => JSON.parse(r.record) as ToolSummary),
-      ...(timings.length ? { timings } : {}),
-      cursor: page.at(-1)?.revision ?? sql.exec<{ revision: number }>("SELECT revision FROM request_revision WHERE id=1").one().revision, more: changed.length > 200 };
+  turnProgress(thread: string, turns: string[]): import("./tool-types").TurnProgress[] {
+    if (!turns.length) return [];
+    const rows=this.ctx.storage.sql.exec<{turnId:string;active:number;steps:string|null}>(`
+      SELECT t.value AS turnId,
+        (EXISTS (SELECT 1 FROM requests r WHERE r.thread=? AND r.turn_id=t.value AND r.status='running')
+         OR EXISTS (SELECT 1 FROM tool_traces k WHERE k.thread=? AND k.turn_id=t.value AND json_extract(k.record,'$.status')='running')) AS active,
+        (SELECT json_extract(k.record,'$.steps') FROM tool_traces k WHERE k.thread=? AND k.turn_id=t.value
+           AND json_extract(k.record,'$.name')='update_steps' AND COALESCE(json_extract(k.record,'$.actor'),'thread')='thread'
+           AND json_extract(k.record,'$.status')!='error' AND json_type(k.record,'$.steps')='array'
+         ORDER BY k.started DESC, k.rowid DESC LIMIT 1) AS steps
+      FROM json_each(?) t`, thread,thread,thread,JSON.stringify(turns));
+    return rows.toArray().filter(r=>r.active||r.steps).map(r=>({turnId:r.turnId,active:!!r.active,steps:r.steps?JSON.parse(r.steps):[]}));
   }
 }

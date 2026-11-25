@@ -66,7 +66,8 @@ QQ、网页、定时任务和事件输入先持久化入队，在同一事务里
   - `GET /admin/context-timeline?thread=...&actor=...`（每页 10 项趋势）
   - `GET /admin/requests/:id?summary=1`（元数据与详情可用性）
   - `GET /admin/requests/:id/context` 与 `GET /admin/requests/:id/context/:part`（组成、相邻差异与按需正文）
-  - `GET /admin/tools/:id/execution` 与 `GET /admin/tools/:id`（执行组与单个工具详情）
+  - `GET /admin/agent-traces`、`GET /admin/agent-traces/detail`（定位执行并展开模型与工具调用树）
+  - `GET /admin/tools/:id`（单个工具的参数与结果）
 
 ## 6. 外部服务与构建边界
 

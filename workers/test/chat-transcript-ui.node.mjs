@@ -36,8 +36,9 @@ test("回合执行区将多次 update_steps 收敛为单张实时步骤卡片，
     'export {initConsole,cs} from "./browser/console";export {loadChat} from "./browser/trace";'});
   let phase=1;
   const turnId="turn:step-demo";
-  const binding={turnId,inputId:"web:1",generation:0};
+  const paths=[];
   globalThis.fetch=async path=>{
+    paths.push(path);
     if(path.startsWith("/admin/threads/owner/chat")){
       return Response.json({
         messages:[{id:"web:1",role:"user",source:"web",name:"管理员",text:"并行检查并汇报",at:1000,status:phase<3?"queued":"done",turnId,assets:[]}],
@@ -46,47 +47,14 @@ test("回合执行区将多次 update_steps 收敛为单张实时步骤卡片，
         delta:false,
       });
     }
-    if(path.startsWith("/admin/threads/owner/trace")){
-      if(phase===1){
-        return Response.json({
-          requests:[{id:"req-1",thread:"owner",actor:"thread",purpose:"conversation",startedAt:1001,endedAt:null,provider:"faux",model:"test",status:"running",inputTokens:10,outputTokens:5,cacheRead:0,cacheWrite:0,durationMs:null,contextWindow:128000,binding}],
-          tools:[
-            {id:"t-step-1",thread:"owner",actor:"thread",binding,callId:"c1",name:"update_steps",startedAt:1002,endedAt:1003,status:"done",steps:[
-              {title:"派发子任务检查服务",status:"in_progress"},
-              {title:"核对日志与指标",status:"pending"},
-              {title:"向用户汇报结论",status:"pending"},
-            ]},
-            {id:"t-sub-1",thread:"owner",actor:"thread",binding,callId:"c2",name:"subagent",argumentPreview:"spawn",startedAt:1002,endedAt:null,status:"running"},
-          ],
-          cursor:1,more:false,
-        });
-      }
-      if(phase===2){
-        return Response.json({
-          requests:[{id:"req-1",thread:"owner",actor:"thread",purpose:"conversation",startedAt:1001,endedAt:1010,provider:"faux",model:"test",status:"done",inputTokens:10,outputTokens:5,cacheRead:0,cacheWrite:0,durationMs:9,contextWindow:128000,binding}],
-          tools:[
-            {id:"t-step-1",thread:"owner",actor:"thread",binding,callId:"c1",name:"update_steps",startedAt:1002,endedAt:1003,status:"done",steps:[
-              {title:"派发子任务检查服务",status:"in_progress"},
-              {title:"核对日志与指标",status:"pending"},
-              {title:"向用户汇报结论",status:"pending"},
-            ]},
-            {id:"t-sub-1",thread:"owner",actor:"thread",binding,callId:"c2",name:"subagent",argumentPreview:"spawn",startedAt:1002,endedAt:1008,status:"done"},
-          ],
-          cursor:2,more:false,
-        });
-      }
-      return Response.json({
-        requests:[{id:"req-1",thread:"owner",actor:"thread",purpose:"conversation",startedAt:1001,endedAt:1020,provider:"faux",model:"test",status:"done",inputTokens:10,outputTokens:5,cacheRead:0,cacheWrite:0,durationMs:19,contextWindow:128000,binding}],
-        tools:[
-          {id:"t-step-2",thread:"owner",actor:"thread",binding,callId:"c3",name:"update_steps",startedAt:1015,endedAt:1016,status:"done",steps:[
-            {title:"派发子任务检查服务",status:"done"},
-            {title:"核对日志与指标",status:"skipped"},
-            {title:"向用户汇报结论",status:"done"},
-          ]},
-        ],
-        cursor:3,more:false,
-      });
+    if(path.startsWith("/admin/threads/owner/progress")){
+      return Response.json([{turnId,active:phase===1,steps:[
+        {title:"派发子任务检查服务",status:phase===3?"done":"in_progress"},
+        {title:"核对日志与指标",status:phase===3?"skipped":"pending"},
+        {title:"向用户汇报结论",status:phase===3?"done":"pending"},
+      ]}]);
     }
+    if(path.startsWith("/admin/agent-traces?"))return Response.json({traces:[]});
     return Response.json([]);
   };
 
@@ -97,10 +65,10 @@ test("回合执行区将多次 update_steps 收敛为单张实时步骤卡片，
   assert.equal(panel.querySelector(".trace-steps-count").textContent,"0/3 steps");
   assert.equal(panel.querySelector(".trace-steps-state").textContent,"执行中");
   assert.ok(panel.querySelector(".trace-step.is-in_progress"));
-  assert.equal(panel.querySelectorAll("details[data-tool]").length,1); // 仅保留真实 subagent 工具块
+  assert.equal(panel.querySelectorAll("details[data-tool]").length,0);
 
   // 阶段 2：回合让出等待子任务唤醒，in_progress 步切换为 paused 等待态（‖）
-  phase=2;cs.traceTurns="";await loadChat();
+  phase=2;await loadChat();
   assert.equal(panel.querySelector(".trace-steps-state").textContent,"等待继续");
   assert.equal(panel.querySelector(".trace-step.is-paused .trace-step-icon").textContent,"‖");
 
@@ -109,5 +77,69 @@ test("回合执行区将多次 update_steps 收敛为单张实时步骤卡片，
   assert.equal(panel.querySelectorAll(".trace-steps").length,1);
   assert.equal(panel.querySelector(".trace-steps-count").textContent,"3/3 steps");
   assert.equal(panel.querySelector(".trace-steps-state").textContent,"已完成");
+  await click(panel.querySelector("[data-turn] button"));
+  const query=new URL(paths.find(p=>p.startsWith("/admin/agent-traces?")), "https://local").searchParams;
+  assert.equal(query.get("turn"),turnId);assert.equal(query.get("thread"),"owner");
+  assert.ok(!paths.some(p=>p.includes("/trace?")||p.startsWith("/admin/requests?")));
   clearTimeout(cs.timer);
+});
+
+test("用量页只查聚合，打开链路时传递原筛选并支持清除",async()=>{
+  const {document,click}=mountDom(ADMIN_PAGE_HTML,{token:"synthetic-admin-test"});
+  const {initConsole,initExecutions}=await bundleModule({contents:
+    'export {initConsole} from "./browser/console";export {initExecutions} from "./browser/executions";'});
+  const paths=[];
+  globalThis.fetch=async path=>{
+    paths.push(path);
+    if(path.startsWith("/admin/agent-traces?"))return Response.json({traces:[]});
+    return Response.json({summary:{requests:0,failed:0,running:0,measured:0,inputTokens:0,outputTokens:0,cacheRead:0,cacheInputTokens:0,cacheMeasured:0,avgDuration:null},
+      series:[],models:[],choices:["faux/test"],bucket:3600000,retainedSince:null});
+  };
+  initConsole();initExecutions();await click(document.querySelector('[data-view="usage"]'));
+  assert.equal(paths.length,1);assert.match(paths[0],/^\/admin\/usage\?/);
+  document.querySelector("#req-model").value="faux/test";document.querySelector("#req-purpose").value="subagent";
+  document.querySelector("#req-status").value="error";document.querySelector("#req-range").value="168";
+  await click(document.querySelector("#usage-executions"));
+  const q=new URL(paths.at(-1),"https://local").searchParams;
+  assert.equal(q.get("model"),"faux/test");assert.equal(q.get("purpose"),"subagent");assert.equal(q.get("status"),"error");
+  assert.equal(Number(q.get("until"))-Number(q.get("since")),168*3600000);
+  await click(document.querySelector("#execution-scope-clear"));
+  assert.ok(!new URL(paths.at(-1),"https://local").searchParams.has("purpose"));assert.equal(document.querySelector("#request-rows"),null);
+});
+
+test("执行链路从根回合展开子任务，可筛选 Pi 调用并导出相同的父子边",async()=>{
+  const {document,click,settle}=mountDom(ADMIN_PAGE_HTML,{token:"synthetic-admin-test"});
+  const {initConsole,initExecutions,openExecutions,exportExecution}=await bundleModule({contents:
+    'export {initConsole} from "./browser/console";export {initExecutions,openExecutions} from "./browser/executions";export {exportExecution} from "./browser/execution-tree";'});
+  const summary={thread:"owner",root:"turn:3",started:100,last:180,running:0,failures:0,requests:2,tools:1,children:1,input:100,output:12,cost:null,priced:0,cached:40,cacheInput:80,measured:1};
+  const base={id:"m1",kind:"model",actor:"thread",turn:"turn:3",inputId:"qq:1",label:"faux/root",status:"done",started:100,ended:110,input:80,output:10,cached:40,written:null,cost:null,firstEvent:5,alarmWait:null,reasoning:null,callId:"",calls:["c1"],parentCall:"",dispatch:""};
+  const tool={...base,id:"t1",kind:"tool",label:"subagent",callId:"c1",calls:[],started:110,ended:120};
+  const child={...base,id:"m2",actor:"child-a",turn:"turn:sub:a:1",inputId:"task",label:"faux/child",dispatch:"t1",calls:[],started:121,ended:180};
+  const rows=[base,tool,child],paths=[];let paginate=false;
+  globalThis.fetch=async path=>{
+    paths.push(path);
+    if(path.startsWith("/admin/agent-traces/detail"))return Response.json(!paginate?{observations:rows}:path.includes("cursor=")?{observations:[tool,child]}:{observations:[base],next:"page2"});
+    if(path.startsWith("/admin/agent-traces/runtime"))return Response.json({spans:[]});
+    return Response.json({traces:[summary]});
+  };
+  initConsole();initExecutions();await click(document.querySelector('[data-view="executions"]'));await settle();
+  assert.match(document.querySelector("#execution-detail").textContent,/50.0%/);
+  const row=[...document.querySelectorAll(".execution-node")].find(x=>x.textContent.includes("faux/child"));assert.ok(row);await click(row);
+  await click([...document.querySelectorAll(".execution-evidence button")].find(x=>x.textContent.includes("原生 span")));
+  assert.ok(paths.at(-1).includes("input=task")&&paths.at(-1).includes("request=m2"));
+  paginate=true;openExecutions({record:"t1"});await settle();
+  assert.equal(document.querySelector('.execution-node[aria-current="true"]').dataset.observation,"t1");
+  assert.match(document.querySelector(".execution-evidence").textContent,/subagent/);
+  const native={trace:"1".repeat(32),id:"2".repeat(16),parent:"3".repeat(16),actor:"child-a",inputId:"task",
+    name:"pi.ai.request",started:122,ended:175,status:"ok",attrs:{"request.id":"m2"},
+    events:[{name:"pi.ai.first_chunk",at:130,attrs:{index:1}}],links:[{trace:"4".repeat(32),id:"5".repeat(16)}],omitted:0};
+  const packet=await exportExecution(summary,rows,[native]), scopes=packet.resourceSpans[0].scopeSpans, spans=scopes[0].spans;
+  assert.equal(new Set(spans.map(s=>s.traceId)).size,1);
+  assert.ok(spans.every(s=>/^[a-f0-9]{16}$/.test(s.spanId)&&/^[a-f0-9]{32}$/.test(s.traceId)));
+  const childSpan=spans.find(s=>s.name==="chat faux/child"),childAgent=spans.find(s=>s.spanId===childSpan.parentSpanId);
+  assert.equal(spans.find(s=>s.spanId===childAgent.parentSpanId).name,"execute_tool subagent");
+  const pi=scopes[1].spans[0];
+  assert.equal(pi.traceId,native.trace);assert.equal(pi.parentSpanId,native.parent);
+  assert.equal(pi.events[0].timeUnixNano,"130000000");
+  assert.deepEqual(pi.links,[{traceId:native.links[0].trace,spanId:native.links[0].id},{traceId:childSpan.traceId,spanId:childSpan.spanId}]);
 });

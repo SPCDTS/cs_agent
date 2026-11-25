@@ -38,7 +38,8 @@ type Row = {
   id: string; task: string; summary: string | null; created_at: number; status: ParentSubagentStatus; ended_at: number | null; identity_json: string;
   last_report_at: number | null; origin_json: string; timeout_ms: number; deadline: number; child_version: number;
 };
-type Reply = { text: string; error?: true };
+type Dispatch = { actor: string; inputId: string };
+type Reply = { text: string; error?: true; dispatch?: Dispatch };
 type Host = {
   db: DurableObjectSqliteDatabase; env: Env;
   /** 父线程键，也是子 DO 名字的一段。 */
@@ -55,7 +56,7 @@ type Host = {
 const STATUS_TEXT: Record<ParentSubagentStatus, string> = { running: "运行中", done: "已完成", failed: "失败", cancelled: "已取消", timeout: "已超时" };
 const ENDED = "('cancelled', 'timeout')";
 const span = (ms: number) => ms < 60_000 ? `${Math.round(ms / 1000)} 秒` : `${Math.round(ms / 60_000)} 分钟`;
-const reply = (text: string, error = false) => ({ ...(error ? { isError: true } : {}), output: [{ type: "text" as const, text }] });
+const reply = (text: string, error = false, dispatch?: Dispatch) => ({ ...(dispatch ? { details: { dispatch } } : {}), ...(error ? { isError: true } : {}), output: [{ type: "text" as const, text }] });
 
 const PARAMETERS = Type.Object({
   action: Type.Union([Type.Literal("spawn"), Type.Literal("message"), Type.Literal("set_model"), Type.Literal("list"), Type.Literal("cancel")]),
@@ -118,7 +119,7 @@ export class ParentSubagents {
     }
     if (row.deadline) await this.host.wakeBy(row.deadline);
     await this.host.audit("subagent_spawn", { id, model: `${model.provider}/${model.id}`, timeoutMs: row.timeout_ms, chars: row.task.length });
-    return { text: `已派出子 agent ${id}（模型 ${model.provider}/${model.id}，${row.timeout_ms ? "限时 " + span(row.timeout_ms) : "不设自动超时"}），完成后结果会作为「[子 agent 完成]」输入交回给你。` };
+    return { dispatch: { actor: id, inputId: "task" }, text: `已派出子 agent ${id}（模型 ${model.provider}/${model.id}，${row.timeout_ms ? "限时 " + span(row.timeout_ms) : "不设自动超时"}），完成后结果会作为「[子 agent 完成]」输入交回给你。` };
   }
 
   async narrow(id: string, next: SubagentIdentity): Promise<void> {
@@ -172,7 +173,7 @@ export class ParentSubagents {
     await this.host.db.run("UPDATE subagents SET deadline = ? WHERE id = ? AND status = 'running'", deadline, id);
     if (deadline) await this.host.wakeBy(deadline);
     const modelNote = !nextModel ? "" : receipt.status === "duplicate" ? "（原消息已处理，未重复切换模型）" : `（模型已切换为 ${nextModel.provider}/${nextModel.id}）`;
-    return { text: `已把消息交给子 agent ${id}${modelNote}，回答会作为「[子 agent 完成]」输入交回给你。` };
+    return { dispatch: { actor: id, inputId: receipt.messageId }, text: `已把消息交给子 agent ${id}${modelNote}，回答会作为「[子 agent 完成]」输入交回给你。` };
   }
 
   async setModel(caller: SubagentCaller, id: string, nextModel: ModelSelection, seed: string): Promise<Reply> {
@@ -318,14 +319,14 @@ export class ParentSubagents {
         if (args.action === "spawn") {
           if (!args.task || args.id || args.text) return reply("spawn 需要 task 与任务短简介 summary（可选 timeoutMs、model）", true);
           const result = await this.spawn(who, args.task, args.timeoutMs, args.model ?? await model(), seed, args.summary);
-          return reply(result.text, result.error);
+          return reply(result.text, result.error, result.dispatch);
         }
         if (args.action === "message") {
           if (!args.id || !args.text) return reply("message 需要 id 与 text", true);
           const thread = await this.host.thread();
           const result = await this.message(who, args.id, args.text, seed, () => durableAgentTicket(api, context,
             at => this.host.reserveCommunication({ to: subagentName(thread, args.id!), text: args.text, ...(args.model ? { childModel: args.model } : {}) }, seed, at, who.origin.generation)), args.model);
-          return reply(result.text, result.error);
+          return reply(result.text, result.error, result.dispatch);
         }
         if (args.action === "cancel") {
           if (!args.id) return reply("cancel 需要 id", true);

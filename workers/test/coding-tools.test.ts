@@ -102,7 +102,8 @@ describe("coding tools suite", () => {
       expect(request).toBeDefined();
       const detail = await store.detail(request!.id), root = detail!.tools.find(tool => tool.name === "codemode")!;
       expect(detail!.tools.filter(tool => tool.parentCallId === root.callId).map(tool => tool.argumentPreview).sort()).toEqual(["command: one", "command: two"]);
-      expect((await store.toolExecution(root.id))?.sourceRequestId).toBe(request!.id);
+      const observations=(await store.agentTraceDetail("owner",root.binding.turnId)).observations;
+      expect(observations.find(row=>row.id===request!.id)?.calls).toContain(root.callId);
       const followup = page.requests.find(row => row.actor === "thread" && !row.toolCalls?.length && row.purpose === "conversation");
       expect((await store.contextInspection(followup!.id))?.analysis?.items.find(item => item.execution)?.execution).toMatchObject({ calls: 2, label: "bash ×2" });
     });

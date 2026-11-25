@@ -37,6 +37,7 @@
     <button type="button" class="nav-btn" data-view="usage" aria-current="page">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 3 5-6"/></svg>用量总览
     </button>
+    <button type="button" class="nav-btn" data-view="executions"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14m0-10h9M5 17h13"/><circle cx="16" cy="9" r="2"/><circle cx="20" cy="17" r="2"/></svg>执行链路</button>
     <button type="button" class="nav-btn" data-view="chat">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8Z"/></svg>会话对话
     </button>
@@ -76,7 +77,7 @@
 
 <section id="view-requests">
   <div class="console-head">
-    <div class="head-title"><h1 id="requests-heading">用量总览</h1><p id="requests-subtitle" class="muted small">追踪每次模型调用与缓存效率</p></div>
+    <div class="head-title"><h1 id="requests-heading">用量总览</h1><p id="requests-subtitle" class="muted small">按时间、会话和模型汇总用量与缓存效率</p></div>
     <div class="row"><label class="field"><select id="req-range" aria-label="时间范围"><option value="24">最近 24 小时</option><option value="168">最近 7 天</option><option value="720">最近 30 天</option></select></label><button id="req-refresh" class="btn" type="button">刷新数据</button></div>
   </div>
   <div class="filters">
@@ -85,7 +86,6 @@
     <label>用途<select id="req-purpose"><option value="">全部用途</option><option value="conversation">主会话</option><option value="subagent">子任务</option><option value="background">记忆与维护</option><option value="compaction">上下文压缩</option></select></label>
     <label>状态<select id="req-status"><option value="">全部状态</option><option value="done">完成</option><option value="running">进行中</option><option value="error">错误</option><option value="aborted">已取消</option><option value="interrupted">采集未完成</option></select></label>
   </div>
-  <div id="request-turn-filter" class="request-turn-filter" hidden><span>只看从对话选中的这一轮请求</span><button id="request-turn-clear" class="btn compact" type="button">查看全部</button></div>
   <div id="usage-summary">
     <div class="metrics">
       <div><div class="metric-label">模型请求</div><div id="metric-requests" class="metric-value">—</div><div id="metric-failures" class="metric-note">等待数据</div></div>
@@ -99,14 +99,23 @@
       <div class="model-panel"><div class="panel-title"><h2>模型用量分布</h2><span class="small muted">输入 + 输出</span></div><div id="model-breakdown"></div></div>
     </div>
   </div>
-  <section class="card"><div class="section-head"><h2 class="h2">请求记录</h2><span class="small muted">一次模型调用一条记录，工具续轮分别统计</span><span class="grow"></span><span id="req-count" class="small muted"></span></div>
-    <div class="scroll"><table class="wide console-table"><thead><tr><th>时间 / 请求</th><th>模型 / 用途</th><th>会话</th><th>状态</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存命中率</th><th class="num">耗时</th></tr></thead><tbody id="request-rows"></tbody></table></div>
-    <div id="request-empty" class="empty-state" hidden><strong>所选范围内还没有请求</strong>新版本会从上线后开始记录。可以切换范围，或在会话里发一条消息。</div>
-    <div class="pager"><span id="request-state" class="small muted" role="status"></span><div class="row"><button id="req-prev" class="btn" type="button" disabled>上一页</button><button id="req-next" class="btn" type="button" disabled>下一页</button></div></div>
-  </section>
+  <div class="row"><button id="usage-executions" class="btn" type="button">查看匹配的执行链路</button><span id="request-state" class="small muted" role="status"></span></div>
   <p id="request-retention" class="retention-note">请求元数据最多保留 30 天，上下文详情最多 7 天；达到容量上限会提前清理。</p>
 </section>
 
+<section id="view-executions" hidden>
+  <div class="console-head"><div class="head-title"><h1>执行链路</h1><p class="muted small">主子 agent、模型与工具的调用明细。历史记录按已采集的回合展示。</p></div></div>
+  <form id="execution-filters" class="filters">
+    <label>搜索<input id="execution-search" type="search" maxlength="150" placeholder="会话、模型、工具或请求 ID"></label>
+    <label>时间<select id="execution-range"><option value="24">近 24 小时</option><option value="168">近 7 天</option><option value="720">近 30 天</option></select></label>
+    <label>结果<select id="execution-outcome"><option value="">全部结果</option><option value="error">含异常</option><option value="running">有调用进行中</option><option value="done">已记录操作均完成</option></select></label>
+    <button type="submit" class="btn">查询</button>
+  </form>
+  <div id="execution-scope" class="execution-scope" hidden><span id="execution-scope-label"></span><button id="execution-scope-clear" type="button" class="btn compact">清除限定条件</button></div>
+  <div class="execution-layout"><section class="card"><div class="section-head"><h2 class="h2">执行记录</h2></div>
+    <div id="execution-list" aria-live="polite"></div><div class="pager"><button id="execution-prev" type="button" class="btn compact" disabled>上一页</button><button id="execution-next" type="button" class="btn compact" disabled>下一页</button></div>
+  </section><section class="card execution-inspector" aria-label="选中执行"><div id="execution-detail" aria-live="polite"></div></section></div>
+</section>
 <section id="view-chat" hidden>
   <div class="chat-layout">
     <aside class="chat-threads"><h2>已有会话</h2><div id="chat-thread-list"></div></aside>
@@ -121,6 +130,7 @@
           <button id="chat-compact" class="btn compact" type="button">压缩</button>
           <button id="chat-reset" class="btn compact" type="button">归档重置</button>
           <button id="chat-older" class="btn compact" type="button" hidden>更早记录</button>
+          <button id="chat-executions" type="button" class="btn compact">查看执行链路</button>
           <button id="chat-parent" class="btn compact" type="button" hidden>返回父会话</button>
           <button id="chat-reload" class="btn compact" type="button">刷新</button>
         </div>

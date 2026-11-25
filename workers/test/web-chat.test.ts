@@ -44,19 +44,20 @@ describe("web chat suite", () => {
       const web = page.messages.find(m=>m.id==="web:"+command.requestId)!;
       expect(web.turnId).toMatch(/^turn:/);
       const store=env.REQUESTS.getByName("main");
-      await expect.poll(async()=> (await store.turnTrace("owner",[web.turnId!],0)).requests.filter(r=>r.status==="done").length).toBe(2);
-      const trace=await store.turnTrace("owner",[web.turnId!],0);
-      const traceResponse=await worker.fetch(new Request("https://test/admin/threads/owner/trace?turn="+encodeURIComponent(web.turnId!),{headers:{Authorization:"Bearer test"}}),{...env,ADMIN_TOKEN:"test"});
+      await expect.poll(async()=> (await store.agentTraceDetail("owner",web.turnId!)).observations.filter(r=>r.kind==="model"&&r.status==="done").length).toBe(2);
+      const traceResponse=await worker.fetch(new Request("https://test/admin/agent-traces/detail?thread=owner&root="+encodeURIComponent(web.turnId!),{headers:{Authorization:"Bearer test"}}),{...env,ADMIN_TOKEN:"test"});
       expect(traceResponse.status).toBe(200);
-      expect(trace.tools).toHaveLength(1);
-      expect(trace.tools[0]).toMatchObject({name:"send_message",status:"done",binding:{inputId:web.id,turnId:web.turnId}});
+      const trace=await traceResponse.json<Awaited<ReturnType<typeof store.agentTraceDetail>>>();
+      const tools=trace.observations.filter(row=>row.kind==="tool");
+      expect(tools).toHaveLength(1);
+      const tool=tools[0]!;
+      expect(tool).toMatchObject({label:"send_message",status:"done",inputId:web.id,turn:web.turnId});
       expect(JSON.stringify(trace)).not.toContain("记得你在 QQ 里说过海风");
-      const request=trace.requests.find(r=>r.toolCalls?.some(t=>t.name==="send_message"))!;
+      const request=trace.observations.find(r=>r.kind==="model"&&r.calls.includes(tool.callId))!;
       const detail=await store.detail(request.id);
       expect(detail?.tools[0]).not.toHaveProperty("result");
-      expect((await store.toolDetail(trace.tools[0].id))?.result?.text).toContain('"status":"sent"');
+      expect((await store.toolDetail(tool.id))?.result?.text).toContain('"status":"sent"');
       expect(detail?.related).toHaveLength(2);
-      expect((await store.turnTrace("owner",[web.turnId!],trace.cursor)).requests).toEqual([]);
       const delta=await (await syncedView("owner")).chatView("owner",{after:Date.now()+1,pending:[web.id]});
       expect(delta.messages.map(m=>m.id)).toEqual([web.id]);
       expect(delta.messages[0].status).toBe("done");
@@ -186,9 +187,8 @@ describe("web chat suite", () => {
       // trace 中的步骤标题严格先脱敏凭据再落盘展示
       const page=await (await syncedView("owner")).chatView("owner");
       const turns=[...new Set(page.messages.map(m=>m.turnId).filter((id):id is string=>!!id))];
-      const trace=await env.REQUESTS.getByName("main").turnTrace("owner",turns,0);
-      const stepTraces=trace.tools.filter(t=>t.name==="update_steps");
-      expect(stepTraces.length).toBeGreaterThanOrEqual(2);
+      const stepTraces=await env.REQUESTS.getByName("main").turnProgress("owner",turns);
+      expect(stepTraces.length).toBeGreaterThan(0);
       expect(JSON.stringify(stepTraces)).not.toContain("sk-secret1234567890abcdef");
       expect(stepTraces.at(-1)?.steps).toEqual([
         {title:"派子任务巡检",status:"done"},

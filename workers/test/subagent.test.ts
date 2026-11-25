@@ -132,6 +132,13 @@ describe("subagents as child Durable Objects", () => {
     expect(second[1]!.text).toContain("第二轮：C 最慢");
 
     const sub = await onlySubagent("owner"), stub = child("owner", sub.id);
+    const ledger=env.REQUESTS.getByName("main");
+    const traces=await ledger.agentTraces({since:0,until:Date.now()+1000,search:sub.id});
+    expect(traces.traces).toHaveLength(2);
+    const assignments=await Promise.all(traces.traces.map(async t=>(await ledger.agentTraceDetail("owner",t.root)).observations
+      .filter(node=>node.kind==="model" && node.actor===sub.id).map(node=>node.inputId)));
+    expect(assignments.every(ids=>ids.length===1)).toBe(true);
+    expect(new Set(assignments.flat()).size).toBe(2);
     expect(sub.deadline).toBeNull();
     expect((await stub.message("dup-1", "直接追加")).result).toBe("accepted");
     expect((await stub.message("dup-1", "直接追加")).result).toBe("duplicate");
@@ -225,8 +232,8 @@ describe("subagents as child Durable Objects", () => {
     });
 
     await vi.waitFor(async () => {
-      const transcript = await (await admin("GET", `/admin/subagents/${sub.id}/transcript?thread=owner&limit=5`)).json<{ entries: { text: string }[] }>();
-      expect(transcript.entries.some(entry => entry.text.includes("面板任务"))).toBe(true);
+      const transcript = await (await admin("GET", `/admin/subagents/${sub.id}/history?thread=owner`)).json<{entries:{messages:{text:string}[]}[]}>();
+      expect(transcript.entries.some(entry => entry.messages.some(message=>message.text.includes("面板任务")))).toBe(true);
     });
     expect((await admin("POST", `/admin/subagents/${sub.id}/cancel`)).status).toBe(400);
     expect((await admin("POST", `/admin/subagents/${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}/cancel?thread=owner`)).status).toBe(404);

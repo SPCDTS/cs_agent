@@ -1,5 +1,5 @@
-import { ToolSummary } from "../src/requests/tool-types";
-export { StepItem, ToolSummary } from "../src/requests/tool-types";
+import { ToolSummary, TurnProgress } from "../src/requests/tool-types";
+export { StepItem, ToolSummary, TurnProgress } from "../src/requests/tool-types";
 export type { StepStatus } from "../src/requests/tool-types";
 import { ContextMetrics } from "../src/requests/context-types";
 import { Type, type Static } from "typebox";
@@ -31,13 +31,12 @@ export const Context = Type.Object({ system: TextPart, messages: Type.Array(Cont
 export type Context = Static<typeof Context>;
 export const ToolDetail = Type.Object({ ...ToolSummary.properties, arguments: Type.Optional(TextPart), result: Type.Optional(TextPart), structuredResult: Type.Optional(TextPart) });
 export type ToolDetail = Static<typeof ToolDetail>;
-const DetailBase = { bodyDeferred: Type.Optional(Type.Boolean()), responseAvailable: Type.Optional(Type.Boolean()), request: RequestRecord, tools: Type.Array(ToolSummary), related: Type.Array(RequestRecord), response: Type.Optional(MessagePart) };
+const DetailBase = { bodyDeferred: Type.Optional(Type.Boolean()), responseAvailable: Type.Optional(Type.Boolean()), request: RequestRecord, response: Type.Optional(MessagePart) };
 export const RequestDetail = Type.Union([
   Type.Object({ ...DetailBase, detailAvailable: Type.Literal(true), context: Context }),
   Type.Object({ ...DetailBase, detailAvailable: Type.Literal(false) }),
 ]);
 export type RequestDetail = Static<typeof RequestDetail>;
-export const RequestPage = Type.Object({ requests: Type.Array(RequestRecord), next: Type.Optional(Type.Number()) });
 const Tokens = { inputTokens: Type.Number(), outputTokens: Type.Number() };
 export const Usage = Type.Object({
   summary: Type.Object({ ...Tokens, requests: Type.Number(), failed: Type.Number(), running: Type.Number(), measured: Type.Number(),
@@ -52,6 +51,6 @@ export const ChatMessage = Type.Object({ id: Type.String(), role: Type.String(),
   status: textOrNull, turnId: textOrNull, assets: Type.Array(Asset) });
 export type ChatMessage = Static<typeof ChatMessage>;
 export const ChatView = Type.Object({ messages: Type.Array(ChatMessage), revision: Type.Optional(Type.Number()), delta: Type.Boolean(), active: Type.Number(), syncedAt: Type.Optional(Type.Number()) });
-export const Trace = Type.Object({ requests: Type.Array(RequestRecord), tools: Type.Array(ToolSummary), cursor: Type.Number(), more: Type.Boolean() });
+export const ChatProgress = Type.Array(TurnProgress);
 export const PendingChat = Type.Object({ requestId: Type.String(), text: Type.String() });
 export type ChatTarget = {kind:"thread";thread:string} | {kind:"subagent";thread:string;id:string;summary:string};

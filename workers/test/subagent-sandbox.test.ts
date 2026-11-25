@@ -129,6 +129,27 @@ describe("subagent sandbox, MCP and delegation boundaries", () => {
     const page = await store.list({ since: 0, until: Date.now() + 1000, limit: 20 });
     const request = page.requests.find(row => row.actor === agent.id && row.toolCalls?.some(call => call.name === "codemode"));
     expect(request?.binding?.turnId).toContain("turn:sub:" + agent.id + ":");
+    const explorer = await store.agentTraces({since:0,until:Date.now()+1000,search:request!.id});
+    expect(explorer.traces).toHaveLength(1);
+    const traced = explorer.traces[0]!;
+    expect(traced.children).toBe(1);
+    expect(traced.root).not.toContain("turn:sub:");
+    const observations = (await store.agentTraceDetail("owner",traced.root)).observations;
+    const dispatch = observations.find(x=>x.label==="subagent" && x.kind==="tool");
+    expect(dispatch).toBeDefined();
+    expect(observations.find(x=>x.id===request!.id)?.dispatch).toBe(dispatch!.id);
+    expect(observations.some(x=>x.inputId.startsWith("subagent-report:") && x.dispatch===dispatch!.id)).toBe(true);
+    const native = env.REQUESTS.getByName("pi-trace:owner");
+    await expect.poll(async()=> (await native.piSpans(agent.id,"task",Number.MAX_SAFE_INTEGER)).spans.map(s=>s.name)).toContain("pi.durable.phase");
+    const pi = await native.piSpans(agent.id,"task",Number.MAX_SAFE_INTEGER);
+    expect(pi.spans.some(s=>s.name==="pi.ai.request")).toBe(true);
+    expect(JSON.stringify(pi.spans)).not.toContain("执行两个命令");
+    const own=await native.piSpans(agent.id,"task",Number.MAX_SAFE_INTEGER,request!.id);
+    expect(own.spans.map(s=>s.name)).toContain("pi.ai.request");
+    expect(own.spans.every(s=>s.attrs["request.id"]===request!.id)).toBe(true);
+    const analysis=await store.agentTraceAnalysis("owner",traced.root);
+    expect(analysis.groups.filter(g=>g.actor===agent.id).map(g=>g.round).sort()).toEqual(["first","followup"]);
+
     const detail = await store.detail(request!.id), root = detail!.tools.find(tool => tool.name === "codemode")!;
     expect(root.status, JSON.stringify(await store.toolDetail(root.id))).toBe("done");
     expect(detail!.tools.every(tool => tool.actor === agent.id)).toBe(true);
@@ -136,7 +157,7 @@ describe("subagent sandbox, MCP and delegation boundaries", () => {
     const followup = page.requests.find(row => row.actor === agent.id && row.purpose === "subagent" && !row.toolCalls?.length);
     const inspection = await store.contextInspection(followup!.id), item = inspection?.analysis?.items.find(item => item.execution);
     expect(item?.execution).toMatchObject({ calls: 2, failures: 1, label: "bash ×2" });
-    expect((await store.toolExecution(root.id))?.sourceRequestId).toBe(request!.id);
+    expect(observations.find(row=>row.id===request!.id)?.calls).toContain(root.callId);
     expect(inspection?.analysis?.metrics.chars.result).toBeLessThan(1000);
   });
 

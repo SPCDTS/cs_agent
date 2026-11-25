@@ -30,4 +30,5 @@ export type ToolTrace = import("./tool-types").ToolSummary & {
   arguments: TextPart; result?: TextPart; structuredResult?: TextPart;
 };
 export type RequestDetail = { request: RequestRecord; context: ContextSnapshot; response?: MessagePart };
-export type RequestQuery = { since: number; until: number; thread?: string; model?: string; status?: RequestStatus; purpose?: string; turnId?: string; excludeTurnId?: string; before?: number; limit: number };
+export type RequestFilters = { since: number; until: number; thread?: string; model?: string; status?: RequestStatus; purpose?: string; turnId?: string; excludeTurnId?: string };
+export type RequestQuery = RequestFilters & { before?: number; limit: number };
