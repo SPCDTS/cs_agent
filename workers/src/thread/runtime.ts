@@ -361,6 +361,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     allowed: ownerTaskAllowed,
     sandbox:()=>host.env.SANDBOX.getByName(memory.ns),registry:()=>host.env.REGISTRY.getByName("main"),
   }));
+  const stepsTurnAllowed = (kind: InboundRow["kind"]) => kind === "message" || kind === "subagent";
   registry.install(createStepsExtension({
     storage: host.ctx.storage,
     currentTurn: async (api, callContext) => {
@@ -369,7 +370,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
       const generation = await host.sessionGeneration();
       return {
         generation,
-        allowed: input.session_generation === generation && input.kind !== "event",
+        allowed: input.session_generation === generation && stepsTurnAllowed(input.kind),
       };
     },
   }));
@@ -452,7 +453,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
       }),
       section("turn-steps", async (api, callContext) => {
         const input = await host.currentInput(harness, api.read, api.conversationId, callContext);
-        if (!input || input.kind === "event") return undefined;
+        if (!input || !stepsTurnAllowed(input.kind)) return undefined;
         const generation = await host.sessionGeneration();
         if (input.session_generation !== generation) return undefined;
         // 同一宿主回合内固定首轮快照，避免本轮调用 update_steps 后在工具续轮中途改写系统提示打散前缀缓存。
