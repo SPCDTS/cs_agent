@@ -112,6 +112,121 @@ describe("web chat suite", () => {
         expect(state.storage.sql.exec<{reply_channel:string}>("SELECT reply_channel FROM inbound WHERE kind='subagent'").one().reply_channel).toBe("web");
       });
     });
+
+    it("persists open update_steps across subagent wakeups, isolates schedule/agent turns, redacts secrets, and clears on completion or reset",async()=>{
+      const subagentPrompts:string[]=[];
+      const followupPrompts:string[]=[];
+      const isolatedPrompts:{kind:string;prompt:string}[]=[];
+      const toolResults:string[]=[];
+      let stage=0;
+      fake(ctx=>{
+        if(!getCurrentTools(ctx.messages).some(t=>t.name==="subagent"))return fauxAssistantMessage("服务正常");
+        const lastTool=ctx.messages.findLast(m=>m.role==="toolResult");
+        if(ctx.messages.at(-1)?.role==="toolResult"){
+          if(lastTool)toolResults.push(JSON.stringify(lastTool.content));
+          return fauxAssistantMessage("");
+        }
+        const prompt=getCurrentSystemPrompt(ctx.messages);
+        const text=latest(ctx.messages);
+        if(text.includes("定时巡检触发")){
+          isolatedPrompts.push({kind:"schedule",prompt});
+          return fauxAssistantMessage(fauxToolCall("update_steps",{steps:[]}),{stopReason:"toolUse"});
+        }
+        if(prompt.includes("本轮为 Agent 通信")){
+          isolatedPrompts.push({kind:"agent",prompt});
+          return fauxAssistantMessage(fauxToolCall("update_steps",{steps:[]}),{stopReason:"toolUse"});
+        }
+        if(text.includes("群侧发起通信")){
+          return fauxAssistantMessage(fauxToolCall("agent_send",{to:"owner",text:"外部Agent询问状态"}),{stopReason:"toolUse"});
+        }
+        if(text.includes("[子 agent 完成]")){
+          subagentPrompts.push(prompt);
+          return fauxAssistantMessage([
+            fauxToolCall("update_steps",{steps:[
+              {title:"派子任务巡检",status:"done"},
+              {title:"核查凭据状态",status:"done"},
+              {title:"向用户发送巡检结论",status:"done"},
+            ]}),
+            fauxToolCall("send_message",{text:"全部巡检完成，一切正常"}),
+          ],{stopReason:"toolUse"});
+        }
+        stage++;
+        if(stage===1){
+          return fauxAssistantMessage([
+            fauxToolCall("update_steps",{steps:[
+              {title:"派子任务巡检",status:"in_progress"},
+              {title:"核查令牌 Bearer sk-secret1234567890abcdef",status:"pending"},
+              {title:"向用户发送巡检结论",status:"pending"},
+            ]}),
+            fauxToolCall("subagent",{action:"spawn",task:"巡检服务状态"}),
+          ],{stopReason:"toolUse"});
+        }
+        if(stage===3){
+          return fauxAssistantMessage([
+            fauxToolCall("update_steps",{steps:[
+              {title:"跨重置前未完结步骤",status:"in_progress"},
+              {title:"待继续收尾",status:"pending"},
+            ]}),
+            fauxToolCall("send_message",{text:"已建立待隔离清单"}),
+          ],{stopReason:"toolUse"});
+        }
+        followupPrompts.push(prompt);
+        return fauxAssistantMessage(fauxToolCall("send_message",{text:"跟进回复:"+stage}),{stopReason:"toolUse"});
+      });
+
+      await owner().submitWeb("owner",crypto.randomUUID(),"请按步骤巡检并汇报");
+      await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).messages.some(m=>m.source==="web"&&m.text==="全部巡检完成，一切正常"),{timeout:10000}).toBe(true);
+
+      // 子任务汇报唤醒时，末尾 <turn-steps> 回显未完成步骤，指引主会话完成最后一步汇报
+      expect(subagentPrompts[0]).toContain("<turn-steps>");
+      expect(subagentPrompts[0]).toContain("1. [in_progress] 派子任务巡检");
+      expect(subagentPrompts[0]).not.toContain("sk-secret1234567890abcdef");
+      expect(subagentPrompts[0]).toContain("3. [pending] 向用户发送巡检结论");
+
+      // trace 中的步骤标题严格先脱敏凭据再落盘展示
+      const page=await (await syncedView("owner")).chatView("owner");
+      const turns=[...new Set(page.messages.map(m=>m.turnId).filter((id):id is string=>!!id))];
+      const trace=await env.REQUESTS.getByName("main").turnTrace("owner",turns,0);
+      const stepTraces=trace.tools.filter(t=>t.name==="update_steps");
+      expect(stepTraces.length).toBeGreaterThanOrEqual(2);
+      expect(JSON.stringify(stepTraces)).not.toContain("sk-secret1234567890abcdef");
+      expect(stepTraces.at(-1)?.steps).toEqual([
+        {title:"派子任务巡检",status:"done"},
+        {title:"核查凭据状态",status:"done"},
+        {title:"向用户发送巡检结论",status:"done"},
+      ]);
+
+      // 全部标为 done 后自动清理持久化步骤，后续无关新话题不再注入旧 <turn-steps>
+      await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).active).toBe(0);
+      await owner().submitWeb("owner",crypto.randomUUID(),"换个简单问题");
+      await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).messages.some(m=>m.source==="web"&&m.text==="跟进回复:2")).toBe(true);
+      expect(followupPrompts[0]).not.toContain("<turn-steps>");
+
+      // 建立新的未完结清单后：验证 schedule 与外部 agent 回合既看不到 <turn-steps> 也无法覆写/清空，随后 resetSession 会隔离清理
+      await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).active).toBe(0);
+      await owner().submitWeb("owner",crypto.randomUUID(),"开启长任务清单");
+      await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).messages.some(m=>m.source==="web"&&m.text==="已建立待隔离清单")).toBe(true);
+      await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).active).toBe(0);
+
+      await owner().submit({...input(88,"定时巡检触发",10000001),kind:"schedule"});
+      await env.THREAD.getByName("group:200000001").submit(input(89,"群侧发起通信",10000004,200000001,true));
+      await expect.poll(()=>isolatedPrompts.map(p=>p.kind)).toEqual(["schedule","agent"]);
+      await expect.poll(()=>toolResults.filter(r=>r.includes("steps_denied")).length).toBe(2);
+      for(const item of isolatedPrompts)expect(item.prompt).not.toContain("<turn-steps>");
+
+      // 用户自己的下一轮对话仍可看到未被外部回合破坏的未完结清单
+      await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).active).toBe(0);
+      await owner().submitWeb("owner",crypto.randomUUID(),"确认清单仍在");
+      await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).messages.some(m=>m.source==="web"&&m.text==="跟进回复:4")).toBe(true);
+      expect(followupPrompts[1]).toContain("跨重置前未完结步骤");
+
+      // resetSession 后新会话代次不再注入旧步骤清单
+      await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).active).toBe(0);
+      expect(await owner().resetSession("owner",crypto.randomUUID(),"重置清理验证")).toEqual({status:"reset",generation:1});
+      await owner().submitWeb("owner",crypto.randomUUID(),"重置后的新对话");
+      await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).messages.some(m=>m.source==="web"&&m.text==="跟进回复:5")).toBe(true);
+      expect(followupPrompts[2]).not.toContain("<turn-steps>");
+    });
   });
   
   it("QQ 排队消息经展示副本读取后可原样用于增量查询，并沿用同一 ID 更新终态",async()=>{

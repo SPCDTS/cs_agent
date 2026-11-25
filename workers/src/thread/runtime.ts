@@ -35,6 +35,7 @@ import { createAccessExtension } from '../tools/access';
 import { createCloudflareExtension } from '../tools/cloudflare';
 import { createModelManagementExtension } from '../tools/model';
 import { createOpsExtension } from '../tools/ops';
+import { createStepsExtension, formatTurnStepsContext, loadActiveThreadSteps } from '../tools/steps';
 import { logDiag } from '../shared/diagnostics';
 import { createWorkspaceAdminExtension } from '../tools/workspace-admin';
 import { createMediaExtension } from '../tools/media';
@@ -360,6 +361,19 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     allowed: ownerTaskAllowed,
     sandbox:()=>host.env.SANDBOX.getByName(memory.ns),registry:()=>host.env.REGISTRY.getByName("main"),
   }));
+  const stepsTurnAllowed = (kind: InboundRow["kind"]) => kind === "message" || kind === "subagent";
+  registry.install(createStepsExtension({
+    storage: host.ctx.storage,
+    currentTurn: async (api, callContext) => {
+      const input = await host.currentInput(harness, api, api.conversationId, callContext);
+      if (!input) return undefined;
+      const generation = await host.sessionGeneration();
+      return {
+        generation,
+        allowed: input.session_generation === generation && stepsTurnAllowed(input.kind),
+      };
+    },
+  }));
   registry.install(createMediaExtension({
     bridge: host.env.BRIDGE.getByName("napcat"),
     canWriteWorkspace: codingAllowed,
@@ -417,6 +431,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
       host.scheduleAccess(await host.currentInput(harness, api, api.conversationId, callContext))));
   }
   // 每回合变化的身份与时间置于系统提示末尾：既避免打散前序大段规则和 codemode 的前缀缓存，又靠近当前消息。
+  let turnStepsCache: { key: string; value: string | undefined } | undefined;
   registry.install(defineExtension({
     name: "cs-turn-context",
     sections: [
@@ -435,6 +450,19 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
         if (!input) return undefined;
         const ms = input.received_at < 1e12 ? input.received_at * 1000 : input.received_at;
         return `现在是北京时间 ${formatBeijingTime(ms)}（${WEEKDAYS[new Date(ms + 8 * 3600_000).getUTCDay()]}）；今天、明天、下周等相对时间按北京时间理解。`;
+      }),
+      section("turn-steps", async (api, callContext) => {
+        const input = await host.currentInput(harness, api.read, api.conversationId, callContext);
+        if (!input || !stepsTurnAllowed(input.kind)) return undefined;
+        const generation = await host.sessionGeneration();
+        if (input.session_generation !== generation) return undefined;
+        // 同一宿主回合内固定首轮快照，避免本轮调用 update_steps 后在工具续轮中途改写系统提示打散前缀缓存。
+        const turnKey = `${generation}:${input.turn_id ?? input.message_id}`;
+        if (turnStepsCache?.key === turnKey) return turnStepsCache.value;
+        const activeSteps = await loadActiveThreadSteps(host.ctx.storage, generation);
+        const value = activeSteps ? formatTurnStepsContext(activeSteps) : undefined;
+        turnStepsCache = { key: turnKey, value };
+        return value;
       }),
     ],
   }));
