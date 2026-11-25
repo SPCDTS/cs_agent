@@ -1,123 +1,22 @@
-import { MEMORY_EXTRACT_PROMPT } from "../src/memory/extractor";
 import { env, reset, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { fauxProvider, fauxAssistantMessage, fauxToolCall, fauxText, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
-import type { JsonObject } from "@earendil-works/pi-durable";
-import worker from "../src/index";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { Errors } from "typebox/value";
 import type { RequestsDO } from "../src/requests/do";
 import * as C from "../browser/contracts";
 type HistoryPage = Awaited<ReturnType<RequestsDO["subagentConversation"]>>;
-import * as models from "../src/models";
-import { RegistryDO } from "../src/registry";
-import { SandboxDO } from "../src/sandbox/do";
 import { ThreadDO } from "../src/thread";
-import { MediaRepository, scopePrefix } from "../src/media/repository";
-import { sha256 } from "../src/media/model";
-import { MCP_CONFIG } from "../src/mcp/config";
-import { fakeRemote, login } from "./mcp-helpers";
 import type { SubagentView } from "../src/subagent/parent";
 import { responseDescription, shortSummary } from "../src/subagent/activity";
 import { action, connect, input, reply, syncedView } from "./helpers";
-import { workspaceView } from "../src/admin/read-views";
-const TOKEN = "test-admin-only";
+import { admin, child, gate, idOf, onlySubagent, reports, rows, spawn, thread, twoModels, type Step } from "./subagent-fixture";
+
 const sockets: WebSocket[] = [];
 afterEach(async () => {
-  vi.restoreAllMocks();
   for (const socket of sockets.splice(0)) socket.close();
   await reset();
+  vi.restoreAllMocks();
 });
-
-/** 一步：调工具、给最终文字（可等闸门打开再答）、或一直挂起到被中止；函数步按已有的工具输出求出下一步。 */
-type Step = { tool: string; args: JsonObject; progress?: string; after?: Promise<void> } | { text: string; after?: Promise<void> } | "hang" | ((outputs: string[]) => Step);
-type Seen = { tools: string[]; user: string; identity: string };
-
-/** 父线程与子 agent 共用一个 faux provider；按系统段里有没有 subagent 段分流到各自的脚本。 */
-function twoModels(parentSteps: Step[], childSteps: Step[]) {
-  const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
-  const seen = { parent: [] as Seen[], child: [] as Seen[] }, outputs = { parent: [] as string[], child: [] as string[] };
-  const captured = new Set<string>();
-  const respond: FauxResponseFactory = async (transcript, options) => {
-    faux.setResponses([respond]);
-    if (transcript.messages.some(message => message.role === "user" && typeof message.content === "string" && message.content.startsWith(MEMORY_EXTRACT_PROMPT))) return fauxAssistantMessage("[]");
-    let role: "parent" | "child" = "parent", identity = "";
-    const tools = new Set<string>();
-    for (const message of transcript.messages) {
-      if (message.role !== "system") continue;
-      if (message.sections?.subagent) role = "child";
-      if (message.sections && "turn-identity" in message.sections) identity = message.sections["turn-identity"] ?? "";
-      for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
-      for (const tool of message.toolsAdded ?? []) tools.add(tool.name);
-    }
-    for (const message of transcript.messages) if (message.role === "toolResult" && !captured.has(message.toolCallId)) {
-      captured.add(message.toolCallId);
-      outputs[role].push(message.content.filter(block => block.type === "text").map(block => block.text).join(""));
-    }
-    const user = transcript.messages.findLast(message => message.role === "user");
-    seen[role].push({ tools: [...tools], identity,
-      user: typeof user?.content === "string" ? user.content : user?.content.map(block => block.type === "text" ? block.text : "").join("") ?? "" });
-    // 段落变化（如本回合身份）以系统消息追加在用户输入之后，按最后一条非系统消息判断轮到谁。
-    const last = transcript.messages.findLast(message => message.role !== "system")?.role;
-    let step = last === "user" || last === "toolResult" ? (role === "parent" ? parentSteps : childSteps).shift() : undefined;
-    while (typeof step === "function") step = step(outputs[role]);
-    if (step === "hang") {
-      return new Promise((_resolve, reject) => {
-        const signal = options?.signal;
-        if (signal?.aborted) reject(new Error("aborted"));
-        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-      });
-    }
-    if (step) await step.after;
-    if (step && "tool" in step) return fauxAssistantMessage([...(step.progress ? [fauxText(step.progress)] : []), fauxToolCall(step.tool, step.args)], { stopReason: "toolUse" });
-    if (step) return fauxAssistantMessage(step.text);
-    return fauxAssistantMessage("done");
-  };
-  faux.setResponses([respond]);
-  vi.spyOn(models, "openModels").mockImplementation((_env, credentials) => {
-    const registry = createModels({ credentials });
-    registry.setProvider(faux.provider);
-    return registry;
-  });
-  return { seen, outputs };
-}
-
-const thread = (key: string) => env.THREAD.getByName(key);
-const child = (key: string, id: string) => env.SUBAGENT.getByName(`sub:${key}:${id}`);
-const rows = <T>(key: string, query: string, ...args: (string | number)[]) => runInDurableObject(thread(key), (_instance, state) =>
-  state.storage.sql.exec<T & Record<string, SqlStorageValue>>(query, ...args).toArray() as T[]);
-const spawn = (task: string, extra: JsonObject = {}): Step => ({ tool: "subagent", args: { action: "spawn", task, ...extra } });
-const idOf = (output: string | undefined) => /子 agent ([0-9a-f-]{36})/.exec(output ?? "")?.[1] ?? "";
-async function onlySubagent(key: string): Promise<SubagentView> {
-  const list = await (await syncedView(key)).subagentList();
-  expect(list).toHaveLength(1);
-  return list[0]!;
-}
-async function reports(key: string, count: number) {
-  await vi.waitFor(async () => expect(await rows(key, "SELECT 1 FROM inbound WHERE kind = 'subagent' AND status = 'done'")).toHaveLength(count), { timeout: 10_000 });
-  return rows<{ message_id: string; text: string; turn_id: string; user_id: string }>(key, "SELECT * FROM inbound WHERE kind = 'subagent' ORDER BY rowid");
-}
-function gate() {
-  let open = () => {};
-  const promise = new Promise<void>(resolve => { open = resolve; });
-  return { promise, open };
-}
-function admin(method: string, path: string, token: string | null = TOKEN) {
-  return worker.fetch(new Request(`https://test${path}`, { method, headers: token === null ? {} : { Authorization: `Bearer ${token}` } }), { ...env, ADMIN_TOKEN: TOKEN });
-}
-
-async function seedPublishSkill(workspace = "owner") {
-  const sandbox=env.SANDBOX.getByName(workspace),current=await sandbox.files();
-  const texts={"skills/example/SKILL.md":"---\nname: example\ndescription: 测试技能发布\n---\n读取 sources.md。","skills/example/sources.md":"中文来源说明"};
-  const files=await Promise.all(Object.entries(texts).map(async([path,text])=>{
-    const bytes=new TextEncoder().encode(text),digest=await sha256(bytes);
-    await env.ASSETS.put((await scopePrefix(current.workspace))+"/workspace/blobs/"+digest,bytes);
-    return {path,sha256:digest,bytes:bytes.length,mime:"text/plain",mode:420};
-  }));
-  const result=await sandbox.importSnapshot({expectedRevision:current.revision,manifest:{...current,files,
-    directories:["skills","skills/example"],totalBytes:files.reduce((sum,file)=>sum+file.bytes,0)}});
-  expect(result.ok).toBe(true);
-}
 
 describe("subagents as child Durable Objects", () => {
   it("publishes task, progress and result summaries from the existing model turns", async () => {
@@ -251,7 +150,7 @@ describe("subagents as child Durable Objects", () => {
     expect(await thread(group).submit(input(1, "派个子 agent", 10000003, 200000001, true))).toEqual({ status: "done" });
     await reports(group, 1);
     expect(outputs.parent[1]).toContain("定时管理授权");
-    const groupSub = await onlySubagent(group);
+    await onlySubagent(group);
     expect(seen.parent.find(request => request.user.includes("成员任务的结果"))?.identity).toContain("派出者是 群成员");
 
     expect(await thread(group).submit(input(2, "我也派一个", 10000001, 200000001, true))).toEqual({ status: "done" });
@@ -299,7 +198,7 @@ describe("subagents as child Durable Objects", () => {
       { text: "整理完成" },
     ]);
     await thread("owner").submit(input(1, "持续整理", 10000001));
-    const sub = await onlySubagent("owner");
+    await onlySubagent("owner");
     await expect.poll(() => seen.child.length).toBe(1);
     const now = Date.now.bind(Date);
     vi.spyOn(Date, "now").mockImplementation(() => now() + 20 * 60_000);
@@ -310,104 +209,6 @@ describe("subagents as child Durable Objects", () => {
     expect((await reports("owner", 1))[0].text).toContain("整理完成");
     expect(seen.child).toHaveLength(26);
     expect((await onlySubagent("owner")).deadline).toBeNull();
-  });
-
-  it.each(["qq", "web"] as const)("continues the parent's sandbox task after a %s child report with MCP disabled", async channel => {
-    const ready = gate();
-    await seedPublishSkill();
-    await seedPublishSkill("group:200000001");
-    const exec = vi.spyOn(SandboxDO.prototype, "exec").mockResolvedValue({ stdout: "主会话命令成功", stderr: "", code: 0, timedOut: false, truncated: false });
-    vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
-    const { outputs } = twoModels([spawn("检查独立工作区"), { text: "已派出" },
-      { tool: "codemode", args: { code: 'text((await tools.sandbox_list({})).assignedSandboxId);' } },
-      { tool: "codemode", args: { code: 'text(await tools.bash({command:"pwd"}));' } },
-      { tool: "codemode", args: { code: 'const check=await tools.skill_inspect({path:"skills/example"});text(await tools.skill_publish({path:"skills/example",workspaceRevision:check.workspaceRevision,expectedRevision:check.expectedRevision}));text((await tools.read({workspace:"group:200000001",path:"skills/example/sources.md"})).text);' } },
-      { tool: "codemode", args: { code: 'text(await tools.edge_grant({from:"owner",to:"private:42"}));' } },
-      { text: "已核实主工作区" },
-    ], [{ text: "子工作区为空，请主会话核实", after: ready.promise }]);
-    if (channel === "web") {
-      await thread("owner").submitWeb("owner", crypto.randomUUID(), "检查主工作区");
-      await vi.waitFor(async () => expect(await rows("owner", "SELECT 1 FROM inbound WHERE kind='message' AND status='done'")).toHaveLength(1));
-    } else await thread("owner").submit(input(1, "检查主工作区", 10000001));
-    await onlySubagent("owner");
-    ready.open();
-    await reports("owner", 1);
-    expect(outputs.parent[1]).toContain("sbx:");
-    expect(outputs.parent[2]).toContain("主会话命令成功");
-    expect(exec).toHaveBeenCalledTimes(1);
-    expect(outputs.parent[3]).toContain('"ok":true');
-    expect(outputs.parent[3]).toContain("中文来源说明");
-    expect(outputs.parent[4]).toContain("仅限 owner");
-    expect(await env.REGISTRY.getByName("main").edgeAllowed("owner", "private:42")).toBe(false);
-    expect((await env.REGISTRY.getByName("main").skillGet("example"))?.files).toEqual({"sources.md":"中文来源说明"});
-
-  });
-
-  it("撤销原任务后父会话续轮不能发布技能",async()=>{
-    await seedPublishSkill();
-    const ready=gate(),resume=gate();
-    vi.spyOn(RegistryDO.prototype,"mcpConfig").mockReturnValue({...MCP_CONFIG,enabled:false,servers:[]});
-    const {outputs,seen}=twoModels([spawn("检查技能"),{text:"已派出"},
-      {tool:"codemode",after:resume.promise,args:{code:'text(await tools.skill_publish({path:"skills/example",workspaceRevision:"x",expectedRevision:"absent"}));'}},
-      {text:"授权已撤销"}], [{text:"请主会话发布",after:ready.promise}]);
-    await thread("owner").submit(input(1,"检查并发布技能",10000001));
-    ready.open();
-    await vi.waitFor(()=>expect(seen.parent.some(r=>r.user.startsWith("[子 agent 完成]"))).toBe(true));
-    await rows("owner","UPDATE sandbox_tasks SET revoked_at=1");
-    resume.open();
-    await reports("owner",1);
-    expect(outputs.parent[1]).toContain("denied");
-    expect(await env.REGISTRY.getByName("main").skillGet("example")).toBeUndefined();
-  });
-
-  it.each(["capability", "identity", "generation", "cancelled", "channel", "task"] as const)("rechecks %s before a parent report turn uses the sandbox", async change => {
-    const childReady = gate(), resume = gate();
-    const exported = vi.spyOn(SandboxDO.prototype, "exportAsset");
-    vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
-    const { outputs, seen } = twoModels([spawn("检查工作区"), { text: "已派出" },
-      { tool: "codemode", after: resume.promise, args: { code: 'text(await tools.sandbox_list({}));' } },
-      { tool: "send_file", args: { path: "/work/.codemode/image.png" } }, { text: "权限已失效" },
-    ], [{ text: "请主会话继续检查", after: childReady.promise }]);
-    await thread("owner").submit(input(1, "检查工作区", 10000001));
-    const sub = await onlySubagent("owner");
-    childReady.open();
-    await vi.waitFor(() => expect(seen.parent.some(request => request.user.startsWith("[子 agent 完成]"))).toBe(true));
-    switch (change) {
-      case "capability": await rows("owner", "UPDATE subagents SET origin_json=json_set(origin_json, '$.capabilities.coding', json('false')) WHERE id=?", sub.id); break;
-      case "identity": await rows("owner", "UPDATE subagents SET identity_json=json_remove(identity_json, '$.as') WHERE id=?", sub.id); break;
-      case "generation": await rows("owner", "UPDATE subagents SET origin_json=json_set(origin_json, '$.generation', 1) WHERE id=?", sub.id); break;
-      case "cancelled": await rows("owner", "UPDATE subagents SET status='cancelled' WHERE id=?", sub.id); break;
-      case "channel": await rows("owner", "UPDATE subagents SET origin_json=json_set(origin_json, '$.replyChannel', 'web') WHERE id=?", sub.id); break;
-      case "task": await rows("owner", "UPDATE sandbox_tasks SET revoked_at=1"); break;
-    }
-    resume.open();
-    await reports("owner", 1);
-    expect(outputs.parent[1]).toContain("denied");
-    expect(outputs.parent[2]).toContain("本回合无权访问媒体或发送附件");
-    expect(exported).not.toHaveBeenCalled();
-  });
-
-
-  it("uses spawn.mcpTools and preserves structured results through child Code Mode", async () => {
-    const remote = fakeRemote(); await login();
-    remote.state.tools = [
-      ...remote.state.tools.slice(0, 2),
-      { name: "notion-create-pages", inputSchema: { type: "object" },
-        outputSchema: { type: "object", properties: { requestId: { type: "string" } }, required: ["requestId"], additionalProperties: false } },
-    ];
-    remote.state.toolResult = { structuredContent: { requestId: "child-job-42" }, content: [{ type: "text", text: "dispatched" }] };
-    const { outputs } = twoModels([
-      spawn("交给子代理发起作业", { mcpTools: [{ server: "notion", tools: ["notion-create-pages"] }] }), { text: "已派出" },
-    ], [
-      { tool: "codemode", args: { code: 'const names=ALL_TOOLS.map(tool=>tool.name); text(names); const tool=names.find(name=>name.startsWith("mcp_notion_notion_create_pages_")); const result=await tools[tool]({}); text(result.structuredContent.requestId);' } },
-      { text: "作业已发起" },
-    ]);
-    expect(await thread("owner").refreshMcp()).toEqual(expect.arrayContaining([expect.objectContaining({ server: "notion", status: "ok" })]));
-    await thread("owner").submit(input(1, "派发作业", 10000001));
-    await reports("owner", 1);
-    expect(outputs.child[0]).toContain("child-job-42");
-    expect(outputs.child[0]).not.toMatch(/mcp_notion_notion_(search|fetch)_|mcp_resources_/);
-    expect(remote.state.calls).toBe(1);
   });
 
   it("lists, inspects and cancels subagents through the authenticated admin API", async () => {
@@ -433,230 +234,58 @@ describe("subagents as child Durable Objects", () => {
     expect((await child("owner", sub.id).status())?.meta.status).toBe("cancelled");
     expect(await rows("owner", "SELECT 1 FROM inbound WHERE kind = 'subagent'")).toEqual([]);
   });
-});
 
-it("子 agent 的 CodeMode 内部调用、捕获的失败和后续输入都归入独立执行组", async () => {
-  vi.spyOn(SandboxDO.prototype, "run").mockImplementation(async function(this: SandboxDO, input) {
-    if (input.operation.kind === "exec" && input.operation.command === "fail") throw Error("fixture_execution_failed");
-    return { status: "committed", persistence: "committed", revision: (await this.files()).revision,
-      result: { stdout: "少量输出", stderr: "", code: 0, timedOut: false, truncated: false } };
+  it("管理台可分页查看子会话正文与工具记录，且读取不唤醒执行 DO", async () => {
+    const task = "需要逐项核对的任务。".repeat(35) + "任务末尾", answer = "这是核对后的结果。".repeat(35) + "结果末尾";
+    const ready = gate();
+    const { seen } = twoModels([spawn(task)], [...Array.from({ length: 6 }, (): Step => ({ tool: "qq_context", args: {} })), { text: answer, after: ready.promise }]);
+    await thread("owner").submit(input(1, "查看子会话", 10000001));
+    const sub = await onlySubagent("owner");
+    await vi.waitFor(() => expect(seen.child).toHaveLength(7));
+    await thread("owner").syncAdminView("owner");
+    await child("owner", sub.id).syncAdminView();
+    const running = await admin("GET", "/admin/subagents/" + sub.id + "/history?thread=owner");
+    expect(running.status).toBe(200);
+    const active = await running.json<HistoryPage>();
+    expect([...Errors(C.SubagentConversationSchema, active)]).toEqual([]);
+    expect(active.status).toBe("running");
+    expect(active.syncedAt).toBeGreaterThan(0);
+    ready.open();
+    await reports("owner", 1);
+    await thread("owner").syncAdminView("owner");
+    await child("owner", sub.id).syncAdminView();
+    await thread("group:200000001").syncAdminView("group:200000001");
+    const execution = vi.spyOn(ThreadDO.prototype, "syncAdminView").mockRejectedValue(new Error("execution_read_forbidden"));
+    const path = "/admin/subagents/" + sub.id + "/history?thread=owner";
+    expect((await admin("GET", path, null)).status).toBe(401);
+    expect((await admin("GET", path + "&cursor=!!!")).status).toBe(400);
+    expect((await admin("GET", "/admin/subagents/" + sub.id + "/history")).status).toBe(400);
+    expect((await admin("GET", path.replace("thread=owner", "thread=group:200000001"))).status).toBe(404);
+    const entries: HistoryPage["entries"] = [];
+    let cursor: string | undefined;
+    do {
+      const response = await admin("GET", path + (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""));
+      expect(response.status).toBe(200);
+      const page = await response.json<HistoryPage>();
+      expect([...Errors(C.SubagentConversationSchema, page)]).toEqual([]);
+      expect(page.status).toBe("done");
+      expect(page.summary).toBeTruthy();
+      if (!cursor) { expect(page.entries).toHaveLength(10); expect(page.next).toBeTruthy(); }
+      entries.push(...page.entries); cursor = page.next;
+    } while (cursor);
+    expect(new Set(entries.map(entry => entry.id)).size).toBe(entries.length);
+    const messages = entries.flatMap(entry => entry.messages);
+    expect(messages.some(message => message.role === "user" && message.text.includes(task))).toBe(true);
+    expect(messages.some(message => message.role === "assistant" && message.text.includes(answer))).toBe(true);
+    expect(messages.some(message => message.toolName === "qq_context")).toBe(true);
+    const calls = messages.flatMap(message => message.toolCalls ?? []);
+    expect(calls).toHaveLength(6);
+    expect(calls.every(call => call.name === "qq_context" && JSON.parse(call.arguments))).toBe(true);
+    expect(messages.filter(message => message.toolCalls?.length).every(message => !message.text.includes("qq_context"))).toBe(true);
+    expect(execution).not.toHaveBeenCalled();
+    execution.mockRestore();
+    await rows("owner", "UPDATE subagents SET ended_at=? WHERE id=?", Date.now() - 15 * 86400_000, sub.id);
+    await thread("owner").syncAdminView("owner");
+    expect((await admin("GET", path)).status).toBe(404);
   });
-  twoModels([spawn("执行两个命令"), { text: "已派出" }, { text: "收到结果" }], [
-    { tool: "codemode", args: { code: 'try { await tools.bash({command:"fail"}); } catch {} text(await tools.bash({command:"ok"}));' } }, { text: "处理完毕" },
-  ]);
-  await thread("owner").submit(input(1, "运行检查", 10000001));
-  await reports("owner", 1);
-  const agent = await onlySubagent("owner"), store = env.REQUESTS.getByName("main");
-  const page = await store.list({ since: 0, until: Date.now() + 1000, limit: 20 });
-  const request = page.requests.find(row => row.actor === agent.id && row.toolCalls?.some(call => call.name === "codemode"));
-  expect(request?.binding?.turnId).toContain("turn:sub:" + agent.id + ":");
-  const detail = await store.detail(request!.id), root = detail!.tools.find(tool => tool.name === "codemode")!;
-  expect(root.status, JSON.stringify(await store.toolDetail(root.id))).toBe("done");
-  expect(detail!.tools.every(tool => tool.actor === agent.id)).toBe(true);
-  expect(detail!.tools.filter(tool => tool.parentCallId === root.callId).map(tool => tool.status).sort()).toEqual(["done", "error"]);
-  const followup = page.requests.find(row => row.actor === agent.id && row.purpose === "subagent" && !row.toolCalls?.length);
-  const inspection = await store.contextInspection(followup!.id), item = inspection?.analysis?.items.find(item => item.execution);
-  expect(item?.execution).toMatchObject({ calls: 2, failures: 1, label: "bash ×2" });
-  expect((await store.toolExecution(root.id))?.sourceRequestId).toBe(request!.id);
-  expect(inspection?.analysis?.metrics.chars.result).toBeLessThan(1000);
-});
-
-it.each([false, true])("子 agent 自动输出沿用分配资源，父 agent 可按 ID 发送，shared=%s", async shared => {
-  const resources = env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner"), { assignedSandboxId } = await resources.list("owner");
-  const resource = shared ? await resources.get("owner", assignedSandboxId) : await resources.create("owner", "image-env", {});
-  if (!resource) throw Error("missing_resource");
-  const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII=", png = Uint8Array.from(atob(data), char => char.charCodeAt(0));
-  const targets: string[] = [], written = new Map<string, Uint8Array>();
-  vi.spyOn(SandboxDO.prototype, "createTempDir").mockImplementation(async function(this: SandboxDO) {
-    targets.push((await this.files()).workspace);
-    return "/work/.codemode/child-image";
-  });
-  vi.spyOn(SandboxDO.prototype, "writeFile").mockImplementation(async function(this: SandboxDO, path, content) {
-    targets.push((await this.files()).workspace);
-    expect(content).toBeInstanceOf(Uint8Array);
-    const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
-    written.set(path, bytes);
-    return { bytes: bytes.length };
-  });
-  vi.spyOn(SandboxDO.prototype, "exportAsset").mockImplementation(async function(this: SandboxDO, path, scope) {
-    targets.push((await this.files()).workspace);
-    const bytes = written.get(path);
-    expect(bytes).toEqual(png);
-    if (!bytes) throw Error("missing_image");
-    return new MediaRepository({ bucket: env.ASSETS, scope }).put({ bytes, name: "child.png", kind: "image" });
-  });
-  let savedPath = "";
-  const { outputs, seen } = twoModels([spawn("截图", shared ? {} : { sandboxId: resource.id }), { text: "已派出" },
-    () => ({ tool: "send_file", args: { sandboxId: resource.id, path: savedPath } })], [
-    { tool: "codemode", args: { code: `image({type:"image",data:${JSON.stringify(data)},mimeType:"image/png"});` } },
-    results => { savedPath = /Image saved to (\/work\/\.codemode\/\S+\.png)/.exec(results.join("\n"))?.[1] ?? ""; return { text: savedPath }; },
-  ]);
-  const { socket, frames } = await connect(sockets);
-  await thread("owner").submit(input(1, "截图后发给我", 10000001));
-  await vi.waitFor(() => expect(outputs.child.length).toBeGreaterThan(0));
-  expect(outputs.child.join("\n")).toContain("Image saved to");
-  reply(socket, (await action(frames, 0, "send_private_msg")).echo);
-  await reports("owner", 1);
-  expect(outputs.child.join("\n")).toContain("Image saved to");
-  expect(seen.child[0]!.tools).not.toContain("send_file");
-  expect(targets).toEqual(Array(3).fill("workspace:" + env.SANDBOX.idFromName(resource.name)));
-  const sub = await onlySubagent("owner");
-  await expect((async () => await thread("owner").subagentWriteFile(sub.id, savedPath, png))()).rejects.toThrow("delegation_denied");
-});
-
-it("子 agent 按资源 ID 路由；省略时继承默认资源，多个子任务可以共用新资源", async () => {
-  await seedPublishSkill();
-  const resources = env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner");
-  const { assignedSandboxId } = await resources.list("owner");
-  const current = (await resources.get("owner", assignedSandboxId))!;
-  const created = await resources.create("owner", "new-cf", { sourceId: current.id });
-  const targets: string[] = [];
-  vi.spyOn(SandboxDO.prototype, "run").mockImplementation(async function(this: SandboxDO) {
-    const files = await this.files(); targets.push(files.workspace);
-    return { status: "committed", persistence: "committed", revision: files.revision, result: { bytes: 4 } };
-  });
-  const clone = vi.spyOn(SandboxDO.prototype, "cloneFrom");
-  twoModels([spawn("默认资源"), { text: "已分配" }, { text: "收到" }, spawn("新资源甲", { sandboxId: created.id }), { text: "已分配" }, { text: "收到" }, spawn("新资源乙", { sandboxId: created.id }), { text: "已分配" }],
-    Array.from({ length: 3 }, (): Step[] => [{ tool: "codemode", args: { code: 'text(await tools.write({path:"marker",content:"same"}));' } }, { text: "已完成" }]).flat());
-  await thread("owner").submit(input(1, "按资源分配三个子任务", 10000001));
-  await reports("owner", 1);
-  await thread("owner").submit(input(2, "分配第二个子任务", 10000001));
-  await reports("owner", 2);
-  await thread("owner").submit(input(3, "分配第三个子任务", 10000001));
-  await reports("owner", 3);
-  const list = await (await syncedView("owner")).subagentList();
-  const ids = await Promise.all(list.map(async sub => (await child("owner", sub.id).status())?.meta.capabilities?.sandboxId));
-  expect(ids.sort()).toEqual([current.id, created.id, created.id].sort());
-  expect(clone).not.toHaveBeenCalled();
-  expect(targets).toEqual([current.name, created.name, created.name].map(name => "workspace:" + env.SANDBOX.idFromName(name)));
-  expect((await env.SANDBOX.getByName(created.name).files()).files).toEqual((await env.SANDBOX.getByName(current.name).files()).files);
-  const shared = list.find(sub => sub.task === "默认资源")!, manifest = await env.SANDBOX.getByName(current.name).files();
-  await expect((async () => await thread("owner").workspaceMergeChild("owner", { childId: shared.id, expectedRevision: manifest.revision, sourceRevision: manifest.revision, paths: ["skills/example/sources.md"] }))()).rejects.toThrow("workspace_shared_resource");
-});
-
-it.each(["remote", "missing"])("旧子任务绑定的 %s ID 禁止回落到 Cloudflare", async kind => {
-  const oldId = "sbx:" + "a".repeat(64);
-  if (kind === "remote") {
-    await runInDurableObject(env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner"), (_instance, state) =>
-      state.storage.put("resource:" + oldId, { kind: "ready",
-        resource: { id: oldId, owner: "owner", kind: "remote", providerId: "remote:test", workspace: "old" } }));
-  }
-  twoModels([spawn("历史任务"), { text: "已派出" }], ["hang"]);
-  await thread("owner").submit(input(1, "分配任务", 10000001));
-  const sub = await onlySubagent("owner");
-  const [{ origin_json }] = await rows<{ origin_json: string }>("owner", "SELECT origin_json FROM subagents WHERE id=?", sub.id);
-  const patched = JSON.parse(origin_json);
-  patched.capabilities = { ...patched.capabilities, sandboxId: oldId };
-  await rows("owner", "UPDATE subagents SET origin_json=? WHERE id=?", JSON.stringify(patched), sub.id);
-  const run = vi.spyOn(SandboxDO.prototype, "run");
-  expect(await thread("owner").validateSubagentAccess(sub.id)).toMatchObject({ capabilities: { sandboxId: oldId, coding: false } });
-  const result = await runInDurableObject(thread("owner"), async instance => {
-    if (!(instance instanceof ThreadDO)) throw new Error("wrong fixture");
-    return (await instance.subagentCoding(sub.id, { kind: "read", operationId: "test", path: "file" })).isError;
-  });
-  expect(result).toBe(true);
-  expect(run).not.toHaveBeenCalled();
-  await thread("owner").syncAdminView("owner");
-  await expect(workspaceView(env, "owner").inspectChild({ childId: sub.id })).rejects.toThrow("workspace_denied");
-  await thread("owner").cancelSubagent(sub.id);
-});
-
-it("Cloudflare 克隆已提交而资源登记中断时，重试使用原快照且不重复导入", async () => {
-  await seedPublishSkill();
-  const resources = env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner");
-  const { assignedSandboxId } = await resources.list("owner");
-  const original = SandboxDO.prototype.cloneFrom;
-  let committedRevision = "";
-  vi.spyOn(SandboxDO.prototype, "cloneFrom").mockImplementationOnce(async function(this: SandboxDO, input) {
-    const result = await original.call(this, input);
-    if (result.ok) committedRevision = result.manifest.revision;
-    throw new Error("interrupted_after_import");
-  });
-  const args = { sourceId: assignedSandboxId };
-  await expect((async () => await resources.create("owner", "recover", args))()).rejects.toThrow("interrupted_after_import");
-  await seedPublishSkill();
-  const recovered = await resources.create("owner", "recover", args);
-  expect((await env.SANDBOX.getByName(recovered.name).files()).revision).toBe(committedRevision);
-  expect(await resources.create("owner", "recover", args)).toEqual(recovered);
-});
-
-it("管理台可分页查看子会话正文与工具记录，且读取不唤醒执行 DO", async () => {
-  const task="需要逐项核对的任务。".repeat(35)+"任务末尾", answer="这是核对后的结果。".repeat(35)+"结果末尾";
-  const ready=gate();
-  const {seen}=twoModels([spawn(task)], [...Array.from({length:6},(): Step=>({tool:"qq_context",args:{}})),{text:answer,after:ready.promise}]);
-  await thread("owner").submit(input(1,"查看子会话",10000001));
-  const sub=await onlySubagent("owner");
-  await vi.waitFor(()=>expect(seen.child).toHaveLength(7));
-  await thread("owner").syncAdminView("owner");
-  await child("owner",sub.id).syncAdminView();
-  const running=await admin("GET","/admin/subagents/"+sub.id+"/history?thread=owner");
-  expect(running.status).toBe(200);
-  const active=await running.json<HistoryPage>();
-  expect([...Errors(C.SubagentConversationSchema,active)]).toEqual([]);
-  expect(active.status).toBe("running");
-  expect(active.syncedAt).toBeGreaterThan(0);
-  ready.open();
-  await reports("owner",1);
-  await thread("owner").syncAdminView("owner");
-  await child("owner",sub.id).syncAdminView();
-  await thread("group:200000001").syncAdminView("group:200000001");
-  const execution=vi.spyOn(ThreadDO.prototype,"syncAdminView").mockRejectedValue(new Error("execution_read_forbidden"));
-  const path="/admin/subagents/"+sub.id+"/history?thread=owner";
-  expect((await admin("GET",path,null)).status).toBe(401);
-  expect((await admin("GET",path+"&cursor=!!!")).status).toBe(400);
-  expect((await admin("GET","/admin/subagents/"+sub.id+"/history")).status).toBe(400);
-  expect((await admin("GET",path.replace("thread=owner","thread=group:200000001"))).status).toBe(404);
-  const entries: HistoryPage["entries"]=[];
-  let cursor: string|undefined;
-  do {
-    const response=await admin("GET",path+(cursor?"&cursor="+encodeURIComponent(cursor):""));
-    expect(response.status).toBe(200);
-    const page=await response.json<HistoryPage>();
-    expect([...Errors(C.SubagentConversationSchema,page)]).toEqual([]);
-    expect(page.status).toBe("done");
-    expect(page.summary).toBeTruthy();
-    if(!cursor){expect(page.entries).toHaveLength(10);expect(page.next).toBeTruthy();}
-    entries.push(...page.entries);cursor=page.next;
-  }while(cursor);
-  expect(new Set(entries.map(entry=>entry.id)).size).toBe(entries.length);
-  const messages=entries.flatMap(entry=>entry.messages);
-  expect(messages.some(message=>message.role==="user"&&message.text.includes(task))).toBe(true);
-  expect(messages.some(message=>message.role==="assistant"&&message.text.includes(answer))).toBe(true);
-  expect(messages.some(message=>message.toolName==="qq_context")).toBe(true);
-  const calls=messages.flatMap(message=>message.toolCalls??[]);
-  expect(calls).toHaveLength(6);
-  expect(calls.every(call=>call.name==="qq_context"&&JSON.parse(call.arguments))).toBe(true);
-  expect(messages.filter(message=>message.toolCalls?.length).every(message=>!message.text.includes("qq_context"))).toBe(true);
-  expect(execution).not.toHaveBeenCalled();
-  execution.mockRestore();
-  await rows("owner","UPDATE subagents SET ended_at=? WHERE id=?",Date.now()-15*86400_000,sub.id);
-  await thread("owner").syncAdminView("owner");
-  expect((await admin("GET",path)).status).toBe(404);
-});
-
-it.each(["subagent", "agent_send"])("%s rejects a different member while the owner child is actually executing", async mode => {
-  const running = gate(), group = "group:200000001";
-  const { seen, outputs } = twoModels([
-    spawn("owner-authorized-task"), { text: "spawned" },
-    (out): Step => mode === "subagent" ? { tool: "subagent", args: { action: "message", id: idOf(out[0]), text: "FOREIGN-INJECTION" } }
-      : { tool: "agent_send", args: { to: "sub:" + group + ":" + idOf(out[0]), text: "FOREIGN-INJECTION" } },
-    { text: "rejected" }, { text: "owner report received" },
-  ], [{ text: "owner-result", after: running.promise }]);
-  await thread(group).submit(input(1, "start", 10000001, 200000001, true));
-  const sub = await onlySubagent(group);
-  await vi.waitFor(() => expect(seen.child).toHaveLength(1));
-  const before = await child(group, sub.id).status();
-  expect(before?.meta.status).toBe("running");
-  try {
-    await thread(group).submit(input(2, "foreign followup", 10000003, 200000001, true));
-    expect(outputs.parent.join("\n")).toContain("agent_child_identity_denied");
-    expect((await child(group, sub.id).status())?.meta.identity).toEqual(before?.meta.identity);
-    await runInDurableObject(child(group, sub.id), (_i, s) => {
-      expect(s.storage.sql.exec("SELECT text FROM inbox WHERE text LIKE '%FOREIGN-INJECTION%'").toArray()).toHaveLength(0);
-    });
-  } finally { running.open(); }
-  const [report] = await reports(group, 1);
-  expect(report?.user_id).toBe("10000001");
-  expect(report?.text).toContain("owner-result");
-  expect(seen.child.every(turn => !turn.user.includes("FOREIGN-INJECTION"))).toBe(true);
 });

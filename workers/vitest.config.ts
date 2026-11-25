@@ -14,10 +14,10 @@ const ALIAS = [
 const TEST_TIMEOUT = 12_000;
 
 export default defineConfig({
-  // 双池架构：node 池运行纯逻辑单测；workers 池保持 isolate: true，靠按业务域整合控制 workerd 启动次数（本机 2 并发、CI 4 并发）。
+  // 双池架构：node 池运行纯逻辑单测；workers 池保持 isolate: true，靠按业务域整合控制 workerd 启动次数（本机 2 并发、CI 3 并发）。
   test: {
     testTimeout: TEST_TIMEOUT,
-    maxWorkers: process.env.CI ? 4 : 2,
+    maxWorkers: process.env.CI ? 3 : 2,
     projects: [
       {
         resolve: { alias: ALIAS },

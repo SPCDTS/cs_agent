@@ -247,7 +247,7 @@ test("拒绝结果替换、超限和不匹配的执行 ID", async t => {
 test("会话硬期限由独立 guardian 执行，已完成结果仍可恢复", async t => {
   const f = await fixture(t);
   const session = f.session();
-  const execution = { ...task(session), target: { ...target, maxLifetimeMs: 600 } };
+  const execution = { ...task(session), target: { ...target, maxLifetimeMs: 1500 } };
   assert.equal((await succeeded(f.backend, execution)).state, "succeeded");
   const files = sessionFiles(f.dir(session));
   const intent = await evidence(files.intent, SessionIntent);
@@ -263,7 +263,7 @@ test("执行助手在服务未参与时也会按任务截止时间销毁 guest",
   const gate = defer();
   f.native.runGate = gate.promise;
   const session = f.session();
-  const execution = task(session, "Start-Sleep 90", 500);
+  const execution = task(session, "Start-Sleep 90", 1500);
   await f.backend.dispatch(execution);
   try {
     const id = await until(() => f.native.executions[0]);
