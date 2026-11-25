@@ -4,7 +4,7 @@ import { DurableObjectSqliteDatabase } from '@earendil-works/pi-durable/storage/
 import { ThreadMcp, type McpAuthority } from '../src/mcp';
 import { MCP_CATALOG_SCHEMA, restoreCatalog } from '../src/mcp/catalog';
 import { serverDigest, toolNames } from '../src/mcp/names';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
@@ -836,4 +836,44 @@ it('call_tool 收紧为只读时放行真实 cua-driver 只读查询与 prompt=f
       } finally { await mcp.close(); }
     });
   } finally { ws.close(1000); }
+});
+
+it('管理台签发并通过真实反向连接兑换，未授权、过期、伪造和轮换后的命令无法下发凭据',async () => {
+  const post = (path:string,headers:Record<string,string>={}) => worker.fetch(new Request(env.PUBLIC_ORIGIN+path,{method:'POST',headers}),adminEnv());
+  expect((await post('/admin/cua/pair')).status).toBe(401);
+  const node = await directoryNode();
+  // 用只实现管理子协议的节点替换探测节点，两者经过同一个真实的 BridgeDO。
+  const ws = (await worker.fetch(new Request(env.PUBLIC_ORIGIN+'/mcp/reverse/cua',{headers:{Upgrade:'websocket',Authorization:bearer}}),env)).webSocket!;
+  const claims: Record<string,string>[] = [];
+  ws.addEventListener('message',ev => {
+    const frame = JSON.parse(String(ev.data));
+    if (frame.close || frame.message.method !== 'cs-agent/cua/pair') return;
+    const {params,id} = frame.message;
+    if (params.action === 'claim') claims.push(params);
+    const result = params.action === 'ready' ? {status:'ready'} :
+      {status:'ok',machineId:'paired-1',relay:'wss://relay.example.test',registration:'a'.repeat(64),deviceToken:'b'.repeat(64)};
+    ws.send(JSON.stringify({session:frame.session,message:{jsonrpc:'2.0',id,result}}));
+  });
+  ws.accept();
+  try {
+    const issued = await post('/admin/cua/pair',{Authorization:'Bearer synthetic-admin'});
+    expect(issued.status).toBe(200);
+    const {ticket,expires} = await issued.json<{ticket:string,expires:number}>();
+    const redeem = (t:string) => post('/cua/join/claim',{Authorization:'Bearer '+t,'X-Cua-Client':'c'.repeat(64)});
+    const forged = ticket.slice(0,-1)+(ticket.endsWith('a') ? 'b' : 'a');
+    expect((await redeem(forged)).status).toBe(401);
+    const clock = vi.spyOn(Date,'now').mockReturnValue(expires);
+    try { expect((await redeem(ticket)).status).toBe(401); }
+    finally { clock.mockRestore(); }
+    expect(claims).toHaveLength(0);
+    const response = await redeem(ticket);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect((await response.text()).trim().split('\n')).toEqual(['wss://relay.example.test','paired-1','a'.repeat(64),'b'.repeat(64)]);
+    expect(claims).toHaveLength(1);
+    expect(claims[0]!.client).not.toBe('c'.repeat(64));
+    await node.registry.mcpCredentialPut(id,node.ready.revision,{Authorization:'Bearer '+'q'.repeat(43)});
+    expect((await redeem(ticket)).status).not.toBe(200);
+    expect(claims).toHaveLength(1);
+  } finally { ws.close(); node.ws.close(); }
 });

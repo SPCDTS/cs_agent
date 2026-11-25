@@ -128,6 +128,8 @@ export function showLogin(message: string) {
   $("app").hidden = true;
   $("login").hidden = false;
   $("login-message").textContent = message;
+  $("cua-pair-command").value = "";
+  $("cua-pair-result").hidden = true;
   $("cua-setup-token").value = "";
   $("login-token").value = "";
   $("login-token").focus();

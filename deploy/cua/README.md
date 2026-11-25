@@ -62,7 +62,29 @@ tls {
 
 这组数据可用于估算少量目录设备的常驻开销。该样本的并发规模为三台，未涵盖桥、真实截图、大目录和同机其他业务的峰值。扩容时先启动实际要用的桥和同机服务，按设备逐步增加并发，记录代表性请求期间的最低 `MemAvailable`。可用 `systemctl show cua-relay@18181 -p MainPID -p MemoryCurrent -p MemoryPeak -p LimitNOFILE` 检查一个实例，再用对应 PID 的 `/proc/<PID>/smaps_rollup` 和 `/proc/<PID>/fd/` 核对 PSS 和文件描述符。用同机业务与桥在高峰期间的实测波动预留余量，再决定是否增加下一台。
 
-## 登记一台设备
+## 管理台添加设备
+
+VPS 首次启用管理台配对后，管理员只需在「权限与运维 → Cua 设备分配」选择 macOS 或 Windows x64，点「添加设备」，把命令私下交给设备用户。用户在 Mac 终端或 Windows PowerShell 运行命令，保持窗口打开，管理员刷新设备列表即可按主机名分配会话。命令仅下载固定版本的原生客户端并核对 SHA-256，使用当前用户身份运行。Windows 使用组织允许的 PowerShell 脚本执行策略。
+
+配对码由 cs-agent 签发，十分钟内可在一台设备上兑换。VPS 在兑换时创建该设备专属的两枚随机凭据。设备通过 HTTPS 领取凭据，之后始终使用原生 `cua-spacesd join` 连接 Relay。重复执行同一命令可以恢复传输失败的领取。连接成功后可用终端给出的本机命令重连，配对码到期也不影响重连。Mac 的本地文件位于 `~/Library/Application Support/cs-agent/cua/`，Windows 文件位于 `%LOCALAPPDATA%\cs-agent\cua\`。
+
+### 首次配置 VPS 配对入口
+
+1. 安装本版本的反向桥 bundle 和 `cua-directory-bridge.service`，按「安装控制机」部署原生 `/usr/local/bin/cua`、`/usr/local/bin/cua-relay` 与目录 daemon。旧版本的反向桥仍可供既有设备使用，管理台签发时会提示升级。
+2. 以下命令在 VPS 上生成 Caddy 的三个配置片段。先确认 19101–19108 和 19201–19208 这两段回环端口没有其他用途，并为此目录保留它们。
+
+   ```sh
+   install -d -m 0755 /etc/caddy/cua-pair
+   for section in servers join directory; do
+     node /opt/cs-agent/cua/reverse-mcp-bridge.cjs --print-pair-caddy "$section" > "/etc/caddy/cua-pair/$section.caddy"
+   done
+   ```
+3. 在 Caddyfile 全局选项的花括号内加入 `import /etc/caddy/cua-pair/servers.caddy`。在 Relay 公网站点的兜底 `handle` 前加入 `import /etc/caddy/cua-pair/join.caddy`。在所有站点之外加入 `import /etc/caddy/cua-pair/directory.caddy`。三个文件复用本仓库 Caddyfile 中的 `(join)` 和 `(directory)` 定义，升级旧配置时先补齐这两个片段。校验并重载 Caddy，沿用既有证书策略和 443/TCP 入口。
+4. 将 `CUA_PAIR_RELAY_URL=wss://relay.example.org` 加入原有的 `/etc/cs-agent/cua/bridge.env`（换成实际域名）。执行 `systemctl daemon-reload` 和 `systemctl restart cua-directory-bridge`。此后只有实际兑换的设备才启动原生 Relay。桥进程以 `cua-directory` 身份写入专用状态，在设备握手成功后调用原生 `cua spaces add`。
+
+默认预留 8 个名额。扩大容量时，可在生成三个配置片段的命令环境和桥的环境文件中设置相同的 `CUA_PAIR_CAPACITY`，如 `16`。每个端口段最多容纳 100 台，扩容前检查新增端口是否空闲，重新生成片段、重载 Caddy 并重启桥，保留既有槽位。每台设备独占固定的 Relay 和回环目录端口。默认只开放设备发现和 Driver 工具查询。按下文「为设备启用执行能力」在目标设备的回环站点显式添加执行路由。请备份权限为 0700 的 `/var/lib/cs-agent-cua-pairing` 目录及 Cua 目录状态。已分配的端口永久保留，恢复备份时应与已有分配使用同一组身份。若丢失身份数据，应先停用配对、轮换桥凭据使旧分配失效，再重建。退役单台配对设备时先撤销会话分配，在其 `paired-N` 状态目录内创建空的 `retired` 文件，桥会停止该 Relay。再按「撤销与轮换」移除目录条目，保留槽位目录防止旧授权漂移。
+
+## 手动登记一台设备
 
 在目标设备的原生环境内运行 `cua-spacesd 0.17.2` 的 `join`。以下是 macOS 示例，Windows 使用同一组参数，把文件路径替换为受该用户 ACL 保护的绝对路径。join 以前台进程运行，持续连接需交给该设备已有的服务管理器。为机器 ID 文件选择可写且可持久化的路径。
 

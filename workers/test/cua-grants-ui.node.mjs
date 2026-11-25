@@ -253,3 +253,27 @@ test('新登录和登出清理不等待旧登录的改名请求',async t => {
   gate.resolve(); await stale; await page.settle();
   assert.equal(list.querySelector('strong').textContent,'新登录');
 });
+
+test('配对命令跟随目标平台，仅放在当前登录页',async t => {
+  const page = mountDom(ADMIN_PAGE_HTML,{token:'synthetic-admin'}), ui = await bundleModule('browser/cua-grants.ts');
+  const ticket = 'a'.repeat(180), expires = Date.now()+60_000;
+  t.mock.method(globalThis,'fetch',async (path,init) => {
+    if (path === '/admin/cua/devices') return Response.json({configured:true,enabled:true,online:true,available:true,revision:'test',devices:[],grants:[],threads:[]});
+    assert.equal(path,'/admin/cua/pair'); assert.equal(init.method,'POST');
+    return Response.json({ticket,expires,origin:'https://agent.example.test'});
+  });
+  const $ = id => page.document.getElementById(id);
+  ui.initCuaGrants(); await ui.loadCuaGrants();
+  assert.equal($('cua-pair-form').hidden,false);
+  for (const [system,file] of [['mac','mac.sh'],['windows','windows.ps1']]) {
+    $('cua-pair-platform').value = system;
+    $('cua-pair-platform').dispatchEvent(new page.window.Event('change'));
+    assert.equal($('cua-pair-command').value,'');
+    $('cua-pair-issue').click(); await page.settle();
+    assert.equal($('cua-pair-result').hidden,false);
+    assert.ok($('cua-pair-command').value.includes('/cua/join/'+file));
+    assert.ok($('cua-pair-command').value.includes(ticket));
+    assert.ok([...page.storage.values()].every(value => !value.includes(ticket)));
+  }
+  $('cua-pair-platform').dispatchEvent(new page.window.Event('change'));
+});

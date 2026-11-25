@@ -7,6 +7,9 @@ Wants=network-online.target
 [Service]
 User=cua-directory
 Group=cua-directory
+StateDirectory=cs-agent-cua-pairing
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/cs-agent-cua
 EnvironmentFile=/etc/cs-agent/cua/bridge.env
 Environment=CUA_SOCKET_PATH=/run/cs-agent-cua/cua.sock
 ExecStart=/usr/bin/node /opt/cs-agent/cua/reverse-mcp-bridge.cjs

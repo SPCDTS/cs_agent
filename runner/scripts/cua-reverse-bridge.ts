@@ -1,8 +1,25 @@
+import { accessSync, constants } from 'node:fs';
+import { PairingSlots, pairingCaddy, startPairedRelays } from '../src/cua-pairing.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import { registration, serveConnection } from '../src/cua-reverse-bridge.ts';
 
+if (process.argv[2] === '--print-pair-caddy') {
+  console.log(pairingCaddy(process.argv[3] ?? '',process.env.CUA_PAIR_CAPACITY));
+  process.exit(0);
+}
 const {endpoint,token,socketPath} = registration(process.env);
 const controller = new AbortController();
+let pairing: PairingSlots | undefined;
+if (process.env.CUA_PAIR_RELAY_URL) {
+  try {
+    for (const binary of ['/usr/local/bin/cua','/usr/local/bin/cua-relay']) accessSync(binary,constants.X_OK);
+    pairing = new PairingSlots('/var/lib/cs-agent-cua-pairing',process.env.CUA_PAIR_RELAY_URL,process.env.CUA_PAIR_CAPACITY);
+    startPairedRelays(pairing,socketPath,controller.signal);
+  } catch {
+    pairing = undefined;
+    console.error('Cua 管理台配对未启用，请核对本机组件、Relay 地址和状态目录。');
+  }
+}
 const stop = () => controller.abort();
 process.once('SIGTERM',stop);
 process.once('SIGINT',stop);
@@ -13,7 +30,7 @@ async function run() {
   let retryMs = 1000;
   while (!controller.signal.aborted) {
     const socket = new Socket(endpoint,{headers:{Authorization:'Bearer ' + token}});
-    const shutdown = serveConnection(socket as unknown as WebSocket,socketPath);
+    const shutdown = serveConnection(socket as unknown as WebSocket,socketPath,pairing);
     let openedAt = 0;
     await new Promise<void>(resolve => {
       const finish = () => {

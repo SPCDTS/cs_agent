@@ -1,3 +1,4 @@
+import { issuePairing } from '../cua/pairing';
 import { Check } from 'typebox/value';
 import { CuaDeviceId, CuaGrantInput, CuaNameInput, CuaScope, CuaSetupInput, cuaCards, deviceAlias, type CuaCard } from '../cua/contracts';
 import type { Env } from '../env';
@@ -35,6 +36,7 @@ async function directory(env: Env) {
 }
 
 export const CUA_ROUTES: AdminRoute[] = [
+  {method:'POST',path:'/admin/cua/pair',handle:({env}) => issuePairing(env)},
   {method:'PUT',path:'/admin/cua/setup',handle:async ({env,request}) => {
     const {token} = await readAdminBody(request,CuaSetupInput,{maxBytes:1024});
     try {
