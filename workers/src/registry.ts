@@ -22,7 +22,7 @@ import type { Change, CloudflareInventory } from './cloudflare/contracts';
 import { CloudflareGrant } from './cloudflare/cloudflare';
 import { retirePairedDevices } from './mcp/retire-paired-devices';
 import { CuaGrants } from './cua/grants';
-import type { CuaGrantInput, CuaNameInput } from './cua/contracts';
+import type { CuaDeviceGrantInput, CuaGrantInput, CuaNameInput } from './cua/contracts';
 import type { Static } from 'typebox';
 import { connectionDigest } from "./mcp/names";
 
@@ -134,6 +134,7 @@ export class RegistryDO extends DurableObject<Env> {
   cuaNames(ids:string[],serverRevision:string) { return this.cuaGrants.names(ids,serverRevision); }
   cuaRename(input:CuaNameInput,verifiedRevision:string) { return this.cuaGrants.rename(input,verifiedRevision); }
   cuaGrantsPut(input:CuaGrantInput, verifiedRevision?:string) { return this.cuaGrants.replace(input,verifiedRevision); }
+  cuaDeviceGrantsPut(input:CuaDeviceGrantInput, verifiedRevision?:string) { return this.cuaGrants.replaceForDevice(input,verifiedRevision); }
   cuaSetup(token: string) { return this.lock('cua:setup', () => this.mcpServers.setupCua(token)); }
   cuaSetupState() { return this.mcpServers.cuaSetupState(); }
   cuaPendingSetup() { return this.mcpServers.cuaSetupState() === 'pending' ? this.mcpServers.get('cua') : null; }

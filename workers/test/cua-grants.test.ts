@@ -877,3 +877,50 @@ it('管理台签发并通过真实反向连接兑换，未授权、过期、伪�
     expect(claims).toHaveLength(1);
   } finally { ws.close(); node.ws.close(); }
 });
+
+it('按设备原子保存授权会保留未变会话的 grant_id，且离线或停用时仅可撤销',async () => {
+  const {ws,registry,ready,accessRevision} = await directoryNode();
+  const secondScope = 'private:654321', thirdScope = 'group:789012';
+  const putDevice = (input:unknown, authorized = true) => worker.fetch(new Request(env.PUBLIC_ORIGIN+'/admin/cua/device-grants',{
+    method:'PUT',
+    headers:authorized ? {Authorization:'Bearer synthetic-admin','Content-Type':'application/json'} : {},
+    body:JSON.stringify(input),
+  }),adminEnv());
+  try {
+    expect((await putDevice({space:device,scopes:[scope],expectedRevision:'any'},false)).status).toBe(401);
+
+    const initial = await (await admin('devices')).json<CuaDirectory>();
+    expect(initial.tools).toEqual(fixtureTools);
+
+    expect((await putDevice({space:device,scopes:[scope,secondScope],expectedRevision:'stale'})).status).toBe(409);
+    expect((await putDevice({space:'direct:missing.test:8080',scopes:[scope],expectedRevision:initial.revision})).status).toBe(400);
+
+    const granted = await putDevice({space:device,scopes:[scope,secondScope],expectedRevision:initial.revision});
+    expect(granted.status).toBe(200);
+    const rev1 = (await granted.json<{revision:string}>()).revision;
+    const versionsBefore = await registry.cuaGrantVersions(scope,accessRevision);
+    expect(Object.keys(versionsBefore)).toEqual([device]);
+
+    // 新增一个会话并撤销 secondScope，保留的 scope 应延续原有的 grant_id。
+    const updated = await putDevice({space:device,scopes:[scope,thirdScope],expectedRevision:rev1});
+    expect(updated.status).toBe(200);
+    const rev2 = (await updated.json<{revision:string}>()).revision;
+    expect(await registry.cuaGrantVersions(scope,accessRevision)).toEqual(versionsBefore);
+
+    const listed = await (await admin('devices')).json<CuaDirectory>();
+    expect(listed.devices.find(d => d.id === device)?.scopes.sort()).toEqual([scope,thirdScope].sort());
+
+    // 节点断开后禁止新增，仍可撤销已有会话。
+    ws.close(1000);
+    expect((await putDevice({space:device,scopes:[scope,secondScope,thirdScope],expectedRevision:rev2})).status).toBe(503);
+    const revoked = await putDevice({space:device,scopes:[scope],expectedRevision:rev2});
+    expect(revoked.status).toBe(200);
+    expect((await revoked.json<{grants:CuaDirectory['grants']}>()).grants).toEqual([{scope,spaces:[device]}]);
+
+    // 停用 Cua 服务后仍可清空残留授权。
+    await registry.mcpServerDisable(id,ready.revision);
+    const rev3 = (await registry.cuaGrantsList()).revision;
+    expect((await putDevice({space:device,scopes:[],expectedRevision:rev3})).status).toBe(200);
+    expect((await registry.cuaGrantsList()).grants).toEqual([]);
+  } finally { try { ws.close(1000); } catch {} }
+});

@@ -366,30 +366,40 @@
   </section>
 
   <section class="card" id="cua-grants-section">
-    <div class="section-head"><h2 class="h2">设备按会话分配（Cua）</h2></div>
+    <div class="section-head">
+      <h2 class="h2">Cua 设备与会话授权</h2>
+      <span class="muted small">主人默认可使用全部设备；在设备卡中勾选会话即可免审使用已启用的 Cua 工具</span>
+      <div class="grow"></div>
+      <button type="button" class="btn" id="cua-grant-reload">刷新设备与分配</button>
+      <button type="button" class="btn primary" id="cua-pair-add" disabled>+ 添加设备</button>
+    </div>
     <div class="stack">
-      <p class="muted small">主人默认可使用全部设备。勾选设备后，该群聊或私聊及其获授权的子任务可在所选设备上免审使用已启用的 Cua 工具（Shell 命令、后台任务、写文件与桌面操作）。</p>
-      <form id="cua-setup-form" class="stack" hidden>
+      <form id="cua-setup-form" class="cua-setup-card stack" hidden>
         <p class="muted small">首次启用后，cs-agent 将在 VPS 桥连接时检测并启用设备目录、Shell、后台任务、文件写入和桌面工具。</p>
         <div class="row"><label for="cua-setup-token">VPS 桥令牌</label><input id="cua-setup-token" type="password" required minlength="32" maxlength="256" autocomplete="new-password" spellcheck="false">
           <button id="cua-setup-enable" type="submit" class="btn primary">启用 Cua</button></div>
       </form>
-      <div id="cua-pair-form" class="stack" hidden>
-        <div class="row"><label for="cua-pair-platform">新设备系统</label>
-          <select id="cua-pair-platform"><option value="mac">macOS</option><option value="windows">Windows x64</option></select>
-          <button id="cua-pair-issue" type="button" class="btn">添加设备</button></div>
-        <div id="cua-pair-result" class="stack" hidden>
-          <label for="cua-pair-command" id="cua-pair-label">在目标设备上运行</label>
-          <textarea id="cua-pair-command" readonly rows="4" spellcheck="false"></textarea>
-          <div><button id="cua-pair-copy" type="button" class="btn">复制命令</button></div>
+      <div id="cua-relay-card" class="cua-relay-card">
+        <div class="row">
+          <span id="cua-relay-pill" class="pill neutral">正在检测 VPS Relay…</span>
+          <span id="cua-bridge-url" class="mono muted small" hidden></span>
+          <button type="button" class="btn compact" id="cua-bridge-copy" hidden>复制地址</button>
         </div>
+        <div id="cua-relay-tools" class="row" hidden></div>
+        <div class="cua-kpi-grid">
+          <div class="cua-kpi"><span class="muted small">在线设备</span><strong id="cua-stat-online">0 / 0</strong></div>
+          <div class="cua-kpi"><span class="muted small">待接入</span><strong id="cua-stat-pending">0</strong></div>
+          <div class="cua-kpi"><span class="muted small">已生效授权</span><strong id="cua-stat-grants">0</strong></div>
+          <div class="cua-kpi"><span class="muted small">可分配会话</span><strong id="cua-stat-threads">0</strong></div>
+        </div>
+        <p class="muted small cua-status-note" id="cua-grant-status" role="status"></p>
       </div>
-      <p id="cua-bridge-url" class="muted small" hidden></p>
-      <div class="row"><label for="cua-grant-scope">会话</label><select id="cua-grant-scope"><option value="">选择群聊或私聊</option></select>
-        <button type="button" class="btn" id="cua-grant-reload">刷新设备与分配</button></div>
-      <div class="stack" id="cua-grant-devices"></div>
-      <p class="muted small" id="cua-grant-status" role="status"></p>
-      <div><button type="button" class="btn primary" id="cua-grant-save" disabled>保存分配</button></div>
+      <div id="cua-toolbar" class="cua-toolbar">
+        <div id="cua-filter-tabs" class="row"></div>
+        <div class="grow"></div>
+        <input id="cua-search" type="search" class="search-sm" placeholder="搜索设备名称、Space ID、系统或会话…">
+      </div>
+      <div id="cua-grant-devices" class="cua-device-grid"></div>
     </div>
   </section>
   <section class="card" id="mcp-access-section">

@@ -1,5 +1,5 @@
 import { Check } from 'typebox/value';
-import { CuaGrantInput, CuaNameInput, CuaScope, type CuaGrantList } from './contracts';
+import { CuaDeviceGrantInput, CuaGrantInput, CuaNameInput, CuaScope, type CuaGrantList } from './contracts';
 
 /** 配置和授权共用 Registry SQLite。连接变化与清退旧授权在同一次 SQL 写入中生效。 */
 export class CuaGrants {
@@ -110,6 +110,29 @@ export class CuaGrants {
         if (existing !== input.spaces.length) return {status:'invalid' as const};
       }
       sql.exec('DELETE FROM cua_device_grants WHERE scope=? AND space_id NOT IN (SELECT value FROM json_each(?))',input.scope,spaces);
+      sql.exec("UPDATE mcp_server_meta SET value=? WHERE key='cua_grants_revision'",crypto.randomUUID());
+      return {status:'ok' as const,...this.list()};
+    });
+  }
+
+  replaceForDevice(input: CuaDeviceGrantInput, verifiedRevision?: string) {
+    if (!Check(CuaDeviceGrantInput,input)) return {status:'invalid' as const};
+    return this.storage.transactionSync(() => {
+      if (this.revision() !== input.expectedRevision) return {status:'conflict' as const};
+      const sql = this.storage.sql;
+      const scopes = JSON.stringify(input.scopes);
+      if (verifiedRevision !== undefined) {
+        if (this.serverRevision() !== verifiedRevision) return {status:'conflict' as const};
+        const now = Date.now();
+        for (const scope of input.scopes) sql.exec(`INSERT OR IGNORE INTO cua_device_grants(scope,space_id,server_revision,updated_at,grant_id)
+          VALUES(?,?,?,?,lower(hex(randomblob(16))))`,scope,input.space,verifiedRevision,now);
+      } else {
+        const serverRev = this.serverRevision(false) ?? '';
+        const existing = sql.exec<{n:number}>(`SELECT COUNT(*) AS n FROM cua_device_grants
+          WHERE space_id=? AND server_revision=? AND scope IN (SELECT value FROM json_each(?))`,input.space,serverRev,scopes).one().n;
+        if (existing !== input.scopes.length) return {status:'invalid' as const};
+      }
+      sql.exec('DELETE FROM cua_device_grants WHERE space_id=? AND scope NOT IN (SELECT value FROM json_each(?))',input.space,scopes);
       sql.exec("UPDATE mcp_server_meta SET value=? WHERE key='cua_grants_revision'",crypto.randomUUID());
       return {status:'ok' as const,...this.list()};
     });
