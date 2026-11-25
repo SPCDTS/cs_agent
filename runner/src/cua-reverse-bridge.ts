@@ -10,7 +10,7 @@ import { CallToolRequestSchema, CallToolResultSchema, ErrorCode, JSONRPCMessageS
 const localMcp = new URL('http://localhost/mcp');
 const bytes = 12 * 1024 * 1024;
 const frameBytes = bytes + 4096;
-const requestBytes = 300 * 1024;
+const requestBytes = 700 * 1024;
 const maxImageBytes = 4 * 1024 * 1024;
 const maxErrorTextLength = 4000;
 const sessionId = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -79,7 +79,7 @@ const bridgeTools: Record<string,Tool> = {
     inputSchema:{type:'object',properties:{
       space:spaceProperty,
       path:{type:'string',minLength:1,maxLength:4096},
-      content:{type:'string',maxLength:200000},
+      content:{type:'string',maxLength:262144},
     },required:['space','path','content'],additionalProperties:false}, annotations:{readOnlyHint:false},
   },
   call_tool: {
@@ -241,7 +241,7 @@ function parseToolArgs(name: string, args: Record<string, unknown>): Record<stri
       return parseJobArgs(space, args, keys);
     case 'space_write':
       if (keys.length !== 3 || !nonEmptyText(args.path, 4096) || typeof args.content !== 'string'
-          || args.content.length > 200000 || Buffer.byteLength(args.content, 'utf8') > 256 * 1024) return;
+          || args.content.length > 262144 || Buffer.byteLength(args.content, 'utf8') > 256 * 1024) return;
       return { space, path: args.path, content: args.content };
     case 'call_tool':
       if (!keys.every(k => ['space', 'service', 'tool', 'arguments'].includes(k)) || args.service !== 'driver') return;

@@ -101,7 +101,7 @@ http://127.0.0.1:18281 {
 | --- | --- | --- |
 | `space_bash` | 在设备运行任意 Shell 命令（Linux/macOS `/bin/sh -c`，Windows `cmd.exe /C`），默认 30s、最长 50s | `timeout` 在 bridge/Worker 内强限 1–50s；超长命令请改用 `space_job` |
 | `space_job` | 后台长任务管理（`start`/`status`/`logs`/`cancel`/`list`） | **上游仅支持 Linux/macOS**（Windows 由上游拒绝）；已移除跨线程通知参数 `notify`/`wake` |
-| `space_write` | 原子写文本到指定绝对路径并自动创建父目录（底层走 `FilesystemService` 上传） | 单次 `content` ≤ 200,000 字符且 UTF-8 ≤ 256 KiB |
+| `space_write` | 原子写文本到指定绝对路径并自动创建父目录（底层走 `FilesystemService` 上传） | 单次 `content` UTF-8 ≤ 256 KiB |
 | `call_tool` | 透传 `service="driver"` 的完整桌面工具与参数（查询、截图、点击、键入、窗口控制等） | 返回的截图（PNG/JPEG/WebP/GIF）经魔数校验并自动存入当前会话媒体库，给出 `imageId`/`imageIds` |
 
 先在管理台核对已获分配的群聊和私聊，再为 `cua` **重新检测（probe）并启用**所需工具。如果从仅开放目录/只读窗口的旧版本升级，未重新检测直接启用 `space_bash` 或完整 `call_tool` 会返回 `probe_required`。重新检测新契约后启用即可；管理员也可随时为 `call_tool` 勾选「仅允许只读桌面查询」或为 `space_job` 勾选「仅允许查询后台任务」，将已有授权收紧回只读模式（并自动使旧子任务快照失效）。被动事件、跨会话 `agent` 回合及定时任务不可调用上述设备工具。

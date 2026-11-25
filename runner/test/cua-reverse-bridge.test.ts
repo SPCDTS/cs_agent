@@ -327,7 +327,7 @@ test('开放完整 6 个桥工具，校验参数与大载荷写入并过滤图�
     ['space_bash',{command:'pwd'}],
     ['space_job',{action:'list'}],
     ['space_write',{path:'/tmp/x',content:'ok'}],
-    ['call_tool',{service:'driver',tool:'screenshot'}],
+    ['call_tool',{service:'driver',tool:'get_desktop_state'}],
   ] as const) {
     assert.equal((await call(name,{...args,space:'direct:unknown:18181'})).error.data.reason,'space_not_registered');
   }
@@ -348,18 +348,26 @@ test('开放完整 6 个桥工具，校验参数与大载荷写入并过滤图�
   assert.ok((await call('space_job',{space,action:'cancel',job:'job-1'})).result);
   assert.ok((await call('space_job',{space,action:'list'})).result);
 
-  // space_write 小文本与 > 32 KiB 大载荷（验证抬高后的 requestBytes）
+  // space_write 小文本、满 256 KiB UTF-8 与高转义大载荷（验证抬高后的 requestBytes）
   const smallWrite = await call('space_write',{space,path:'/tmp/hello.txt',content:'hello'});
   assert.equal(smallWrite.result.content[0].text,'wrote 5 chars to /tmp/hello.txt');
   const bigWrite = await call('space_write',{space,path:'/tmp/large.txt',content:largeContent});
   assert.equal(bigWrite.result.content[0].text,`wrote ${largeContent.length} chars to /tmp/large.txt`);
+  const full256KiB = 'a'.repeat(262144);
+  const fullWrite = await call('space_write',{space,path:'/tmp/256k.txt',content:full256KiB});
+  assert.equal(fullWrite.result.content[0].text,'wrote 262144 chars to /tmp/256k.txt');
+  const escaped256KiB = '"\n'.repeat(131072);
+  assert.equal(Buffer.byteLength(escaped256KiB, 'utf8'), 262144);
+  assert.ok(Buffer.byteLength(JSON.stringify({space,path:'/tmp/esc.txt',content:escaped256KiB}), 'utf8') > 512 * 1024);
+  const escapedWrite = await call('space_write',{space,path:'/tmp/esc.txt',content:escaped256KiB});
+  assert.equal(escapedWrite.result.content[0].text,'wrote 262144 chars to /tmp/esc.txt');
 
   // call_tool 通用调用：默认空 arguments、保留图片与 structuredContent、剔除 _meta
-  const shot = await call('call_tool',driverArgs('screenshot'));
-  assert.deepEqual(seen.at(-1)?.args,{space,service:'driver',tool:'screenshot',arguments:{}});
+  const shot = await call('call_tool',driverArgs('get_desktop_state'));
+  assert.deepEqual(seen.at(-1)?.args,{space,service:'driver',tool:'get_desktop_state',arguments:{}});
   assert.equal((shot.result as {_meta?:unknown})._meta,undefined);
-  assert.deepEqual(shot.result.content,[{type:'text',text:'called:screenshot'},png,jpg]);
-  assert.deepEqual(shot.result.structuredContent,{ok:true,tool:'screenshot',echoArgs:{}});
+  assert.deepEqual(shot.result.content,[{type:'text',text:'called:get_desktop_state'},png,jpg]);
+  assert.deepEqual(shot.result.structuredContent,{ok:true,tool:'get_desktop_state',echoArgs:{}});
 
   const click = await call('call_tool',driverArgs('click',{x:100,y:200,button:'left'}));
   assert.deepEqual(click.result.structuredContent,{ok:true,tool:'click',echoArgs:{x:100,y:200,button:'left'}});

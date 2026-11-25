@@ -221,8 +221,17 @@ export class ThreadMcp {
     const callerScope = (authority: McpAuthority) => mcpCallerScope(authority, this.options.callerNamespace ?? authority.scope);
     try {
       if (!await authorized()) { classification = "denied"; return mcpFailure(classification); }
-      const owned = boundedJson(args, this.config.limits.argumentBytes, this.config.limits.schemaDepth * 3 + 3);
-      if (owned === null || typeof owned !== 'object' || Array.isArray(owned) || !input.check(owned)) return mcpFailure("invalid_arguments");
+      let owned;
+      try {
+        owned = boundedJson(args, this.config.limits.argumentBytes, this.config.limits.schemaDepth * 3 + 3);
+      } catch {
+        classification = "invalid_arguments";
+        return mcpFailure(classification);
+      }
+      if (owned === null || typeof owned !== 'object' || Array.isArray(owned) || !input.check(owned)) {
+        classification = "invalid_arguments";
+        return mcpFailure(classification);
+      }
       inputBytes = jsonBytes(owned);
       return await this.queued(entry, context.abortSignal, async signal => {
         if (!await authorized() || !await this.current(entry)) { classification = "denied"; return mcpFailure(classification); }

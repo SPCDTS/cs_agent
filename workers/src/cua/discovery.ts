@@ -14,10 +14,13 @@ import { Card, CuaDeviceId, CuaScope, cuaCards, deviceAlias } from './contracts'
 
 export const cuaTools = ['list_spaces', 'list_tools', 'space_bash', 'space_job', 'space_write', 'call_tool'] as const;
 const CUA_DRIVER_READ_ONLY_TOOLS = new Set([
-  'list_windows', 'get_window_state', 'get_desktop_state', 'screenshot', 'take_screenshot',
-  'get_screen_size', 'get_cursor_position', 'list_displays', 'get_clipboard',
-  'get_accessibility_tree', 'list_apps', 'check_permissions', 'get_config',
-  'debug_window_info', 'health_report',
+  'list_windows', 'list_apps', 'list_sessions',
+  'get_window_state', 'get_desktop_state', 'get_browser_state',
+  'get_screen_size', 'get_cursor_position', 'get_accessibility_tree',
+  'get_config', 'get_session', 'get_guide',
+  'get_agent_cursor_state', 'get_recording_state',
+  'clipboard_read', 'parse_visual_regions', 'verify_state', 'zoom',
+  'debug_window_info', 'health_report', 'check_for_update',
 ]);
 export function isCuaDeviceOperation(name: string) {
   return name === 'space_bash' || name === 'space_job' || name === 'space_write' || name === 'call_tool';
@@ -29,7 +32,12 @@ export function isCuaReadOnlyTool(name: string) {
 export function cuaCallIsReadOnly(name: string, args: Record<string, unknown>) {
   if (isCuaReadOnlyTool(name)) return true;
   if (name === 'space_job') return args.action === 'list' || args.action === 'status' || args.action === 'logs';
-  if (name === 'call_tool') return typeof args.tool === 'string' && CUA_DRIVER_READ_ONLY_TOOLS.has(args.tool);
+  if (name === 'call_tool') {
+    if (typeof args.tool !== 'string') return false;
+    if (CUA_DRIVER_READ_ONLY_TOOLS.has(args.tool)) return true;
+    // check_permissions 默认会弹出系统授权对话框，仅明确传 prompt=false 时才是纯只读查询。
+    return args.tool === 'check_permissions' && isPlainRecord(args.arguments) && args.arguments.prompt === false;
+  }
   return false;
 }
 export function cuaSubject(a: McpAuthority) {
@@ -48,7 +56,7 @@ const bashQuery = Type.Object({
   timeout: Type.Optional(Type.Integer({minimum:1, maximum:50})),
 }, {additionalProperties:false});
 const writeQuery = Type.Object({
-  space: CuaDeviceId, path: Type.String({minLength:1, maxLength:4096}), content: Type.String({maxLength:200000}),
+  space: CuaDeviceId, path: Type.String({minLength:1, maxLength:4096}), content: Type.String({maxLength:262144}),
 }, {additionalProperties:false});
 const driverCallQuery = Type.Object({
   space: CuaDeviceId, service: Type.Literal('driver'),

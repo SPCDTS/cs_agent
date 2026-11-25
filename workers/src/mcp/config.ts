@@ -15,7 +15,7 @@ const Limits = Type.Object({
 export const DEFAULT_MCP_LIMITS = Object.freeze({
   connectMs: 10_000, callMs: 60_000, connections: 16, queuedPerConnection: 16, idleMs: 600_000,
   catalogTtlMs: 300_000, maxPages: 20, maxTools: 200, catalogBytes: 2_097_152, schemaBytes: 65_536,
-  schemaDepth: 64, visibleTools: 64, visibleSchemaBytes: 524_288, argumentBytes: 262_144,
+  schemaDepth: 64, visibleTools: 64, visibleSchemaBytes: 524_288, argumentBytes: 655_360,
   messageBytes: 12_582_912, structuredBytes: 262_144, closePerConnectionMs: 3000,
 });
 export type McpLimits = { [K in keyof typeof DEFAULT_MCP_LIMITS]: number };
