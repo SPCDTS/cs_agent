@@ -45,7 +45,7 @@ export class RegistryDO extends DurableObject<Env> {
   private alertDrain?: Promise<void>;
   private readonly vault = new TokenVault(this.env.OAUTH_STORE_KEY);
   private readonly httpCredentials = new SharedCredentials(this.ctx.storage.sql, this.vault);
-  private readonly mcpServers = new McpServerStore(this.ctx.storage.sql, this.vault, this.env.PUBLIC_ORIGIN);
+  private readonly mcpServers = new McpServerStore(this.ctx.storage, this.vault, this.env.PUBLIC_ORIGIN);
   private readonly cuaGrants = new CuaGrants(this.ctx.storage);
   private readonly cloudflare = new CloudflareGrant(this.ctx.storage.sql, this.vault, this.env);
   private readonly cloudManager = new CloudflareManagement(this.ctx.storage.sql, scope => this.lock('cf:grant', async () => {
@@ -134,6 +134,10 @@ export class RegistryDO extends DurableObject<Env> {
   cuaNames(ids:string[],serverRevision:string) { return this.cuaGrants.names(ids,serverRevision); }
   cuaRename(input:CuaNameInput,verifiedRevision:string) { return this.cuaGrants.rename(input,verifiedRevision); }
   cuaGrantsPut(input:CuaGrantInput, verifiedRevision?:string) { return this.cuaGrants.replace(input,verifiedRevision); }
+  cuaSetup(token: string) { return this.lock('cua:setup', () => this.mcpServers.setupCua(token)); }
+  cuaSetupState() { return this.mcpServers.cuaSetupState(); }
+  cuaPendingSetup() { return this.mcpServers.cuaSetupState() === 'pending' ? this.mcpServers.get('cua') : null; }
+  cuaFinishSetup(...args: Parameters<McpServerStore['finishCuaSetup']>) { return this.mcpServers.finishCuaSetup(...args); }
   mcpServersList() { return this.mcpServers.list(); }
   mcpServerGet(id: string) { return this.mcpServers.get(id); }
   mcpServerCurrent(id: string, digest: string) { return this.mcpServers.current(id, digest); }

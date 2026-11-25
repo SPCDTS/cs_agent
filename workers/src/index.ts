@@ -1,3 +1,4 @@
+import { finishCuaSetup } from "./cua/setup";
 import { registerReverse } from "./mcp/reverse-route";
 import { handleMediaRequest } from "./media/routes";
 import { authenticated } from "./auth";
@@ -22,7 +23,7 @@ export { CloudflareWorkspaceResourcesDO } from "./sandbox/resources";
 
 // 按 wrangler.jsonc 的 crons 字符串分派，各后台任务各占一行。
 const CRONS: Record<string, (env: Env, scheduledTime: number) => Promise<void>> = {
-  "*/5 * * * *": async env => { await Promise.all([env.EVENTS.getByName("main").tick(),env.BRIDGE.getByName("napcat").tick(),env.REGISTRY.getByName("main").opsTick()]); },
+  "*/5 * * * *": async env => { await Promise.all([env.EVENTS.getByName("main").tick(),env.BRIDGE.getByName("napcat").tick(),env.REGISTRY.getByName("main").opsTick(),finishCuaSetup(env)]); },
   [MAINTENANCE_CRON]: runMaintenance,
 };
 
@@ -85,7 +86,7 @@ export default {
       }
     }
     const reverse = /^\/mcp\/reverse\/([A-Za-z][A-Za-z0-9_-]{0,63})$/.exec(path);
-    if (reverse && request.method === "GET") return registerReverse(request, env, reverse[1]!);
+    if (reverse && request.method === "GET") return registerReverse(request, env, reverse[1]!, ctx);
     if (request.method === "GET" && path === "/onebot") {
       if (!(await authenticated(request, env.NAPCAT_TOKEN, true))) return new Response("unauthorized", { status: 401 });
       return env.BRIDGE.getByName("napcat").fetch(request);

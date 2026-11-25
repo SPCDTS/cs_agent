@@ -1,8 +1,9 @@
 import { Check } from 'typebox/value';
-import { CuaDeviceId, CuaGrantInput, CuaNameInput, CuaScope, cuaCards, deviceAlias, type CuaCard } from '../cua/contracts';
+import { CuaDeviceId, CuaGrantInput, CuaNameInput, CuaScope, CuaSetupInput, cuaCards, deviceAlias, type CuaCard } from '../cua/contracts';
 import type { Env } from '../env';
 import { McpConnection } from '../mcp/connection';
-import { MCP_CONFIG } from '../mcp/config';
+import { setupFailure } from '../mcp/manage';
+import { MCP_CONFIG, publicOrigin } from '../mcp/config';
 import { connectionDigest, serverDigest } from '../mcp/names';
 import { adminJson, HttpError, readAdminBody } from './http';
 import type { AdminRoute } from './routes';
@@ -34,10 +35,21 @@ async function directory(env: Env) {
 }
 
 export const CUA_ROUTES: AdminRoute[] = [
+  {method:'PUT',path:'/admin/cua/setup',handle:async ({env,request}) => {
+    const {token} = await readAdminBody(request,CuaSetupInput,{maxBytes:1024});
+    try {
+      const result = await env.REGISTRY.getByName('main').cuaSetup(token);
+      if (result.created) await env.THREAD.getByName('owner').recordMcpChange({action:'credentials',server:'cua'});
+      return adminJson({saved:true});
+    } catch (error) {
+      if (setupFailure(error) === 'conflict') throw new HttpError(409,'conflict');
+      throw error;
+    }
+  }},
   {method:'GET',path:'/admin/cua/grants',handle:async ({env}) => adminJson(await env.REGISTRY.getByName('main').cuaGrantsList())},
   {method:'GET',path:'/admin/cua/devices',handle:async ({env}) => {
     const registry = env.REGISTRY.getByName('main');
-    const [before,threads] = await Promise.all([registry.cuaGrantsList(),env.BRIDGE.getByName('napcat').threadList()]);
+    const [before,threads,setup] = await Promise.all([registry.cuaGrantsList(),env.BRIDGE.getByName('napcat').threadList(),registry.cuaSetupState()]);
     const view = await directory(env);
     const names: Record<string,string> = view.revision ? await registry.cuaNames(view.devices.map(row => row.id),view.revision) : {};
     const after = await registry.cuaGrantsList();
@@ -48,7 +60,9 @@ export const CUA_ROUTES: AdminRoute[] = [
       if (scopes) scopes.push(grant.scope);
       else scopesByDevice.set(id,[grant.scope]);
     }
-    return adminJson({configured:view.configured,enabled:view.enabled,online:view.online,available:view.available,error:view.error,...after,
+    const bridgeUrl = new URL('/mcp/reverse/cua',publicOrigin(env.PUBLIC_ORIGIN));
+    bridgeUrl.protocol = 'wss:';
+    return adminJson({setup,bridgeUrl:bridgeUrl.href,configured:view.configured,enabled:view.enabled,online:view.online,available:view.available,error:view.error,...after,
       devices:view.devices.map(row => {
         const alias = deviceAlias(names,row.id);
         return {...row,defaultName:row.name,alias,name:alias ?? row.name,scopes:scopesByDevice.get(row.id) ?? []};

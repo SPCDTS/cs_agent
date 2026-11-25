@@ -2,7 +2,8 @@ import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { ListToolsResultSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MCP_CONFIG, parseMcpConfig, publicOrigin, type McpServerConfig } from "./config";
-import { isCuaReadOnlyTool, isCuaTool } from "../cua/discovery";
+import { cuaTools, isCuaReadOnlyTool, isCuaTool } from "../cua/discovery";
+import { CuaBridgeToken } from "../cua/contracts";
 import { secretsEqual } from "../auth";
 import { TokenVault } from "./crypto";
 import { makeCatalog } from "./catalog";
@@ -34,7 +35,8 @@ export function setupUrl(raw: string): string {
 
 /** 配置和凭据共用 Registry；mcp.json 只在首次初始化时导入，之后部署不覆盖运行时修改。 */
 export class McpServerStore {
-  constructor(private readonly sql: SqlStorage, private readonly vault: TokenVault, private readonly origin: string) {}
+  constructor(private readonly storage: DurableObjectStorage, private readonly vault: TokenVault, private readonly origin: string) {}
+  private get sql() { return this.storage.sql; }
   initialize() {
     this.sql.exec("CREATE TABLE IF NOT EXISTS mcp_servers(id TEXT PRIMARY KEY,config TEXT NOT NULL,revision TEXT NOT NULL,discovered TEXT,secret TEXT)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS mcp_server_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
@@ -71,20 +73,66 @@ export class McpServerStore {
     const {tools} = ListToolsResultSchema.parse(JSON.parse(row.discovered));
     return JSON.stringify({tools:tools.filter(tool => server.tools.allow.includes(tool.name) && isCuaTool(tool.name))});
   }
+  cuaSetupState() {
+    const row = this.sql.exec<{ secretSet: number; pending: number; kind: string }>(`
+      SELECT secret IS NOT NULL AS secretSet, json_extract(config,'$.transport.kind') AS kind,
+        (json_extract(config,'$.enabled')=0 AND EXISTS (SELECT 1 FROM mcp_server_meta
+          WHERE key='cua_auto_setup' AND value=json_extract(mcp_servers.config,'$.access.revision'))) AS pending
+      FROM mcp_servers WHERE id='cua'`).toArray()[0];
+    if (!row || (!row.secretSet && row.kind === 'reverse-websocket')) return 'new' as const;
+    return row.pending ? 'pending' as const : 'managed' as const;
+  }
+
+  async setupCua(token: string) {
+    if (!Check(CuaBridgeToken, token)) throw new McpSetupError("invalid");
+    const authorization = "Bearer " + token;
+    if (this.cuaSetupState() !== 'new') {
+      if (await this.reverseRegistration('cua', authorization)) return { created: false };
+      throw new McpSetupError("conflict");
+    }
+    const previous = this.sql.exec<{revision:string}>("SELECT revision FROM mcp_servers WHERE id='cua'").toArray()[0];
+    const revision = crypto.randomUUID();
+    const secret = await this.vault.encrypt(JSON.stringify({ Authorization: authorization }), JSON.stringify(['cua', revision]));
+    return this.storage.transactionSync(() => {
+      this.writeSetup({id:'cua',transport:'reverse-websocket'}, previous?.revision ?? 'absent', revision, secret);
+      this.sql.exec("INSERT OR REPLACE INTO mcp_server_meta VALUES('cua_auto_setup',?)", revision);
+      return { created: true };
+    });
+  }
+
+  finishCuaSetup(expected: string, tools: Tool[]) {
+    try {
+      return this.storage.transactionSync(() => {
+        if (this.cuaSetupState() !== 'pending') return false;
+        const probed = this.recordProbe('cua', expected, { tools });
+        const result = this.activate('cua', probed.revision, { allow: [...cuaTools] });
+        if ('error' in result) throw new McpSetupError("invalid");
+        this.sql.exec("DELETE FROM mcp_server_meta WHERE key='cua_auto_setup'");
+        return true;
+      });
+    } catch (error) {
+      if (error instanceof McpSetupError) return false;
+      throw error;
+    }
+  }
+
   put(input: ServerSetupInput, expected: string) {
+    return this.writeSetup(input, expected, crypto.randomUUID(), null);
+  }
+  private writeSetup(input: ServerSetupInput, expected: string, revision: string, secret: string | null) {
     if (!Check(ServerSetup, input)) throw new McpSetupError("invalid");
     if (input.id === 'cua' && !('transport' in input)) throw new McpSetupError('invalid');
     const previous = this.sql.exec<Row>("SELECT * FROM mcp_servers WHERE id=?", input.id).toArray()[0];
     if ((previous?.revision ?? "absent") !== expected) throw new McpSetupError("conflict");
     if (!previous && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM mcp_servers").one().n >= 64) throw new McpSetupError("invalid");
     const reverse = "transport" in input;
-    const revision = crypto.randomUUID(), url = reverse ? publicOrigin(this.origin) + "/mcp/reverse/" + input.id : setupUrl(input.url);
+    const url = reverse ? publicOrigin(this.origin) + "/mcp/reverse/" + input.id : setupUrl(input.url);
     const server = parseMcpConfig({ version: 1, enabled: true, servers: [{ id: input.id, enabled: false,
       transport: { kind: reverse ? "reverse-websocket" : "streamable-http", url, headers: reverse ? {} : input.headers ?? {} },
       credential: !reverse && input.auth === "none" ? { kind: "none" } : reverse || input.auth === "token" ? { kind: "managed", accountId: "owner-" + input.id, revision } :
         { kind: "oauth", accountId: "owner-" + input.id, revision, registration: "cimd", clientMetadataUrl: publicOrigin(this.origin) + "/oauth/client-metadata.json", ...(input.scope ? { scope: input.scope } : {}) },
       access: { kind: "owner-private", revision }, tools: { allow: [], readOnly: [], eventAllow: [] }, replay: "unsafe" }] }).servers[0]!;
-    this.sql.exec("INSERT INTO mcp_servers(id,config,revision) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config,revision=excluded.revision,secret=NULL,discovered=NULL", input.id, JSON.stringify(server), revision);
+    this.sql.exec("INSERT INTO mcp_servers(id,config,revision,secret) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config,revision=excluded.revision,secret=excluded.secret,discovered=NULL", input.id, JSON.stringify(server), revision, secret);
     return this.get(input.id);
   }
   recordProbe(id: string, expected: string, value: unknown) {
