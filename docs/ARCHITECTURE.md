@@ -74,4 +74,4 @@ QQ、网页、定时任务和事件输入先持久化入队，在同一事务里
 - **管理台构建**：浏览器逻辑位于 `workers/browser/`（通过 `tsconfig.browser.json` 严格检查，接口响应经 TypeBox schema 校验），静态页面模板与样式位于 `workers/browser/index.html` 与 `workers/browser/admin.css`。`node workers/scripts/build-admin.mjs` 使用 esbuild 生成 `workers/src/admin/app.generated.ts`（导出 `ADMIN_PAGE_HTML` 与 `ADMIN_APP_JS`），生成文件不提交 Git。
 - **迁移历史**：`workers/wrangler.jsonc` 的 DO migrations 属于线上 schema 历史，即使旧类已删除也必须完整保留。
 
-相关文档：[云端功能与契约](CLOUD-PARITY.md)、[管理台](ADMIN-CONSOLE.md)、[记忆系统](MEMORY-SYSTEM.md)、[GitHub 事件](GITHUB-EVENTS.md)、[部署与验证](DEPLOY.md)。
+相关文档：[云端功能与契约](CLOUD-PARITY.md)、[管理台](ADMIN-CONSOLE.md)、[Agent 执行链路与可观测性设计（提案）](OBSERVABILITY.md)、[记忆系统](MEMORY-SYSTEM.md)、[GitHub 事件](GITHUB-EVENTS.md)、[部署与验证](DEPLOY.md)。
