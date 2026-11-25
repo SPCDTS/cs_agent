@@ -1,0 +1,15 @@
+[Unit]
+Description=Verify and install one Cua bridge release
+
+[Service]
+ExecStart=/usr/local/sbin/cs-agent-receive-cua
+StandardInput=socket
+StandardOutput=inherit
+StandardError=journal
+RuntimeMaxSec=5min
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/cs-agent/cua /etc/systemd/system

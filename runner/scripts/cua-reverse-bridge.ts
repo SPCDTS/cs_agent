@@ -1,4 +1,5 @@
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { PairingSlots, pairingCaddy, startPairedRelays } from '../src/cua-pairing.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import { registration, serveConnection } from '../src/cua-reverse-bridge.ts';
@@ -8,6 +9,7 @@ if (process.argv[2] === '--print-pair-caddy') {
   process.exit(0);
 }
 const {endpoint,token,socketPath} = registration(process.env);
+const readyFile = process.env.RUNTIME_DIRECTORY && join(process.env.RUNTIME_DIRECTORY,'connected');
 const controller = new AbortController();
 let pairing: PairingSlots | undefined;
 if (process.env.CUA_PAIR_RELAY_URL) {
@@ -35,6 +37,7 @@ async function run() {
     await new Promise<void>(resolve => {
       const finish = () => {
         clearTimeout(handshake);
+        if (readyFile) rmSync(readyFile,{force:true});
         controller.signal.removeEventListener('abort',finish);
         socket.removeEventListener('error',finish);
         socket.removeEventListener('close',finish);
@@ -43,7 +46,11 @@ async function run() {
       };
       // 握手失败可能只产生 error；超时、退出和已建立连接断开都走同一条清理路径。
       const handshake = setTimeout(finish,10_000);
-      socket.addEventListener('open',() => { clearTimeout(handshake); openedAt = Date.now(); },{once:true});
+      socket.addEventListener('open',() => {
+        clearTimeout(handshake);
+        openedAt = Date.now();
+        if (readyFile) writeFileSync(readyFile,String(process.pid),{mode:0o600});
+      },{once:true});
       socket.addEventListener('close',finish,{once:true});
       socket.addEventListener('error',finish,{once:true});
       controller.signal.addEventListener('abort',finish,{once:true});
