@@ -1,4 +1,4 @@
-import { env, reset, runInDurableObject } from 'cloudflare:test';
+import { createExecutionContext, env, reset, runInDurableObject, waitOnExecutionContext } from 'cloudflare:test';
 import { createRegistry } from '@earendil-works/pi-durable';
 import { DurableObjectSqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite/cloudflare';
 import { ThreadMcp, type McpAuthority } from '../src/mcp';
@@ -80,11 +80,9 @@ const admin = (path:string, input?:unknown, authorized = true) => worker.fetch(n
   body:input ? JSON.stringify(input) : undefined,
 }),adminEnv());
 
-async function directoryNode(onQuery?: (name:string,args?:Record<string,unknown>) => CallToolResult | void | Promise<CallToolResult | void>) {
-  const registry = env.REGISTRY.getByName('main');
-  const initial = await registry.mcpServerPut({id,transport:'reverse-websocket'},'absent');
-  const record = await registry.mcpCredentialPut(id,initial.revision,{Authorization:bearer});
-  const ws = (await worker.fetch(new Request(env.PUBLIC_ORIGIN+'/mcp/reverse/cua',{headers:{Upgrade:'websocket',Authorization:bearer}}),env)).webSocket!;
+type DirectoryQuery = (name:string,args?:Record<string,unknown>) => CallToolResult | void | Promise<CallToolResult | void>;
+async function connectDirectory(onQuery?: DirectoryQuery, ctx?: ExecutionContext) {
+  const ws = (await worker.fetch(new Request(env.PUBLIC_ORIGIN+'/mcp/reverse/cua',{headers:{Upgrade:'websocket',Authorization:bearer}}),env,ctx)).webSocket!;
   const sessions = new Map<string,Transport>();
   let sessionOpens = 0;
   async function receive(data:string) {
@@ -139,11 +137,66 @@ async function directoryNode(onQuery?: (name:string,args?:Record<string,unknown>
   }
   ws.addEventListener('message',event => { void receive(String(event.data)); });
   ws.accept();
+  return {ws,sessionsOpened:() => sessionOpens};
+}
+
+async function directoryNode(onQuery?: DirectoryQuery) {
+  const registry = env.REGISTRY.getByName('main');
+  const initial = await registry.mcpServerPut({id,transport:'reverse-websocket'},'absent');
+  const record = await registry.mcpCredentialPut(id,initial.revision,{Authorization:bearer});
+  const node = await connectDirectory(onQuery);
   expect(await manageMcp(env,{action:'probe',id,expectedRevision:record.revision})).toMatchObject({status:'ready'});
   const ready = await registry.mcpServerActivate(id,(await registry.mcpServerGet(id)).revision,{allow:fixtureTools});
   if ('error' in ready || !ready.server.access.revision) throw new Error('fixture_activation_failed');
-  return {ws,registry,ready,accessRevision:ready.server.access.revision,sessionsOpened:() => sessionOpens};
+  return {...node,registry,ready,accessRevision:ready.server.access.revision};
 }
+
+it('一次保存桥令牌，关闭管理页后仍由真实 WebSocket 握手完成工具启用',async () => {
+  const token = bearer.slice(7), registry = env.REGISTRY.getByName('main');
+  expect((await admin('setup',{token},false)).status).toBe(401);
+  expect((await admin('setup',{token:'short'})).status).toBe(400);
+  expect(await registry.cuaSetupState()).toBe('new');
+  const saved = await Promise.all([admin('setup',{token}),admin('setup',{token})]);
+  for (const result of saved) expect(await result.json()).toEqual({saved:true});
+  const before = await registry.mcpServerGet(id);
+  expect((await admin('setup',{token:'q'.repeat(43)})).status).toBe(409);
+  expect((await registry.mcpServerGet(id)).revision).toBe(before.revision);
+  const offline = await (await admin('devices')).json<CuaDirectory>();
+  expect(offline).toMatchObject({setup:'pending',online:false,enabled:false,devices:[]});
+  expect(offline.bridgeUrl).toMatch(/^wss:.*\/mcp\/reverse\/cua$/);
+  expect(JSON.stringify(offline)).not.toContain(token);
+  // 不完整的远端目录不能部分提交，下一次真实握手仍可继续。
+  expect(await registry.cuaFinishSetup(before.revision,[])).toBe(false);
+  expect(await registry.mcpServerGet(id)).toEqual(before);
+  // 只读探测可以更新目录版本，但不能取消管理员已保存的启用请求。
+  await registry.mcpServerProbe(id,before.revision,{tools:[]});
+  expect(await registry.cuaSetupState()).toBe('pending');
+  const ctx = createExecutionContext(), node = await connectDirectory(undefined,ctx);
+  try {
+    await waitOnExecutionContext(ctx);
+    const active = await registry.mcpServerGet(id);
+    expect(active.server.tools.allow).toEqual(fixtureTools);
+    expect((await (await admin('devices')).json<CuaDirectory>())).toMatchObject({
+      setup:'managed',online:true,enabled:true,available:true,devices:[{id:device},{id:second}],grants:[],
+    });
+    await registry.mcpServerDisable(id,active.revision);
+    await admin('setup',{token});
+    expect(await registry.cuaFinishSetup(before.revision,[])).toBe(false);
+    expect((await registry.mcpServerGet(id)).server.enabled).toBe(false);
+  } finally { node.ws.close(1000); }
+});
+
+it('兼容已创建但未保存令牌的草稿，管理员停用后取消迟到的自动启用',async () => {
+  const registry = env.REGISTRY.getByName('main');
+  await registry.mcpServerPut({id,transport:'reverse-websocket'},'absent');
+  expect(await registry.cuaSetupState()).toBe('new');
+  await admin('setup',{token:bearer.slice(7)});
+  const pending = await registry.mcpServerGet(id);
+  await registry.mcpServerDisable(id,pending.revision);
+  expect(await registry.cuaSetupState()).toBe('managed');
+  expect(await registry.cuaFinishSetup(pending.revision,[])).toBe(false);
+  expect((await registry.mcpServerGet(id)).server.enabled).toBe(false);
+});
 
 it('管理员从反向节点取得精简目录，私聊与群使用独立分配，离线可撤销，轮换凭据取消全部旧授权',async () => {
   expect((await admin('devices',undefined,false)).status).toBe(401);

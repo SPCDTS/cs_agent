@@ -210,6 +210,7 @@
     <div class="section-head"><h2 class="h2">MCP 服务与个人设备</h2><span class="muted small">运行时接入，无需重新部署</span></div>
     <div class="stack">
       <div id="mcp-list" class="stack flat-stack"></div>
+      <div><button id="open-cua-settings" type="button" class="btn">Cua 服务与设备分配</button></div>
       <details id="cloudflare-editor" class="source form-disclosure">
         <summary>Cloudflare 账户管理</summary>
         <div class="row"><button id="cloudflare-login" type="button" class="btn" hidden>授权 Cloudflare</button><span id="cloudflare-state" class="muted small" role="status"></span></div>
@@ -368,6 +369,12 @@
     <div class="section-head"><h2 class="h2">设备按会话分配（Cua）</h2></div>
     <div class="stack">
       <p class="muted small">主人默认可使用全部设备。勾选设备后，该群聊或私聊及其获授权的子任务可在所选设备上免审使用已启用的 Cua 工具（Shell 命令、后台任务、写文件与桌面操作）。</p>
+      <form id="cua-setup-form" class="stack" hidden>
+        <p class="muted small">首次启用后，cs-agent 将在 VPS 桥连接时检测并启用设备目录、Shell、后台任务、文件写入和桌面工具。</p>
+        <div class="row"><label for="cua-setup-token">VPS 桥令牌</label><input id="cua-setup-token" type="password" required minlength="32" maxlength="256" autocomplete="new-password" spellcheck="false">
+          <button id="cua-setup-enable" type="submit" class="btn primary">启用 Cua</button></div>
+      </form>
+      <p id="cua-bridge-url" class="muted small" hidden></p>
       <div class="row"><label for="cua-grant-scope">会话</label><select id="cua-grant-scope"><option value="">选择群聊或私聊</option></select>
         <button type="button" class="btn" id="cua-grant-reload">刷新设备与分配</button></div>
       <div class="stack" id="cua-grant-devices"></div>

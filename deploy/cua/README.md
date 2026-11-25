@@ -21,8 +21,8 @@ Linux amd64 可从 [Relay 构建工作流](../../.github/workflows/build-cua-rel
 2. 将本目录的四个 `.service` 文件安装到 `/etc/systemd/system/` 并运行 `systemctl daemon-reload`。在 `/etc/cs-agent/cua/` 建立 `relays/` 和 `spaces/`，目录仅准 root 访问。以下凭据文件均由 root 持有，权限为 `0600`。
 3. 每台设备准备两个独立、随机的秘密。*注册令牌*只给该设备和它的 Relay，放入 `relays/18181.token` 或 `relays/18182.token`，每个文件恰好一行。*设备令牌*供设备验证目录请求，稍后写入对应的 `spaces/<目录端口>.env`。可使用密码管理器分发。令牌应直接写入受保护的文件，避免终端输出和命令行参数。
 4. 按表填写 [Caddyfile](Caddyfile)。域名应直接解析到控制机，公网只开放 443/TCP。若与其他站点共用 Caddy，按下节核对完整配置与监听端口。运行 `systemctl enable --now cua-relay@18181 cua-relay@18182 cua-directory`。
-5. 在 cs-agent「模型与接入」展开「接入或管理远程 MCP 服务」，服务名称填 `cua`，认证选择「反向 WebSocket」，点击「保存连接」。管理员用密码管理器生成一枚独立的 64 位随机十六进制令牌，在 `Authorization` 的密码框填入令牌，点击「保存凭据并检测」。首次操作时桥尚未启动，稍后可重新检测。
-6. 把自动生成的 WSS 地址及同一枚令牌写入 `/etc/cs-agent/cua/bridge.env`，格式如下。令牌值直接填原文。运行 `systemctl enable --now cua-directory-bridge`，在管理台「刷新服务」，选中 `cua` 并确认显示「节点在线」。点击「检测连接与工具」，按需要勾选 `list_spaces`、`list_tools`、`space_bash`、`space_job`、`space_write`、`call_tool` 并点击「启用选中工具」（若仅开放目录和只读查看，可为 `space_job` / `call_tool` 勾选对应的只读限制）。资源 URI 前缀留空。
+5. 在 cs-agent「权限与运维 → Cua 设备分配」输入 VPS 桥令牌，点「启用 Cua」。「模型与接入 → MCP 与设备」也有「Cua 服务与设备分配」入口。首次可用密码管理器生成 64 个随机十六进制字符。管理台会登记 `cua`、保存加密凭据并显示该桥的 WSS 地址。此时可关闭页面，启用请求已经保存。
+6. 在 VPS 把页面上的 WSS 地址和同一枚令牌写入 `/etc/cs-agent/cua/bridge.env`，格式如下，再运行 `systemctl enable --now cua-directory-bridge`。桥连接后 cs-agent 自动检测并启用下表的执行工具以及 `list_spaces`、`list_tools`。首次握手失败会在重连时或五分钟内重试。需要自选工具或只读限制的管理员可使用原有的「接入或管理远程 MCP 服务」手工配置。
 
 ```ini
 REVERSE_MCP_URL=wss://agent.example.org/mcp/reverse/cua

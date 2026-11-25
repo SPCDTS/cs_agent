@@ -2,6 +2,8 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Type, type Static } from 'typebox';
 import { Check } from 'typebox/value';
 
+export const CuaBridgeToken = Type.String({ minLength:32, maxLength:256, pattern:'^[A-Za-z0-9._~-]+$' });
+export const CuaSetupInput = Type.Object({ token:CuaBridgeToken }, {additionalProperties:false});
 export const CuaScope = Type.String({pattern:'^(group|private):[1-9][0-9]{0,19}$'});
 export const CuaDeviceId = Type.String({maxLength:256,
   pattern:'^(?:relay:[a-z0-9][a-z0-9-]{6,62}[a-z0-9]|direct:(?:[a-zA-Z0-9._-]+|\\[[0-9a-fA-F:]+\\]):[0-9]{1,5})$'});
@@ -24,6 +26,8 @@ export function deviceAlias(names: Record<string,string>, id: string): string | 
   if (Object.hasOwn(names,id)) return names[id];
 }
 export const CuaDirectory = Type.Object({
+  setup:Type.Optional(Type.Union([Type.Literal('new'),Type.Literal('pending'),Type.Literal('managed')])),
+  bridgeUrl:Type.Optional(Type.String()),
   configured:Type.Boolean(), online:Type.Boolean(), enabled:Type.Boolean(), available:Type.Boolean(),
   error:Type.Optional(Type.Literal('directory_unavailable')),
   revision:Type.String(), devices:Type.Array(Type.Object({...Card.properties, defaultName:Type.Optional(Type.String()), alias:Type.Optional(displayName), scopes:Type.Array(CuaScope)})),

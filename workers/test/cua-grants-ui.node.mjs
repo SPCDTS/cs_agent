@@ -46,6 +46,34 @@ test('Cua 工具展示目录只读、固定读写执行以及可选只读桌面/
   assert.equal(checkbox('space_job').checked,false);
 });
 
+test('首次启用提交桥令牌一次并区分等待连接与设备可用',async t => {
+  const page = mountDom(ADMIN_PAGE_HTML,{token:'synthetic-admin'}), ui = await bundleModule('browser/cua-grants.ts');
+  const token = 'test-bridge-token-'.repeat(3);
+  const view = {setup:'new',configured:false,enabled:false,online:false,available:false,
+    revision:'0',devices:[],threads:[],grants:[],bridgeUrl:'wss://bridge.test/mcp/reverse/cua'};
+  let saves = 0;
+  t.mock.method(globalThis,'fetch',async (path,init) => {
+    if (path === '/admin/cua/devices') return Response.json(view);
+    assert.equal(path,'/admin/cua/setup'); assert.equal(init.method,'PUT');
+    assert.deepEqual(JSON.parse(init.body),{token});
+    saves++; Object.assign(view,{setup:'pending',configured:true});
+    return Response.json({saved:true});
+  });
+  ui.initCuaGrants(); await ui.loadCuaGrants();
+  const form = page.document.getElementById('cua-setup-form'), input = form.querySelector('input');
+  assert.equal(form.hidden,false);
+  input.value = token;
+  form.dispatchEvent(new page.window.Event('submit',{cancelable:true}));
+  form.dispatchEvent(new page.window.Event('submit',{cancelable:true}));
+  await page.settle();
+  assert.equal(saves,1); assert.equal(input.value,''); assert.equal(form.hidden,true);
+  assert.match(page.document.getElementById('cua-grant-status').textContent,/等待 VPS 连接/);
+  assert.ok([...page.storage.values()].every(value => !value.includes(token)));
+  Object.assign(view,{setup:'managed',enabled:true,online:true,available:true});
+  await ui.loadCuaGrants();
+  assert.match(page.document.getElementById('cua-grant-status').textContent,/尚未列出设备/);
+});
+
 test('设备分配界面区分群与私聊，节点离线时仍可清空已有分配',async t => {
   const page = mountDom(ADMIN_PAGE_HTML,{token:'synthetic-admin'});
   const ui = await bundleModule('browser/cua-grants.ts');

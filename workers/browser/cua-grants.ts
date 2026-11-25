@@ -1,12 +1,14 @@
 import { Check } from 'typebox/value';
-import { CuaDeviceId, CuaDirectory, CuaGrantList, CuaNameResult } from '../src/cua/contracts';
-import { ApiError, readApi } from './api';
+import { CuaBridgeToken, CuaDeviceId, CuaDirectory, CuaGrantList, CuaNameResult } from '../src/cua/contracts';
+import { api, ApiError, readApi } from './api';
 import { $, el, fail, readToken, show } from './app';
-import { cs } from './console';
+import { consoleView, cs } from './console';
 
 let directory: CuaDirectory | undefined;
 let sequence = 0;
 let saving = false;
+let enabling = false;
+let setupTimer: ReturnType<typeof setTimeout> | undefined;
 
 type Device = CuaDirectory['devices'][number];
 const updating = new Map<Device,{epoch:number, token:string, done:Promise<void>}>();
@@ -105,6 +107,8 @@ function renderDevices() {
 }
 
 export async function loadCuaGrants() {
+  clearTimeout(setupTimer);
+  const wasPending = directory?.setup === 'pending';
   const version = ++sequence, epoch = cs.epoch, token = readToken();
   const isCurrent = () => version === sequence && epoch === cs.epoch && readToken() === token;
   // 标签页切换也会触发刷新。等待本次登录的名称写入落地，再读取同一目录。
@@ -114,6 +118,11 @@ export async function loadCuaGrants() {
     if (!writes.length) break;
     waited = true;
     await Promise.all(writes.map(write => write.done));
+  }
+  function scheduleSetupRefresh() {
+    setupTimer = setTimeout(() => {
+      if (isCurrent() && !$('cua-grants-section').closest('[hidden]')) void loadCuaGrants();
+    }, 5000);
   }
   if (!isCurrent()) return;
   const select = $('cua-grant-scope'), prior = select.value;
@@ -127,6 +136,8 @@ export async function loadCuaGrants() {
   directory = undefined;
   renderDevices();
   select.replaceChildren();
+  $('cua-setup-form').hidden = true;
+  $('cua-bridge-url').hidden = true;
   if (!token) return;
   $('cua-grant-status').textContent = '正在读取设备目录和会话分配…';
   try {
@@ -138,7 +149,15 @@ export async function loadCuaGrants() {
     for (const row of data.grants) if (!choices.has(row.scope)) choices.set(row.scope,row.scope);
     select.replaceChildren(el('option',{value:'',text:'选择群聊或私聊'}),...[...choices].map(([value,text]) => el('option',{value,text})));
     if (choices.has(prior)) select.value = prior;
-    $('cua-grant-status').textContent = !data.configured ? '尚未配置 Cua 反向 MCP 服务。' : !data.enabled ? 'Cua 服务已停用。'
+    $('cua-setup-form').hidden = data.setup !== 'new';
+    const bridgeUrl = $('cua-bridge-url');
+    bridgeUrl.hidden = !data.bridgeUrl;
+    bridgeUrl.textContent = data.bridgeUrl ? 'VPS 桥连接地址：' + data.bridgeUrl : '';
+    if ($('cua-setup-form').hidden) $('cua-setup-token').value = '';
+    if (data.setup === 'pending') scheduleSetupRefresh();
+    $('cua-grant-status').textContent = data.setup === 'pending'
+      ? (data.online ? 'VPS 已连接，正在检测工具。若持续未启用，请核对 VPS 桥版本。' : 'cs-agent 已保存配置，等待 VPS 连接。')
+      : !data.configured ? '尚未配置 Cua 反向 MCP 服务。' : !data.enabled ? 'Cua 服务已停用。'
       : !data.online ? 'Cua 节点离线，可撤销已有分配。' : data.error ? '设备目录读取失败，可撤销已有分配。'
       : !data.available ? '请在 Cua 服务中启用 list_spaces 目录。'
       : !data.devices.length ? '控制节点尚未列出设备。'
@@ -151,6 +170,7 @@ export async function loadCuaGrants() {
     }
   } catch (error) {
     if (isCurrent()) {
+      if (wasPending || (error instanceof ApiError && error.status === 409)) scheduleSetupRefresh();
       $('cua-grant-status').textContent = '读取失败，请刷新设备与分配。';
       fail(error);
     }
@@ -178,7 +198,37 @@ async function save() {
   }
 }
 
+async function enableCua(event: SubmitEvent) {
+  event.preventDefault();
+  const epoch = cs.epoch, admin = readToken();
+  if (!admin || enabling || directory?.setup !== 'new') return;
+  const input = $('cua-setup-token'), token = input.value.trim();
+  if (!Check(CuaBridgeToken,token)) {
+    show('桥令牌需为 32 至 256 位，可用字母、数字及 . _ ~ -。','error');
+    input.focus();
+    return;
+  }
+  const isCurrent = () => cs.epoch === epoch && readToken() === admin;
+  input.value = '';
+  enabling = true;
+  $('cua-setup-enable').disabled = true;
+  try {
+    await api('PUT','/admin/cua/setup',{token},isCurrent);
+  } catch (error) {
+    if (isCurrent()) {
+      if (error instanceof ApiError && error.status === 409) show('Cua 已有其他配置，请在 MCP 服务中核对。','error');
+      else fail(error);
+    }
+  } finally {
+    enabling = false;
+    $('cua-setup-enable').disabled = false;
+    if (isCurrent()) await loadCuaGrants();
+  }
+}
+
 export function initCuaGrants() {
+  $('open-cua-settings').addEventListener('click',() => consoleView('access','access-cua-tab'));
+  $('cua-setup-form').addEventListener('submit',enableCua);
   $('cua-grant-scope').addEventListener('change',renderDevices);
   $('cua-grant-reload').addEventListener('click',() => void loadCuaGrants());
   $('cua-grant-save').addEventListener('click',() => void save());
