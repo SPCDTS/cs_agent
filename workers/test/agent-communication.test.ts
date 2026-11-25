@@ -89,8 +89,8 @@ describe("agent communication core", () => {
     it("sends text and a received file only to the local QQ user route, sharing one two-send budget", async () => {
       await seed("owner", input(1, "owner", 10000001));
       await seed(group, input(2, "member", 10000003, 200000001));
-      await env.SANDBOX.getByName("owner").saveAttachment("/work/report.txt", new TextEncoder().encode("report"));
-      await env.SANDBOX.getByName(group).saveAttachment("/work/private.txt", new TextEncoder().encode("not received"));
+      await env.SANDBOX.getByName("owner").writeFile("/work/report.txt", new TextEncoder().encode("report"), undefined, true);
+      await env.SANDBOX.getByName(group).writeFile("/work/private.txt", new TextEncoder().encode("not received"), undefined, true);
       const deliverySeed = "local-qq-report";
       const path = "/work/agent-files/" + messageId("owner", "0:" + deliverySeed).slice(6) + "/0-report.txt";
       const privateImage = await new MediaRepository({ bucket: env.ASSETS, scope: group }).put({

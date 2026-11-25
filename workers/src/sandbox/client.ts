@@ -1,3 +1,5 @@
+import type { DirectoryBackupRecord } from "@cloudflare/sandbox";
+
 /** CF 运行时契约；实现使用官方 Files 与原生 Container.exec，不对外开放控制端口。 */
 export const WORK_ROOT = "/work";
 export const EXEC_MAX_TIMEOUT_MS = 120_000;
@@ -37,7 +39,9 @@ export function workPath(raw: string): string {
 export interface SandboxClient {
   snapshot(retainedPaths?: readonly string[]): Promise<RuntimeSnapshot>;
   readBlob(path: string): Promise<Uint8Array>;
-  restore(snapshot: RuntimeSnapshot, readBlob: (file: RuntimeFile) => Promise<Uint8Array>): Promise<void>;
+  restore(snapshot: RuntimeSnapshot, readBlob: (file: RuntimeFile) => Promise<Uint8Array>, base?: RuntimeSnapshot): Promise<void>;
+  backupDirectory?(snapshot: RuntimeSnapshot): Promise<DirectoryBackupRecord>;
+  restoreDirectory?(backup: DirectoryBackupRecord): Promise<void>;
   exec(cmd: string, options: { cwd?: string; timeoutMs: number }): Promise<ExecResult>;
   readFile(path: string, options?: { offset?: number; limit?: number }): Promise<ReadResult>;
   writeFile(path: string, content: string | Uint8Array): Promise<{ bytes: number }>;

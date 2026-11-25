@@ -2,6 +2,7 @@ import { redactReport, fingerprint, type AgentMessage, type AgentReceipt, type A
 import { hasPendingAgentProof, importFiles, incomingText, proves, reserveAgent, sendAgent, verifyMessage, type AgentTicket } from "../communication/service";
 import { agentSendTool, durableAgentTicket } from "../communication/tool";
 import type { SubagentReport } from "./model";
+import { objectFileTools } from "../tools/object-files";
 import { workspaceExecutionEnv } from "../sandbox/execution-env";
 import { ProjectionPublisher, observeWrites } from "../requests/projection";
 import { DurableObject } from "cloudflare:workers";
@@ -193,7 +194,7 @@ export class SubagentDO extends DurableObject<Env> {
       return { messageId: message.id, status: "duplicate", files: JSON.parse(previous.agent_files ?? "[]") as string[] };
     }
     if (message.from !== meta.parent) await parent.agentChildNarrow(meta.id);
-    const paths = await importFiles(this.env, message, (path, bytes, operationId) => parent.subagentSaveAttachment(meta.id, path, bytes, operationId));
+    const paths = await importFiles(this.env, message, (path, bytes, operationId) => parent.subagentImportFile(meta.id, path, bytes, operationId));
     const result = await this.message(message.id, incomingText(message, paths), message.childModel, { hash: fingerprint(message), files: paths });
     if (result.result === "ended") throw new Error("agent_session_ended");
     await parent.agentChildWake(meta.id);
@@ -505,6 +506,18 @@ export class SubagentDO extends DurableObject<Env> {
           } }),
       ].map(tool => ({ ...tool, callers: ["model"] as const })),
     }));
+    const files = () => ({
+      readBlob: (path: string) => parent().subagentReadBlob(meta.id, path),
+      writeFile: (path: string, content: string | Uint8Array, operationId?: string) => parent().subagentWriteFile(meta.id, path, content, operationId),
+      createOutputPrefix: (prefix?: string) => parent().subagentCreateOutputPrefix(meta.id, prefix),
+      readObject: (key: string) => parent().subagentReadObject(meta.id, key),
+      writeObject: (key: string, content: string | Uint8Array) => parent().subagentWriteObject(meta.id, key, content),
+    });
+    if (meta.capabilities?.coding) registry.install(objectFileTools(async () => {
+      const access = await parent().validateSubagentAccess(meta.id);
+      if (!access?.capabilities.coding || !access.authority.owner) throw new Error("permission_denied");
+      return files();
+    }));
     const host = createSubagentCapabilityHost(parent());
     // 运行时也可能为已完成任务的历史查看而打开。实际权限由父线程逐次复核。
     const delegated = installDelegatedCapabilities(registry, host, meta.id, meta.capabilities ?? {});
@@ -529,11 +542,7 @@ export class SubagentDO extends DurableObject<Env> {
         if (!access?.capabilities.coding || !access.authority.owner) return;
         const name = access.sandbox?.name ?? subagentName(meta.parent, meta.id);
         return workspaceExecutionEnv({ id: "cloudflare:" + this.env.SANDBOX.idFromName(name), cwd: target.cwd,
-          files: async () => ({
-            readBlob: path => parent().subagentReadBlob(meta.id, path),
-            writeFile: (path, content) => parent().subagentWriteFile(meta.id, path, content),
-            createTempDir: prefix => parent().subagentCreateTempDir(meta.id, prefix),
-          }),
+          files: async () => files(),
         });
       },
     }, context);

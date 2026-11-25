@@ -52,6 +52,24 @@ test("native CLI 输出超过 64 KiB 只保留尾部", async () => {
   assert.equal(result.truncated, true); assert.match(result.stdout, /^\[前 \d+ 字节已省略\]\n/);
   assert.ok(result.stdout.endsWith("aEND\n")); assert.ok(Buffer.byteLength(result.stdout.slice(result.stdout.indexOf("\n") + 1)) <= OUTPUT_CAP);
 });
+test("目录备份只暂存追踪文件，保留空目录，文件变更时拒绝生成旧版本备份", async () => {
+  const work = mkdtempSync(path.join(base, "backup-source-"));
+  const host = createSandboxRuntime({ root: work });
+  mkdirSync(path.join(work, "empty"));
+  mkdirSync(path.join(work, "node_modules"));
+  writeFileSync(path.join(work, "node_modules", "untracked"), "cache");
+  writeFileSync(path.join(work, "report"), Buffer.from([0, 255, 1]));
+  const snapshot = await host.snapshot();
+  const stage = await host.stageBackup(snapshot);
+  try {
+    assert.deepEqual(readFileSync(path.join(stage, "report")), Buffer.from([0, 255, 1]));
+    assert.equal(existsSync(path.join(stage, "empty")), true);
+    assert.equal(existsSync(path.join(stage, "node_modules")), false);
+    writeFileSync(path.join(work, "report"), "changed");
+    await assert.rejects(host.stageBackup(snapshot), /workspace_conflict/);
+  } finally { await host.discardBackup(stage); }
+  assert.equal(existsSync(stage), false);
+});
 test("tailCollector 保留中文字符边界", () => {
   const collector = tailCollector(8); for (const part of ["0123", "4567", "89", "中文"]) collector.push(Buffer.from(part));
   assert.deepEqual(collector.result(), { text: "[前 8 字节已省略]\n89中文", truncated: true });

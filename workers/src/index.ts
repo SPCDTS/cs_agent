@@ -19,6 +19,7 @@ export { ThreadDO } from "./thread";
 export { ScheduleDO } from "./schedule/do";
 export { EventsDO } from "./events/do";
 export { SubagentDO } from "./subagent/do";
+export { DirectoryBackupGateway } from "@cloudflare/sandbox";
 export { SandboxDO } from "./sandbox/do";
 export { CloudflareWorkspaceResourcesDO } from "./sandbox/resources";
 

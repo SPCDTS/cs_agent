@@ -14,7 +14,7 @@ export type MediaSelection = { ordinal?: number; kind?: InboundMedia["kind"] };
 export type MediaDeps = {
   bridge: MediaLookupBridge;
   canWriteWorkspace(api: ToolExecutionApi, context: Context): Promise<boolean>;
-  saveAttachment(path: string, bytes: Uint8Array, api: ToolExecutionApi, context: Context): Promise<void>;
+  storeFile(path: string, bytes: Uint8Array, api: ToolExecutionApi, context: Context): Promise<void>;
   allowed(api: ToolExecutionApi, context: Context, kind: "media_recall" | "media_send"): Promise<boolean>;
   scope?(api: ToolExecutionApi, context: Context): Promise<string>;
   repository(api: ToolExecutionApi, context: Context): Promise<MediaRepository>;
@@ -72,7 +72,7 @@ export function createMediaExtension(deps: MediaDeps) {
   }
   const recall = (imageOnly: boolean) => defineTool({
     name: imageOnly ? "qq_image" : "qq_attachment", replay: "safe",
-    description: imageOnly ? "Recall images by message_id in the current authorized chat. Returns image content directly; ordinal selects one attachment." : "Retrieve attachments from this chat. In a writable workspace, files are saved and the result includes the committed path for Code Mode. Set path to choose a filename under /work (relative paths are accepted). For multiple attachments, use ordinal with path. Omit path to use automatic filenames. Read-only chats receive private asset references.",
+    description: imageOnly ? "Recall images by message_id in the current authorized chat. Returns image content directly; ordinal selects one attachment." : "Retrieve attachments from this chat. Writable sessions receive a private r2:// reference for r2_read or send_file. Set path to save under /work instead. Use ordinal to select a single attachment when specifying path. Read-only chats receive private asset references.",
     parameters: Type.Object({ ...recallFields, ...(imageOnly ? {} : { path: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 })) }) }, { additionalProperties: false }),
     execute: (args, api, context) => boundary("media_recall", api, context, { messageId: args.message_id, ordinal: args.ordinal }, async trace => {
       const repository = await trace.run("repository", () => deps.repository(api, context));
@@ -90,8 +90,8 @@ export function createMediaExtension(deps: MediaDeps) {
         const kind = ref?.kind ?? item.kind;
         if (writable) {
           const filename = [".", "..", ".git", ".wrangler", "node_modules"].includes(name) || pathEncoder.encode(name).length > 255 ? "attachment" : name;
-          const path = destination ?? attachmentPath(`attachments/${await sha256(bytes)}/${filename}`);
-          await itemTrace.run("workspace_write", () => deps.saveAttachment(path, bytes, api, context));
+          const path = destination ?? `r2://attachments/${await sha256(bytes)}/${filename}`;
+          await itemTrace.run("workspace_write", () => deps.storeFile(path, bytes, api, context));
           output.push({ type: "text", text: JSON.stringify({ path, name, kind, bytes: bytes.byteLength, mime }) });
         } else {
           const asset = ref ?? await itemTrace.run("store", () => repository.put({ bytes, name, mime, kind }));
@@ -103,7 +103,7 @@ export function createMediaExtension(deps: MediaDeps) {
     }),
   });
   return defineExtension({ name: "cs.media", tools: [recall(true), recall(false), defineTool({
-    name: "send_file", replay: "unsafe", description: "Send a committed file from this conversation's /work workspace through the current authorized reply route. The file must be at most 10MiB. Owner turns may specify sandboxId to send from an owned Cloudflare resource, including a subagent's assigned workspace. Omit it for the current workspace.",
+    name: "send_file", replay: "unsafe", description: "Send a private r2:// object or a committed /work file from this workspace through the current authorized reply route. The file must be at most 10MiB. Owner turns may specify sandboxId to send from an owned Cloudflare resource, including a subagent's assigned workspace. Omit it for the current workspace.",
     parameters: Type.Object({ path: Type.String({ minLength: 1, maxLength: 1024 }), name: Type.Optional(Type.String({ minLength: 1, maxLength: 255 })), sandboxId: Type.Optional(ResourceIdSchema) }, { additionalProperties: false }),
     execute: (args, api, context) => boundary("media_send", api, context, {}, async trace => {
       const repository = await trace.run("repository", () => deps.repository(api, context)), sandbox = await deps.sandbox(api, context, args.sandboxId);

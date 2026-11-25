@@ -1,6 +1,8 @@
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
+import { WorkspaceManager } from "../src/sandbox/workspace";
+import { runtime } from "./sandbox-runtime-fixture";
 import { SandboxDO } from "../src/sandbox/do";
 import { CLOUDFLARE_INSTRUCTIONS, CLOUDFLARE_RESOURCE_INSTRUCTIONS } from "../src/sandbox/registration";
 import { workPath } from "../src/sandbox/client";
@@ -43,24 +45,52 @@ describe("coding tools suite", () => {
   });
   
   describe("coding tools", () => {
+    it("R2 普通读写不启动 Linux，显式取入和上传才在两处复制文件", async () => {
+      const sandbox = env.SANDBOX.getByName("owner");
+      const host = runtime();
+      await runInDurableObject(sandbox, (instance, ctx) => {
+        Object.defineProperty(instance, "workspace", { value: new WorkspaceManager({
+          workspace: "workspace:" + ctx.id, storage: ctx.storage, bucket: env.ASSETS,
+          runtime: host.client, resetRuntime: host.reset, runtimeReady: host.ready,
+        }) });
+      });
+      const restore = vi.spyOn(host.client, "restore");
+      const seen = scriptedModel([{ name: "codemode", args: { code:
+        'text(await tools.r2_write({key:"reports/a.txt",content:"独立对象"})); text((await tools.r2_read({key:"reports/a.txt"})).text);' } },
+        { name: "", args: {} }, { name: "codemode", args: { code:
+        'text(await tools.r2_read({key:"reports/a.txt", path:"/work/local.txt"})); text(await tools.write({path:"local.txt",content:"修改副本"})); text(await tools.r2_write({key:"second.txt",path:"local.txt"}));' } }]);
+      await env.THREAD.getByName("owner").submit(nextInput("保存到 R2"));
+      expect(seen.outputs.join("\n")).toContain("独立对象");
+      expect(restore).not.toHaveBeenCalled();
+      expect((await sandbox.files()).files).toEqual([]);
+      await runInDurableObject(env.SANDBOX.getByName("group:200000001"), async other => {
+        await expect(other.readObject("reports/a.txt")).rejects.toThrow("not_found");
+      });
+      await env.THREAD.getByName("owner").submit(nextInput("取入工作区并上传修改"));
+      expect(seen.outputs.join("\n")).toContain("second.txt");
+      const decode = (value: Uint8Array) => new TextDecoder().decode(value);
+      expect(decode(await sandbox.readObject("r2://reports/a.txt"))).toBe("独立对象");
+      expect(decode(await sandbox.readObject("second.txt"))).toBe("修改副本");
+      expect(decode((await sandbox.readBlob("local.txt")).bytes)).toBe("修改副本");
+    });
     it("超长文本通过同一文件环境保存全文，输出返回可继续读取的路径", async () => {
-      vi.spyOn(SandboxDO.prototype, "createTempDir").mockResolvedValue("/work/.codemode/full-text");
-      const write = vi.spyOn(SandboxDO.prototype, "writeFile").mockResolvedValue({ bytes: 50000 });
+      vi.spyOn(SandboxDO.prototype, "createOutputPrefix").mockResolvedValue("r2://.codemode/full-text");
+      const write = vi.spyOn(SandboxDO.prototype, "writeObject").mockResolvedValue({ bytes: 50000 });
       const seen = scriptedModel([{ name: "codemode", args: { code: 'text("完整文本".repeat(12500));' } }]);
       await env.THREAD.getByName("owner").submit(nextInput("生成完整输出", 10000001));
-      expect(write).toHaveBeenCalledWith("/work/.codemode/full-text/output.txt", "完整文本".repeat(12500));
-      expect(seen.outputs.join("\n")).toContain("Full output: /work/.codemode/full-text/output.txt");
+      expect(write).toHaveBeenCalledWith("r2://.codemode/full-text/output.txt", "完整文本".repeat(12500));
+      expect(seen.outputs.join("\n")).toContain("Full output: r2://.codemode/full-text/output.txt");
     });
     it.each(["persistence", "owner", "generation"] as const)("自动保存遇到 %s 失败时报告原因，不宣称已保存", async failure => {
       const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII=";
       const seen = scriptedModel([{ name: "codemode", args: { code: `image({type:"image",data:${JSON.stringify(data)},mimeType:"image/png"});` } }]);
-      const write = vi.spyOn(SandboxDO.prototype, "writeFile").mockRejectedValue(Error("persistence_failed"));
+      const write = vi.spyOn(SandboxDO.prototype, "writeObject").mockRejectedValue(Error("persistence_failed"));
       await runInDurableObject(env.THREAD.getByName("owner"), async (instance, state) => {
         const currentEnv = { ...env, QQ_OWNER: "10000001", MEMORY_EXTRACT_NAMESPACES: "" };
-        vi.spyOn(SandboxDO.prototype, "createTempDir").mockImplementation(async () => {
+        vi.spyOn(SandboxDO.prototype, "createOutputPrefix").mockImplementation(async () => {
           if (failure === "owner") currentEnv.QQ_OWNER = "10000002";
           if (failure === "generation") await runInDurableObject(env.THREAD.getByName("owner"), (_current, currentState) => { currentState.storage.sql.exec("UPDATE session_state SET generation=generation+1 WHERE id=1"); });
-          return "/work/.codemode/test";
+          return "r2://.codemode/test";
         });
         await threadWithBindings(instance, state, currentEnv).submit(nextInput("截图", 10000001));
       });

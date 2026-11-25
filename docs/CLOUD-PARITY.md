@@ -49,13 +49,14 @@ BridgeDO 是 QQ 唯一发送事实源，RegistryDO 保存授权、人设、技�
 - `MediaRepository`（`workers/src/media/repository.ts`）固定作用域，单资产上限 10 MiB，`AssetRef = { id, scope, sha256, bytes, mime, name, kind }`（`image | file | audio | video`）。`issueUrl` 签发 5 分钟（最长 600 秒）单对象随机票据 `/media/object?token=...`，不含管理口令或原始 scope；`/admin` 媒体上传下载要求 Bearer 鉴权。
 - 图片、音频、视频可与文字同条发送；普通文件走独立 `upload_group_file / upload_private_file` intent（成功 ACK 允许无 `messageId`）。
 - 本机 NapCat 启用 `enableLocalFile2Url: true` 后，Bridge 从 `get_file` 和 `get_image` 接收并校验文件字节，普通文件优先使用消息中的 `file_id`。单附件上限为 10 MiB。下载 HTTP(S) 链接时逐跳检查公网地址。
-- 有工作区写权限时，`qq_attachment` 将字节直接写入当前工作区，返回已提交的 `path`、文件名、类型和字节数。模型可以传 `path: "downloads/package.zip"` 或绝对路径 `/work/downloads/package.zip`；一条消息有多个附件时，用 `ordinal` 为其中一个指定路径。省略路径时按内容哈希和文件名保存到 `/work/attachments/`。目标存在相同内容时复用，内容冲突时返回 `workspace_conflict`。工作区统一持久化到 R2。
+- `qq_attachment` 在可写会话中默认将附件保存为私有 R2 对象 `r2://attachments/<内容哈希>/<文件名>`。传 `/work` 路径或相对路径会显式导入工作区，同名且内容不同会返回 `workspace_conflict`。一条消息有多个附件时用 `ordinal` 选择文件。
 - `qq_image` 返回图片内容和会话私有资产引用。仅有媒体读取权限的回合仍可通过 `qq_attachment` 获取私有引用。历史消息中已有的私有资产按原会话读取。
 - `createMediaExtension` 注册 `qq_image`、`qq_attachment`、`send_file`，由宿主 `lookupHostMedia` 校验当前 scope 与目标，每次最多解析 5 个附件。
 
 ### 3.2 持久工作区与群聊脚本执行
 
 - `SandboxDO` 的 Cloudflare 容器通过原生 `Files` 与 `Container.exec` 操作 `/work`，R2 保存不可变 `WorkspaceManifest` 与按 SHA-256 去重的 blob，DO 保存 `head`、`epoch` 与操作账本。
+- 冷容器用 `DirectoryBackup` 恢复已提交目录归档，再按最新清单应用归档后的变更。旧工作区第一次从原有清单恢复后生成归档。新变更逐次提交。工作区有变更且距上次归档满 15 分钟时才更新整包，空闲时不启动容器做备份。归档只收录清单已跟踪的文件。归档不可用时仍可从清单恢复。
 - 新产生的 `.git`、`node_modules`、`.wrangler` 留在容器内不计入 R2 源码快照配额（旧 manifest 已追踪的保留兼容）。
 - `run({ operationId, operation })` 串行执行 `exec / read / write / edit`，返回 `committed | failed | unknown`；同 ID 异参拒绝，已执行中断的 `bash` 返回 `unknown` 绝不重跑。成功变更必须完成 checkpoint；`epoch` 递增阻止旧容器提交快照。`resetRuntime()` 仅销毁容器，保留持久工作区。
 - **分页 GC**：`gc` 默认 dry-run，保留 `head`、1 小时传输租约及最近 2 份历史，每批扫描最多 500 对象，由 `SandboxDO` alarm 每 30 秒续跑一批（失败 5 分钟重试），不阻塞批间读写；维护涵盖默认会话工作区、旧子任务工作区与登记表中的显式 Cloudflare 资源。
@@ -65,11 +66,12 @@ BridgeDO 是 QQ 唯一发送事实源，RegistryDO 保存授权、人设、技�
 
 ### 3.3 Code Mode 输出文件环境
 
-主会话与有编码权限的子 agent 通过 `Harness.open({ env })` 获得基于 `/work` 持久工作区的 `ExecutionEnv`：
+主会话及获准使用相应工作区的子 agent 可以通过 Code Mode 访问独立的 R2 文件存储。同一个 Cloudflare 工作区资源使用同一个私有 key 前缀。Linux `/work` 和 R2 对象单独保存。
 
-1. 远程 MCP 返回图片且脚本调用 `image(block)`，或输出超长文本时，`pi-durable` 将原始字节写入 `/work/.codemode/<时间戳>-<UUID>-pi-codemode-/...`，经容器快照与 R2 提交后返回保存路径（图片同时直接给模型查看）。
-2. 主 agent 可直接 `send_file({ path })`；子 agent 汇报 `sandboxId` 与路径，由父 agent 通过 `send_file({ sandboxId, path })` 导出（仅限主人拥有的 Cloudflare 资源）。
-3. 受管临时目录在下次创建时最多清理 10 个超过 7 天的目录；长期文件应复制到 `/work/out/`。二进制 RPC 保持 `Uint8Array`；高级句柄与环境 shell 明确返回 `not_supported` / `shell_unavailable`，命令执行仍走 `bash` 工具。
+- `r2_write({key,content})` 保存文本；`r2_write({key,path})` 将已提交的 Linux 文件上传到该 key。
+- `r2_read({key})` 直接读取文本或图片；`r2_read({key,path:"/work/in/file.bin"})` 将原始字节复制进 Linux 工作区供 `bash` 打开。两处副本后续独立修改。
+- `image(block)` 和超长输出自动写入 `r2://.codemode/...`，不唤醒 Linux 容器。创建新输出时分批清理超过七天的临时对象；其他自选 key 长期保存。
+- 主 agent 可以通过 `send_file({path:"r2://..."})` 转发原始文件。子 agent 汇报其资源 ID 和引用，父 agent 按已有授权传 `sandboxId` 取用。历史 `/work/.codemode/` 文件仍按原路径保存在工作区。`agent_send` 的 `files` 接受工作区路径，转发 R2 对象前先用 `r2_read({key,path})` 取入。
 
 ### 主人向群共享登录凭证
 

@@ -16,6 +16,35 @@ import { input, syncedView } from "./helpers";
 describe("workspace persistence and gc", () => {
   afterEach(async () => { vi.restoreAllMocks(); await reset(); });
   describe("持久工作区", () => {
+    it("旧工作区首次物化生成归档，冷启动可直接恢复，差量版本仍按最新清单读取", async () => {
+      await runInDurableObject(env.SANDBOX.getByName("backup-upgrade"), async (_, ctx) => {
+        const host = runtime();
+        const deps = { workspace: "workspace:" + ctx.id, storage: ctx.storage, bucket: env.ASSETS,
+          runtime: host.client, runtimeReady: host.ready, resetRuntime: host.reset };
+        const legacy = new WorkspaceManager(deps);
+        await legacy.run({ operationId: "legacy", operation: { kind: "write", path: "old.txt", text: "旧数据" } });
+        const snapshot = await legacy.files(), bytes = (await legacy.readBlob("old.txt")).bytes;
+        const restore = host.client.restore.bind(host.client);
+        const fromManifest = vi.spyOn(host.client, "restore");
+        const record = { id: crypto.randomUUID(), size: bytes.length, dir: "/work", sha256: await sha256(bytes), format: "tar+zstd/1" as const };
+        const backup = host.client.backupDirectory = vi.fn(async () => record);
+        const load = host.client.restoreDirectory = vi.fn(async () => restore(snapshot, async () => bytes));
+        const read = (manager: WorkspaceManager, path: string) => manager.run({ operationId: crypto.randomUUID(), operation: { kind: "read", path } });
+        const upgraded = new WorkspaceManager(deps);
+        expect(await read(upgraded, "old.txt")).toMatchObject({ result: { text: "旧数据" } });
+        expect(backup).toHaveBeenCalledTimes(1);
+        fromManifest.mockClear();
+        const cold = new WorkspaceManager(deps);
+        expect(await read(cold, "old.txt")).toMatchObject({ result: { text: "旧数据" } });
+        expect(load).toHaveBeenCalledWith(record);
+        expect(fromManifest).not.toHaveBeenCalled();
+        await cold.run({operationId: "append", operation: {kind: "write", path: "new.txt", text: "新增"}});
+        const next = new WorkspaceManager(deps);
+        expect(await read(next, "new.txt")).toMatchObject({ result: { text: "新增" } });
+        expect(fromManifest.mock.calls.at(-1)?.[2]).toMatchObject({revision: snapshot.revision});
+        expect(backup).toHaveBeenCalledTimes(1);
+      });
+    });
     it("Agent 附件经过真实 manifest/CAS 提交后可重建并通过 read 消费（容器客户端为本地夹具）", async () => {
       await runInDurableObject(env.SANDBOX.getByName("agent-import"), async (_instance, state) => {
         const host = runtime(), workspace = "workspace:agent-import";

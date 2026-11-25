@@ -1,9 +1,11 @@
 // 原生 Container.exec 调用的固定本地助手；不监听端口，也不接收宿主命令。
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { pathToFileURL } from "node:url";
-import { workspaceControl } from "./workspace.mjs";
+import { relativePath, workspaceControl } from "./workspace.mjs";
 
 export const OUTPUT_CAP = 64 * 1024;
 const MAX_TIMEOUT_MS = 120000;
@@ -80,18 +82,48 @@ export function createSandboxRuntime({ root, shell = "/bin/bash", user, env = {}
       });
     });
   }
-  async function restore({ stage, snapshot }) {
+  async function restore({ stage, snapshot, reuse = [] }) {
     // stage 由 Worker 随机生成；不允许把其它容器目录作为恢复输入或清理目标。
     if (typeof stage !== "string" || !/^\/tmp\/sandbox-import-[a-f0-9-]{36}$/.test(stage)) fail("path_denied");
     if ((await fs.realpath(stage)) !== stage) fail("path_denied");
     const { id } = await workspace.start(snapshot);
+    const local = new Set(reuse);
     for (const file of snapshot.files) {
-      const source = await resolveInside(stage, file.path);
+      const source = await resolveInside(local.has(file.path) ? root : stage, file.path);
       await workspace.put(id, file.path, await fs.readFile(source));
     }
     return workspace.commit(id);
   }
-  return { resolve: raw => resolveInside(root, raw), exec, snapshot: retainedPaths => workspace.scan(retainedPaths), restore };
+  // 从已校验的清单构建独立目录，容器缓存和后台进程的后续写入不会进入归档。
+  async function stageBackup(snapshot) {
+    const parent = await fs.mkdtemp(path.join(os.tmpdir(), "cs-backup-"));
+    const target = path.join(parent, "work");
+    try {
+      await fs.mkdir(target);
+      await own(target);
+      for (const dir of snapshot.directories) {
+        const item = path.join(target, relativePath(dir));
+        await fs.mkdir(item, { recursive: true });
+        await own(item);
+      }
+      for (const file of snapshot.files) {
+        const bytes = await fs.readFile(await resolveInside(root, file.path));
+        if (createHash("sha256").update(bytes).digest("hex") !== file.sha256) fail("workspace_conflict");
+        const item = path.join(target, relativePath(file.path));
+        await fs.writeFile(item, bytes, { flag: "wx", mode: file.mode });
+        await fs.chmod(item, file.mode);
+        await own(item);
+      }
+      return target;
+    } catch (error) { await fs.rm(parent, { recursive: true, force: true }); throw error; }
+  }
+  async function discardBackup(stage) {
+    if (typeof stage !== "string" || path.dirname(path.dirname(stage)) !== os.tmpdir() ||
+      !/^cs-backup-[a-zA-Z0-9]+$/.test(path.basename(path.dirname(stage))) || path.basename(stage) !== "work") fail("path_denied");
+    await fs.rm(path.dirname(stage), { recursive: true, force: true });
+    return { restored: true };
+  }
+  return { stageBackup, discardBackup, resolve: raw => resolveInside(root, raw), exec, snapshot: retainedPaths => workspace.scan(retainedPaths), restore };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -105,6 +137,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       case "resolve": result = await runtime.resolve(input.path); break;
       case "exec": result = await runtime.exec(input); break;
       case "snapshot": result = await runtime.snapshot(input.retainedPaths); break;
+      case "stageBackup": result = await runtime.stageBackup(input.snapshot); break;
+      case "discardBackup": result = await runtime.discardBackup(input.stage); break;
       case "restore": result = await runtime.restore(input); break;
       default: fail("invalid_request");
     }

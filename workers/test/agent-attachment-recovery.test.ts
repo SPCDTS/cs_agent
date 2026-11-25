@@ -96,12 +96,12 @@ async function receiveError(recipient: any, message: any) {
   });
 }
 
-it.each(["edited", "deleted"])("real saveAttachment retries second-file R2 failure after eviction and keeps %s first copy beyond 32 operations", async copy => {
+it.each(["edited", "deleted"])("create-only write retries second-file R2 failure after eviction and keeps %s first copy beyond 32 operations", async copy => {
   const sandbox = env.SANDBOX.getByName("attachment-recovery");
   const one = new TextEncoder().encode("one"), two = new TextEncoder().encode("two"), twoHash = await sha256(two);
-  await sandbox.saveAttachment("/work/first.txt", one, "message:0");
+  await sandbox.writeFile("/work/first.txt", one, "message:0", true);
   // 不同 ID、相同字节本来就成功；该事实不是本次缺陷。
-  await sandbox.saveAttachment("/work/first.txt", one, "different-id");
+  await sandbox.writeFile("/work/first.txt", one, "different-id", true);
   await runInDurableObject(sandbox, async (i, s) => {
     const manager = (i as any).workspace, host = runtime(), original = manager.deps.bucket as R2Bucket;
     Object.assign(manager.deps, { runtime: host.client, resetRuntime: host.reset, runtimeReady: host.ready });
@@ -112,7 +112,7 @@ it.each(["edited", "deleted"])("real saveAttachment retries second-file R2 failu
       };
       const value = Reflect.get(target, prop); return typeof value === "function" ? value.bind(target) : value;
     } });
-    await expect(i.saveAttachment("/work/second.txt", two, "message:1")).rejects.toThrow("synthetic_r2_unavailable");
+    await expect(i.writeFile("/work/second.txt", two, "message:1", true)).rejects.toThrow("synthetic_r2_unavailable");
     expect((await s.storage.list({ prefix: "workspace:op:" })).size).toBe(0);
     expect((await s.storage.list({ prefix: "workspace:attachment:" })).size).toBe(2);
     manager.deps.bucket = original;
@@ -121,12 +121,12 @@ it.each(["edited", "deleted"])("real saveAttachment retries second-file R2 failu
     for (let n = 0; n < 33; n++) await i.writeFile("/work/later.txt", String(n), "later-" + n);
   });
   await evictDurableObject(sandbox);
-  await sandbox.saveAttachment("/work/first.txt", one, "message:0");
-  await sandbox.saveAttachment("/work/second.txt", two, "message:1");
+  await sandbox.writeFile("/work/first.txt", one, "message:0", true);
+  await sandbox.writeFile("/work/second.txt", two, "message:1", true);
   if (copy === "edited") expect(new TextDecoder().decode((await sandbox.readBlob("/work/first.txt")).bytes)).toBe("edited");
   else await runInDurableObject(sandbox, async i => { await expect(i.readBlob("/work/first.txt")).rejects.toThrow("not_found"); });
   expect(new TextDecoder().decode((await sandbox.readBlob("/work/second.txt")).bytes)).toBe("two");
-  await runInDurableObject(sandbox, async i => { await expect(i.saveAttachment("/work/second.txt", one, "message:1")).rejects.toThrow("operation_conflict"); });
+  await runInDurableObject(sandbox, async i => { await expect(i.writeFile("/work/second.txt", one, "message:1", true)).rejects.toThrow("operation_conflict"); });
 });
 
 it("attachment head and receipt roll back together on durable transaction failure, then recover after eviction", async () => {
@@ -139,27 +139,28 @@ it("attachment head and receipt roll back together on durable transaction failur
       });
       const value = Reflect.get(target, prop); return typeof value === "function" ? value.bind(target) : value;
     } });
-    await expect(i.saveAttachment("/work/a.txt", bytes, "atomic")).rejects.toThrow("synthetic_transaction_failure");
+    await expect(i.writeFile("/work/a.txt", bytes, "atomic", true)).rejects.toThrow("synthetic_transaction_failure");
     expect(await s.storage.get("workspace:head")).toBeUndefined();
     expect((await s.storage.list({ prefix: "workspace:attachment:" })).size).toBe(0);
   });
   await evictDurableObject(sandbox);
-  await sandbox.saveAttachment("/work/a.txt", bytes, "atomic");
+  await sandbox.writeFile("/work/a.txt", bytes, "atomic", true);
   expect(new TextDecoder().decode((await sandbox.readBlob("/work/a.txt")).bytes)).toBe("atomic");
 });
 
 it("owner Agent reads and forwards received files through real tools without coding_exec or access to other owner files", async () => {
   await seed("owner", 10000001); await seed(group, 10000003);
-  await env.SANDBOX.getByName(group).saveAttachment("/work/out/note.txt", new TextEncoder().encode("peer-visible\nsecond"), "source");
-  await env.SANDBOX.getByName("owner").saveAttachment("/work/private.txt", new TextEncoder().encode("OWNER-PRIVATE-SENTINEL"), "owner-private");
+  await env.SANDBOX.getByName(group).writeFile("/work/out/note.txt", new TextEncoder().encode("peer-visible\nsecond"), "source", true);
+  await env.SANDBOX.getByName("owner").writeFile("/work/private.txt", new TextEncoder().encode("OWNER-PRIVATE-SENTINEL"), "owner-private", true);
   const path = "/work/agent-files/" + messageId(group, "0:owner-file").slice(6) + "/0-note.txt";
   const seen = scriptedModel([{ name: "codemode", args: { code: [
     'text(await tools.read({path:' + JSON.stringify(path) + ',limit:1}));',
     'try{text(await tools.read({path:"/work/private.txt"}));}catch(e){text("read-denied:"+String(e));}',
+    'try{text(await tools.r2_read({key:"private.txt"}));}catch(e){text("r2-denied:"+String(e));}',
     'try{text(await tools.bash({command:"echo forbidden"}));}catch(e){text("bash-denied:"+String(e));}',
     'try{text(await tools.write({path:"/work/private.txt",content:"forbidden"}));}catch(e){text("write-denied:"+String(e));}',
   ].join("\n") } }]);
-  const run = vi.spyOn(SandboxDO.prototype, "run");
+  const run = vi.spyOn(SandboxDO.prototype, "run"), readObject = vi.spyOn(SandboxDO.prototype, "readObject");
   await runInDurableObject(env.THREAD.getByName(group), async (i, s) => {
     const row = s.storage.sql.exec("SELECT * FROM inbound WHERE kind='message'").one();
     expect((await (i as any).sendAgentMessage({ to: "owner", text: "file", files: ["/work/out/note.txt"] }, "owner-file", row)).status).toBe("accepted");
@@ -173,7 +174,8 @@ it("owner Agent reads and forwards received files through real tools without cod
     });
   }, { timeout: 10000 });
   expect(seen.outputs.join("\n")).not.toContain("OWNER-PRIVATE-SENTINEL");
-  expect(run).not.toHaveBeenCalled();
+  expect(readObject).not.toHaveBeenCalled();
+  for (const [{ operation }] of run.mock.calls) expect(operation).toMatchObject({ kind: "writeBytes", createOnly: true, path });
   await runInDurableObject(env.THREAD.getByName("owner"), async (i, s) => {
     const row = s.storage.sql.exec("SELECT * FROM inbound WHERE kind='agent'").one();
     expect((await (i as any).sendAgentMessage({ to: group, text: "return copy", files: [path] }, "forward-file", row)).status).toBe("accepted");
@@ -206,7 +208,7 @@ it("owner receives a valid group attachment and reads only that attachment witho
 
 it("a child without coding_exec can receive, read and return only its registered attachments", async () => {
   const { cid, address } = await child(group);
-  await env.SANDBOX.getByName(group).saveAttachment("/work/source.txt", new TextEncoder().encode("child-visible"), "child-source");
+  await env.SANDBOX.getByName(group).writeFile("/work/source.txt", new TextEncoder().encode("child-visible"), "child-source", true);
   const receipt = await runInDurableObject(env.THREAD.getByName(group), async (i, s) => {
     const row = s.storage.sql.exec<{ received_at: number }>("SELECT * FROM inbound WHERE kind='message'").one();
     const args = { to: address, text: "file", files: ["/work/source.txt"] };
@@ -298,7 +300,7 @@ it.each(["group", "child"] as const)("%s attachment import no longer invokes the
     expect(i.reviewSnapshots()).toBe(0);
     expect((await s.storage.list({ prefix: "workspace:op:" })).size).toBe(0);
     const rebuilt = new SandboxDO(s, env);
-    await rebuilt.saveAttachment(f.paths[1]!, new TextEncoder().encode("two"), "agent-import:" + f.message.id + ":1");
+    await rebuilt.writeFile(f.paths[1]!, new TextEncoder().encode("two"), "agent-import:" + f.message.id + ":1", true);
     expect(new TextDecoder().decode((await rebuilt.readBlob(f.paths[1]!)).bytes)).toBe("two");
   });
   expect((await f.recipient.agentReceive(f.message)).status).toBe("duplicate");
@@ -318,7 +320,7 @@ it.each(["group", "child"] as const)("%s recovers a real second attachment R2 fa
   expect(new TextDecoder().decode((await f.sandbox.readBlob(f.paths[0]!)).bytes)).toBe("one");
   await runInDurableObject(f.sandbox, async (_i, s) => {
     const rebuilt = new SandboxDO(s, env);
-    await rebuilt.saveAttachment(f.paths[1]!, new TextEncoder().encode("two"), "agent-import:" + f.message.id + ":1");
+    await rebuilt.writeFile(f.paths[1]!, new TextEncoder().encode("two"), "agent-import:" + f.message.id + ":1", true);
     expect(new TextDecoder().decode((await rebuilt.readBlob(f.paths[1]!)).bytes)).toBe("two");
   });
   expect((await f.recipient.agentReceive(f.message)).status).toBe("accepted");
@@ -336,7 +338,7 @@ it.each(["group", "child"] as const)("%s SQL failure then delete, 33 operations,
   await runInDurableObject(f.sandbox, async (_i, s) => {
     const rebuilt = new SandboxDO(s, env), host = runtime();
     Object.assign((rebuilt as any).workspace.deps, { runtime: host.client, resetRuntime: host.reset, runtimeReady: host.ready });
-    await rebuilt.saveAttachment(f.paths[0]!, new TextEncoder().encode("one"), "agent-import:" + f.message.id + ":0");
+    await rebuilt.writeFile(f.paths[0]!, new TextEncoder().encode("one"), "agent-import:" + f.message.id + ":0", true);
     await expect(rebuilt.readBlob(f.paths[0]!)).rejects.toThrow("not_found");
     expect(new TextDecoder().decode((await rebuilt.readBlob(f.paths[1]!)).bytes)).toBe("two");
   });

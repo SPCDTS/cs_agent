@@ -773,7 +773,7 @@ export class ThreadDO extends DurableObject<Env> {
       const generation = await this.sessionGeneration();
       const authority = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE kind='message' AND session_generation=? AND turn_id IS NOT NULL AND user_id<>self_id ORDER BY rowid DESC LIMIT 1", generation);
       if (!authority) throw new Error("agent_recipient_not_ready");
-      const paths = await importFiles(this.env, message, (path, bytes, operationId) => this.env.SANDBOX.getByName(ns).saveAttachment(path, bytes, operationId));
+      const paths = await importFiles(this.env, message, (path, bytes, operationId) => this.env.SANDBOX.getByName(ns).writeFile(path, bytes, operationId, true));
       await this.database.transaction(async tx => {
         await tx.run("INSERT INTO inbound(message_id,platform_message_id,user_id,self_id,text,received_at,status,chat_kind,chat_id,nickname,scope_name,kind,reply_channel,session_generation,when_busy,agent_from,agent_hash,agent_files,agent_authority) VALUES(?,?,'',?,?,?,'queued',?,?,?,?,'agent','qq',?,NULL,?,?,?,?)",
           message.id, message.id, authority.self_id, incomingText(message, paths), Date.now(), authority.chat_kind, authority.chat_id, "", authority.scope_name,
@@ -923,10 +923,10 @@ export class ThreadDO extends DurableObject<Env> {
     if (resourceId && !resource) throw new Error("delegation_denied");
     return this.env.SANDBOX.getByName(resource?.name ?? subagentName(scope, id));
   }
-  async subagentSaveAttachment(id: string, path: string, bytes: Uint8Array, operationId?: string) {
+  async subagentImportFile(id: string, path: string, bytes: Uint8Array, operationId?: string) {
     const normalized = workPath(path);
     if (!/^\/work\/agent-files\/[0-9a-f]{64}\/[0-9]+-/.test(normalized)) throw new Error("agent_file_access_denied");
-    return (await this.subagentAttachmentWorkspace(id)).saveAttachment(normalized, bytes, operationId);
+    return (await this.subagentAttachmentWorkspace(id)).writeFile(normalized, bytes, operationId, true);
   }
   async subagentRetireAttachments(id: string, messageId: string, count: number): Promise<void> {
     await (await this.subagentAttachmentWorkspace(id)).retireAgentAttachments(messageId, count);
@@ -937,8 +937,10 @@ export class ThreadDO extends DurableObject<Env> {
     if (!await this.env.SUBAGENT.getByName(subagentName(await this.namespace(), id)).agentFileAllowed(normalized)) throw new Error("delegation_denied");
     return (await this.subagentAttachmentWorkspace(id)).readBlob(normalized);
   }
-  async subagentWriteFile(id: string, path: string, content: string | Uint8Array) { return (await this.subagentWorkspaceFiles(id)).writeFile(workPath(path), content); }
-  async subagentCreateTempDir(id: string, prefix?: string) { return (await this.subagentWorkspaceFiles(id)).createTempDir(prefix); }
+  async subagentWriteFile(id: string, path: string, content: string | Uint8Array, operationId?: string) { return (await this.subagentWorkspaceFiles(id)).writeFile(workPath(path), content, operationId); }
+  async subagentCreateOutputPrefix(id: string, prefix?: string) { return (await this.subagentWorkspaceFiles(id)).createOutputPrefix(prefix); }
+  async subagentReadObject(id: string, key: string) { return (await this.subagentWorkspaceFiles(id)).readObject(key); }
+  async subagentWriteObject(id: string, key: string, content: string | Uint8Array) { return (await this.subagentWorkspaceFiles(id)).writeObject(key, content); }
 
   private async subagentCaller(input: InboundRow | undefined, { spawn = false, sandboxId, mcpTools }: { spawn?: boolean; sandboxId?: string; mcpTools?: McpToolSelection }): Promise<SubagentCaller | undefined> {
     if (input?.kind !== "message" || !input.turn_id || input.user_id === input.self_id || input.session_generation !== await this.sessionGeneration()) return;

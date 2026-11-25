@@ -1,11 +1,12 @@
+import { DirectoryBackup } from "@cloudflare/sandbox";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
 import type { GcReport } from "./workspace-gc";
-import { MediaRepository, type AssetRef } from "../media/repository";
+import { scopePrefix, MediaRepository, type AssetRef } from "../media/repository";
 import { imageMime } from "../media/model";
 import type { DirEntry, ExecResult, FileEdit, ReadResult } from "./client";
 import { nativeSandboxClient } from "./native";
-import { createOutputDirectory } from "./output-directory";
+import { ObjectFiles } from "./object-files";
 import { classifyError, logDiag } from "../shared/diagnostics";
 import { WorkspaceManager, type WorkspaceManifest, type WorkspaceOperation, type WorkspaceRunResult, type WorkspaceCompareResult } from "./workspace";
 export type { WorkspaceManifest, WorkspaceOperation, WorkspaceRunResult, WorkspaceCompareResult } from "./workspace";
@@ -28,7 +29,14 @@ export class SandboxDO extends DurableObject<Env> {
   static readonly IDLE_MS = 3 * 60 * 1000;
   private ready = false;
   private runtimeGeneration = 0;
-  private readonly client = nativeSandboxClient({ container: () => this.startRuntime() });
+  private readonly objects = new ObjectFiles(this.env.ASSETS, `cs-agent/v1/object-files/${this.ctx.id}/`);
+  private backup?: DirectoryBackup;
+  private readonly client = nativeSandboxClient({ container: () => this.startRuntime(), backup: async () => {
+    const container = await this.startRuntime();
+    return this.backup ??= new DirectoryBackup(container, this.ctx.exports.DirectoryBackupGateway, {
+      binding: "ASSETS", prefix: `${await scopePrefix("workspace:" + this.ctx.id)}/workspace/archives/`,
+    });
+  } });
   private readonly workspace = new WorkspaceManager({ workspace: `workspace:${this.ctx.id.toString()}`, bucket: this.env.ASSETS, storage: this.ctx.storage,
     runtime: this.client, runtimeReady: () => this.ready && Boolean(this.ctx.container?.running), resetRuntime: () => this.destroyRuntime() });
   private container(): Container {
@@ -112,19 +120,20 @@ export class SandboxDO extends DurableObject<Env> {
     if (!("text" in result) && !("kind" in result)) throw new Error("sandbox_error");
     return result;
   }
-  async writeFile(path: string, content: string | Uint8Array, operationId?: string): Promise<{ bytes: number }> {
-    const result = await this.result(typeof content === "string" ? { kind: "write", path, text: content } : { kind: "writeBytes", path, data: content }, operationId);
+  async writeFile(path: string, content: string | Uint8Array, operationId?: string, createOnly = false): Promise<{ bytes: number }> {
+    const operation: WorkspaceOperation = typeof content === "string" && !createOnly
+      ? { kind: "write", path, text: content }
+      : { kind: "writeBytes", path, data: typeof content === "string" ? new TextEncoder().encode(content) : content, ...(createOnly ? { createOnly } : {}) };
+    const result = await this.result(operation, operationId);
     if (!("bytes" in result)) throw new Error("sandbox_error");
     return result;
   }
-  async createTempDir(prefix?: string): Promise<string> {
-    return createOutputDirectory({ list: path => this.list(path),
-      mkdir: async path => { await this.result({ kind: "mkdir", path }); },
-      remove: async path => { await this.result({ kind: "remove", path }); },
-    }, prefix);
-  }
-  async saveAttachment(path: string, bytes: Uint8Array, operationId?: string): Promise<void> {
-    await this.workspace.saveAttachment(path, bytes, operationId ?? crypto.randomUUID());
+  async readObject(key: string) { return this.objects.read(key); }
+  async writeObject(key: string, content: string | Uint8Array) { return this.objects.write(key, content); }
+  async createOutputPrefix(prefix = "output-"): Promise<string> {
+    const key = this.objects.outputPrefix(prefix);
+    this.ctx.waitUntil(this.objects.cleanupOutputs(Date.now()).catch(() => console.warn({ event: "codemode_output_cleanup_failed" })));
+    return key;
   }
   async retireAgentAttachments(messageId: string, count: number): Promise<void> {
     if (!/^agent:[0-9a-f]{64}$/.test(messageId) || !Number.isInteger(count) || count < 0 || count > 5) throw new Error("invalid_request");
@@ -139,7 +148,7 @@ export class SandboxDO extends DurableObject<Env> {
   files(revision?: string): Promise<WorkspaceManifest> { return this.workspace.files(revision); }
   readBlob(path: string, revision?: string, maxBytes?: number): Promise<{ bytes: Uint8Array; mime: string; name: string }> { return this.workspace.readBlob(path, revision, maxBytes); }
   async exportAsset(path: string, scope: string, name?: string): Promise<AssetRef> {
-    const file = await this.readBlob(path);
+    const file = path.startsWith("r2://") ? { bytes: await this.readObject(path), name: path.split("/").at(-1)! } : await this.readBlob(path);
     return new MediaRepository({ bucket: this.env.ASSETS, scope }).put({ ...file, name: name ?? file.name, kind: imageMime(file.bytes) ? "image" : "file" });
   }
   importSnapshot(input: { manifest: WorkspaceManifest; expectedRevision: string; paths?: string[] }): Promise<WorkspaceCompareResult> { return this.workspace.importSnapshot(input); }

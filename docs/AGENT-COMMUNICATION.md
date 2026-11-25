@@ -32,7 +32,7 @@ Thread 使用既有 inbound，Subagent 使用既有 inbox，执行仍经 root.su
 
 ## 文件
 
-files 是发送方自己已授权工作区的路径列表，最多 5 个，单次总量不超过 10 MiB。宿主读取字节并冻结为来源 R2 资产；接收端验证来源证明和完整资产引用、哈希、大小，不另存接收方 R2 assets，而是以消息 ID + 附件序号生成稳定 operationId，经 saveAttachment 的独立只增附件提交路径（字节 + manifest/head + 原子成功回执）持久化到 /work/agent-files/<消息哈希>/。只在持久提交成功后入箱，目标可用既有 read 读取；接收、读取和转发附件不依赖 coding_exec。子任务即使未授 coding，也只能读取其 inbox 登记的附件。不能用裸跨 scope asset ID 或发送方路径代替副本。
+files 是发送方自己已授权工作区的路径列表，最多 5 个，单次总量不超过 10 MiB。宿主读取字节并冻结为来源 R2 资产；接收端验证来源证明和完整资产引用、哈希、大小，不另存接收方 R2 assets，而是以消息 ID + 附件序号生成稳定 operationId，经工作区 `writeFile` 的仅创建模式（字节 + manifest/head + 原子成功回执）持久化到 /work/agent-files/<消息哈希>/。只在持久提交成功后入箱，目标可用既有 read 读取；接收、读取和转发附件不依赖 coding_exec。子任务即使未授 coding，也只能读取其 inbox 登记的附件。不能用裸跨 scope asset ID 或发送方路径代替副本。
 
 同路径同 SHA 的 createOnly 原本就能以不同操作 ID 成功；不能据此声称随机 ID 必然冲突。附件现在不调用容器命令，不生成 failed/unknown/expired 命令回执；R2 或事务提交前失败可重新提交，head 与成功证明原子更新，不受命令 32 条结果窗口影响。
 

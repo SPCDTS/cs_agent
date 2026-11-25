@@ -47,6 +47,7 @@ import type { SandboxTask } from '../sandbox/task-access';
 import { createCodingExtension, sandboxResourceTools } from '../tools/coding';
 import { decodeFileRead } from '../sandbox/read';
 import { workPath } from '../sandbox/client';
+import { objectFileTools } from '../tools/object-files';
 import { workspaceExecutionEnv } from '../sandbox/execution-env';
 import { isWeb, isWebAdmin, targetOf, type InboundRow, type ToolProfile } from './model';
 
@@ -302,6 +303,10 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     },
     record: (kind, detail) => host.audit(kind, detail),
   }));
+  if (memory.ns === "owner" || memory.ns.startsWith("group:")) registry.install(objectFileTools(async (api, c) => {
+    if (!await codingAllowed(api, c)) throw new Error("permission_denied");
+    return workspaceFor();
+  }));
   const ownerManagementInput = async (api: ToolExecutionApi, c: Context) => {
     const input = await host.currentInput(harness, api, api.conversationId, c);
     if (input && input.user_id !== input.self_id && host.ownerTurnKind(input) === 'message' && input.session_generation === await host.sessionGeneration()) return input;
@@ -377,9 +382,11 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
   registry.install(createMediaExtension({
     bridge: host.env.BRIDGE.getByName("napcat"),
     canWriteWorkspace: codingAllowed,
-    saveAttachment: async (path, bytes, api, c) => {
+    storeFile: async (path, bytes, api, c) => {
       if (!await codingAllowed(api, c)) throw new Error("permission_denied");
-      await host.env.SANDBOX.getByName(memory.ns).saveAttachment(path, bytes);
+      const store = host.env.SANDBOX.getByName(memory.ns);
+      if (path.startsWith("r2://")) await store.writeObject(path, bytes);
+      else await store.writeFile(path, bytes, undefined, true);
     },
     allowed: async (api, c, kind) => {
       const input = await host.currentInput(harness, api, api.conversationId, c);

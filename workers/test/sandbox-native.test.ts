@@ -124,6 +124,10 @@ describe("sandbox native files and container", () => {
       expect(stage).toMatchObject({ snapshot });
       expect(f.nativeFiles.writeFile).toHaveBeenCalledWith(expect.stringMatching(/^\/tmp\/sandbox-import-[a-f0-9-]+\/old\/node_modules\/data.bin$/), bytes, { user: "1000:1000" });
       expect(f.nativeFiles.remove).toHaveBeenCalledWith(expect.stringMatching(/^\/tmp\/sandbox-import-[a-f0-9-]+$/), { recursive: true, force: true, user: "1000:1000" });
+      const fetchBlob = vi.fn(async () => bytes);
+      await f.client.restore(snapshot, fetchBlob, snapshot);
+      expect(fetchBlob).not.toHaveBeenCalled();
+      expect(f.calls.at(-1)?.input).toMatchObject({ reuse: ["old/node_modules/data.bin"] });
       f.result({ files: [], directories: [], totalBytes: 0 });
       await f.client.snapshot(["old/node_modules/data.bin"]);
       expect(f.calls.at(-1)?.input).toEqual({ retainedPaths: ["old/node_modules/data.bin"] });

@@ -213,10 +213,10 @@ describe("media host lookup and attachments", () => {
     const asset = await repo.put({ bytes, name: "pack.zip", kind: "file" });
     const owner = env.THREAD.getByName("owner");
     await owner.ingest({ ...input(59, "包", 10000001), media: [{ kind: "file", ordinal: 1, assetId: asset.id }] });
-    const write = vi.spyOn(SandboxDO.prototype, "saveAttachment").mockResolvedValue();
+    const write = vi.spyOn(SandboxDO.prototype, "writeFile").mockResolvedValue({ bytes: bytes.length });
     const model = scriptedModel([{ name: "qq_attachment", args: { message_id: "59", path: "incoming/pack.zip" } }]);
     await owner.submit(input(60, "取回之前发的包", 10000001));
-    expect(write).toHaveBeenCalledExactlyOnceWith("/work/incoming/pack.zip", bytes);
+    expect(write).toHaveBeenCalledExactlyOnceWith("/work/incoming/pack.zip", bytes, undefined, true);
     expect(model.outputs.join("\n")).toContain("/work/incoming/pack.zip");
   });
 });
@@ -241,7 +241,7 @@ describe("media observability and diagnostics", () => {
     const record = vi.fn(async (_kind: string, _detail: object) => {});
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(new Uint8Array([1, 2, 3])));
     const deps: MediaDeps = {
-      bridge: bridge ?? rpc, canWriteWorkspace: async () => false, saveAttachment: async () => { throw new Error("unexpected_write"); },
+      bridge: bridge ?? rpc, canWriteWorkspace: async () => false, storeFile: async () => { throw new Error("unexpected_write"); },
       allowed: async () => true, scope: async () => source.scope, repository: async () => repo,
       lookup: (messageId, _api, _context, selection, trace) => lookupHostMedia({ database, bridge: bridge ?? rpc, source, messageId, selection, trace }),
       sandbox: async () => { throw new Error("unused"); }, deliver: async () => {}, record, log: event => logs.push(event),
@@ -377,8 +377,8 @@ describe("media observability and diagnostics", () => {
     const f = fixture(source, env.BRIDGE.getByName("napcat")), { socket, frames } = await connect(sockets);
     f.setItems([{ kind: "file", ordinal: 1, fileId: "platform-id", file: "报告.bin", url, name: "报告.bin" }]);
     f.deps.canWriteWorkspace = async () => true;
-    const write = vi.fn<MediaDeps["saveAttachment"]>(async () => {});
-    f.deps.saveAttachment = write;
+    const write = vi.fn<MediaDeps["storeFile"]>(async () => {});
+    f.deps.storeFile = write;
     const custom = source.namespace === "owner";
     const pending = f.run({ message_id: "1", ordinal: 1, ...(custom ? { path: "inbox/报告.bin" } : {}) });
     const frame = await action(frames, 0, "get_file");
@@ -390,7 +390,7 @@ describe("media observability and diagnostics", () => {
     if (output?.type !== "text") throw new Error("missing_ref");
     const saved = JSON.parse(output.text);
     expect(saved).toMatchObject({ name: "报告.bin", kind: "file", bytes: 3 });
-    expect(saved.path).toMatch(custom ? /^\/work\/inbox\/报告\.bin$/ : /^\/work\/attachments\/[a-f0-9]{64}\/报告\.bin$/);
+    expect(saved.path).toMatch(custom ? /^\/work\/inbox\/报告\.bin$/ : /^r2:\/\/attachments\/[a-f0-9]{64}\/报告\.bin$/);
     expect(write.mock.calls[0]?.slice(0, 2)).toEqual([saved.path, new Uint8Array([0, 255, 128])]);
     expect((await env.ASSETS.list()).objects).toHaveLength(0);
     expect(frames).toHaveLength(1);
@@ -424,7 +424,7 @@ describe("media observability and diagnostics", () => {
   it("工作区写失败保留原错误，不写私有资产或返回成功路径", async () => {
     const f = fixture(), put = vi.spyOn(f.repo, "put");
     f.deps.canWriteWorkspace = async () => true;
-    f.deps.saveAttachment = async () => { throw new Error("workspace_quota"); };
+    f.deps.storeFile = async () => { throw new Error("workspace_quota"); };
     const result = await f.run({ message_id: "1", ordinal: 1, path: "inbox/sensitive.zip" });
     expect(result.isError).toBe(true);
     expect(f.record.mock.calls[0]?.[1]).toMatchObject({ result: "workspace_quota", failedStage: "workspace_write" });

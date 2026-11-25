@@ -1,7 +1,7 @@
-import type { WorkspaceManifest } from "./workspace";
+import type { WorkspaceArchive, WorkspaceManifest } from "./workspace";
 
 export type GcOptions = { keepManifests?: number; retentionMs?: number; graceMs?: number; batchSize?: number; dryRun?: boolean };
-type Phase = "inventory" | "manifests" | "blobs" | "results" | "cleanup";
+type Phase = "inventory" | "manifests" | "blobs" | "results" | "archives" | "cleanup";
 type Policy = { keep: number; retention: number; grace: number; batch: number };
 type State = {
   phase: Phase; cursor?: string; startedAt: number; policy: Policy;
@@ -71,7 +71,8 @@ export class WorkspaceGc {
     // 因此两批之间可以正常写入、导入或申请租约，不需要重新扫描历史，也不会误删新引用。
     const head = await storage.get<string>("workspace:head") ?? "0";
     const pins = await storage.get<Record<string, number>>("workspace:pins") ?? {};
-    const revisions = [...new Set([...(head === "0" ? [] : [head]), ...Object.keys(pins).filter(id => id !== "0" && pins[id] > Date.now())])].sort();
+    const archive = await storage.get<WorkspaceArchive>("workspace:archive");
+    const revisions = [...new Set([...(head === "0" ? [] : [head]), ...(archive && archive.revision !== "0" ? [archive.revision] : []), ...Object.keys(pins).filter(id => id !== "0" && pins[id] > Date.now())])].sort();
     const protectedKey = JSON.stringify(revisions);
     if (protectedKey !== state.protected) {
       this.protect(mode, revisions.map(revision => `${prefix}/manifests/${revision}`));
@@ -108,6 +109,9 @@ export class WorkspaceGc {
       const hashes = page.objects.map(object => object.key.slice(object.key.lastIndexOf("/") + 1));
       const reachable = new Set(sql.exec<{ key: string }>("SELECT key FROM workspace_gc_refs WHERE mode=? AND key IN (SELECT value FROM json_each(?))", mode, JSON.stringify(hashes)).toArray().map(row => row.key));
       candidates = page.objects.filter((object, index) => object.uploaded.getTime() <= state.startedAt - state.policy.grace && !reachable.has(hashes[index])).map(object => object.key);
+    } else if (state.phase === "archives") {
+      const active = archive && `${prefix}/archives/${archive.record.id}.tar.zst`;
+      candidates = page.objects.filter(object => object.key !== active && object.uploaded.getTime() <= state.startedAt - state.policy.grace).map(object => object.key);
     } else {
       const recent = new Set((await storage.get<string[]>("workspace:recent") ?? []).map(key => `${prefix}/results/${key.slice("workspace:op:".length)}`));
       candidates = page.objects.filter(object => object.uploaded.getTime() <= state.startedAt - Math.max(state.policy.retention, 30 * 86400000) && !recent.has(object.key)).map(object => object.key);
@@ -115,7 +119,7 @@ export class WorkspaceGc {
     if (!dryRun && candidates.length) await bucket.delete(candidates);
     state.candidates += candidates.length;
     state.deleted += dryRun ? 0 : candidates.length;
-    if (!page.truncated) state.phase = state.phase === "manifests" ? "blobs" : state.phase === "blobs" ? "results" : "cleanup";
+    if (!page.truncated) state.phase = state.phase === "manifests" ? "blobs" : state.phase === "blobs" ? "results" : state.phase === "results" ? "archives" : "cleanup";
     return save();
   }
 }
