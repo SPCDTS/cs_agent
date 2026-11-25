@@ -1,5 +1,6 @@
 import { ToolSummary } from "../src/requests/tool-types";
-export { ToolSummary } from "../src/requests/tool-types";
+export { StepItem, ToolSummary } from "../src/requests/tool-types";
+export type { StepStatus } from "../src/requests/tool-types";
 import { ContextMetrics } from "../src/requests/context-types";
 import { Type, type Static } from "typebox";
 

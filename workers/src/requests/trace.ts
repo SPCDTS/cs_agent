@@ -2,7 +2,7 @@ import { defineExtension, GenerationTask, hook, ToolTask, type HookApi } from "@
 import type { Context } from "@earendil-works/chord/context";
 import type { Env } from "../env";
 import { boundedText } from "./snapshot";
-import { argumentPreview, toolResultSnapshot } from "./tool-snapshot";
+import { argumentPreview, extractStepsSnapshot, toolResultSnapshot } from "./tool-snapshot";
 import type { RequestBinding, ToolTrace } from "./types";
 import { classifyError, logDiag } from "../shared/diagnostics";
 
@@ -30,16 +30,20 @@ export function requestTrace(
           const current = await resolve(api, context);
           if (!current) return;
           const memo = await api.memo("cs.trace", { binding: current, id: crypto.randomUUID(), at: Date.now() }, context);
+          const steps = extractStepsSnapshot(call.name, call.arguments);
           await save({ id: memo.id, thread, actor, binding: memo.binding, callId: call.id, ...(call.parent ? { parentCallId: call.parent.callId } : {}),
-            name: call.name, ...(call.name !== "codemode" ? { argumentPreview: argumentPreview(call.arguments) } : {}), startedAt: memo.at, endedAt: null, status: "running", arguments: boundedText(JSON.stringify(call.arguments, null, 2)) });
+            name: call.name, ...(call.name !== "codemode" ? { argumentPreview: argumentPreview(call.arguments) } : {}), ...(steps !== undefined ? { steps } : {}),
+            startedAt: memo.at, endedAt: null, status: "running", arguments: boundedText(JSON.stringify(call.arguments, null, 2)) });
         } catch (error) { logDiag(env, ctx, { event: "tool_trace_start_failed", thread, actor, turnId: binding?.turnId, error, detail: { tool: call.name } }); }
       },
       afterTool: async (call, result, api, context) => {
         try {
           const memo = await api.memo<{ binding: RequestBinding; id: string; at: number }>("cs.trace", context);
           if (!memo) return;
+          const steps = result.isError ? undefined : extractStepsSnapshot(call.name, call.arguments);
           await save({ id: memo.id, thread, actor, binding: memo.binding, callId: call.id, ...(call.parent ? { parentCallId: call.parent.callId } : {}),
-            name: call.name, ...(call.name !== "codemode" ? { argumentPreview: argumentPreview(call.arguments) } : {}), startedAt: memo.at, endedAt: Date.now(), status: result.isError ? "error" : "done",
+            name: call.name, ...(call.name !== "codemode" ? { argumentPreview: argumentPreview(call.arguments) } : {}), ...(steps !== undefined ? { steps } : {}),
+            startedAt: memo.at, endedAt: Date.now(), status: result.isError ? "error" : "done",
             arguments: boundedText(JSON.stringify(call.arguments, null, 2)), ...toolResultSnapshot(result) });
         } catch (error) { logDiag(env, ctx, { event: "tool_trace_end_failed", thread, actor, turnId: binding?.turnId, error, detail: { tool: call.name } }); }
       },

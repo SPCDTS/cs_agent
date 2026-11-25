@@ -112,6 +112,69 @@ describe("web chat suite", () => {
         expect(state.storage.sql.exec<{reply_channel:string}>("SELECT reply_channel FROM inbound WHERE kind='subagent'").one().reply_channel).toBe("web");
       });
     });
+
+    it("persists open update_steps across subagent wakeups, redacts secrets on trace, and clears on completion or reset",async()=>{
+      const subagentPrompts:string[]=[];
+      const followupPrompts:string[]=[];
+      let stage=0;
+      fake(ctx=>{
+        if(!getCurrentTools(ctx.messages).some(t=>t.name==="subagent"))return fauxAssistantMessage("服务正常");
+        if(ctx.messages.at(-1)?.role==="toolResult")return fauxAssistantMessage("");
+        const text=latest(ctx.messages);
+        if(text.includes("[子 agent 完成]")){
+          subagentPrompts.push(getCurrentSystemPrompt(ctx.messages));
+          return fauxAssistantMessage([
+            fauxToolCall("update_steps",{steps:[
+              {title:"派子任务巡检",status:"done"},
+              {title:"核查凭据状态",status:"done"},
+              {title:"向用户发送巡检结论",status:"done"},
+            ]}),
+            fauxToolCall("send_message",{text:"全部巡检完成，一切正常"}),
+          ],{stopReason:"toolUse"});
+        }
+        stage++;
+        if(stage===1){
+          return fauxAssistantMessage([
+            fauxToolCall("update_steps",{steps:[
+              {title:"派子任务巡检",status:"in_progress"},
+              {title:"核查令牌 Bearer sk-secret1234567890abcdef",status:"pending"},
+              {title:"向用户发送巡检结论",status:"pending"},
+            ]}),
+            fauxToolCall("subagent",{action:"spawn",task:"巡检服务状态"}),
+          ],{stopReason:"toolUse"});
+        }
+        followupPrompts.push(getCurrentSystemPrompt(ctx.messages));
+        return fauxAssistantMessage(fauxToolCall("send_message",{text:"新话题回复"}),{stopReason:"toolUse"});
+      });
+
+      await owner().submitWeb("owner",crypto.randomUUID(),"请按步骤巡检并汇报");
+      await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).messages.some(m=>m.source==="web"&&m.text==="全部巡检完成，一切正常"),{timeout:10000}).toBe(true);
+
+      // 子任务汇报唤醒时，末尾 <turn-steps> 回显未完成步骤，指引主会话完成最后一步汇报
+      expect(subagentPrompts[0]).toContain("<turn-steps>");
+      expect(subagentPrompts[0]).toContain("1. [in_progress] 派子任务巡检");
+      expect(subagentPrompts[0]).not.toContain("sk-secret1234567890abcdef");
+      expect(subagentPrompts[0]).toContain("3. [pending] 向用户发送巡检结论");
+
+      // trace 中的步骤标题严格先脱敏凭据再落盘展示
+      const page=await (await syncedView("owner")).chatView("owner");
+      const turns=[...new Set(page.messages.map(m=>m.turnId).filter((id):id is string=>!!id))];
+      const trace=await env.REQUESTS.getByName("main").turnTrace("owner",turns,0);
+      const stepTraces=trace.tools.filter(t=>t.name==="update_steps");
+      expect(stepTraces.length).toBeGreaterThanOrEqual(2);
+      expect(JSON.stringify(stepTraces)).not.toContain("sk-secret1234567890abcdef");
+      expect(stepTraces.at(-1)?.steps).toEqual([
+        {title:"派子任务巡检",status:"done"},
+        {title:"核查凭据状态",status:"done"},
+        {title:"向用户发送巡检结论",status:"done"},
+      ]);
+
+      // 等汇报回合彻底落定后，后续无关新话题不再注入旧 <turn-steps>
+      await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).active).toBe(0);
+      await owner().submitWeb("owner",crypto.randomUUID(),"换个简单问题");
+      await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).messages.some(m=>m.source==="web"&&m.text==="新话题回复")).toBe(true);
+      expect(followupPrompts[0]).not.toContain("<turn-steps>");
+    });
   });
   
   it("QQ 排队消息经展示副本读取后可原样用于增量查询，并沿用同一 ID 更新终态",async()=>{

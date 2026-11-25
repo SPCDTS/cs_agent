@@ -31,16 +31,46 @@ export async function fetchTrace(thread:string,messages:C.ChatMessage[],version:
     if(document.hidden||cs.view!=="chat")break;
   }
 }
+export function renderTurnSteps(steps: readonly C.StepItem[], active: boolean): HTMLElement | null {
+  if (!steps.length) return null;
+  const completed = steps.filter(s => s.status === "done" || s.status === "skipped").length;
+  const hasFailed = steps.some(s => s.status === "failed");
+  const statusText = hasFailed ? "存在失败步骤" : completed === steps.length ? "已完成" : active ? "执行中" : "等待继续";
+  return el("div", { className: "trace-steps", role: "group", "aria-label": "步骤进度 " + completed + "/" + steps.length }, [
+    el("div", { className: "trace-steps-head" }, [
+      el("span", { className: "trace-steps-count", text: completed + "/" + steps.length + " steps" }),
+      el("span", { className: "trace-steps-state", text: statusText }),
+    ]),
+    el("ul", { className: "trace-steps-list" }, steps.map(step => {
+      const paused = step.status === "in_progress" && !active;
+      const stateClass = paused ? "paused" : step.status;
+      const icon = step.status === "done" ? "✓"
+        : step.status === "failed" ? "✕"
+        : step.status === "skipped" ? "–"
+        : paused ? "‖"
+        : step.status === "in_progress" ? "●" : "";
+      return el("li", { className: "trace-step is-" + stateClass }, [
+        el("span", { className: "trace-step-icon", "aria-hidden": "true", text: icon }),
+        el("span", { className: "trace-step-title", text: step.title }),
+      ]);
+    })),
+  ]);
+}
 export function turnTrace(turnId:string,expanded?:ReadonlySet<string|undefined>){
-  const requests=[...cs.requests.values()].filter(r=>r.binding?.turnId===turnId).sort((a,b)=>a.startedAt-b.startedAt),tools=[...cs.tools.values()].filter(t=>t.binding.turnId===turnId).sort((a,b)=>a.startedAt-b.startedAt);
+  const requests=[...cs.requests.values()].filter(r=>r.binding?.turnId===turnId).sort((a,b)=>a.startedAt-b.startedAt),tools=[...cs.tools.values()].filter(t=>t.binding.turnId===turnId).sort((a,b)=>a.startedAt-b.startedAt||(a.endedAt??Infinity)-(b.endedAt??Infinity));
   if(!requests.length&&!tools.length)return el("div",{className:"trace-unknown",text:"本轮暂无执行记录；旧回合可能未采集关联。"});
+  const isStepCall=(t:C.ToolSummary)=>t.name==="update_steps"&&(t.actor??"thread")==="thread"&&t.status!=="error"&&Array.isArray(t.steps);
+  const latestSteps=tools.filter(isStepCall).at(-1)?.steps;
+  const visibleTools=tools.filter(t=>!isStepCall(t));
   type Entry={kind:"request";at:number;value:C.RequestRecord}|{kind:"tool";at:number;value:C.ToolSummary};
-  const entries=[...requests.map<Entry>(r=>({kind:"request",at:r.startedAt,value:r})),...toolRoots(tools).map<Entry>(t=>({kind:"tool",at:t.startedAt,value:t}))].sort((a,b)=>a.at-b.at);
-  const active=entries.some(e=>e.value.status==="running");
+  const entries=[...requests.map<Entry>(r=>({kind:"request",at:r.startedAt,value:r})),...toolRoots(visibleTools).map<Entry>(t=>({kind:"tool",at:t.startedAt,value:t}))].sort((a,b)=>a.at-b.at);
+  const active=requests.some(r=>r.status==="running")||tools.some(t=>t.status==="running");
+  const stepBadge=latestSteps?.length?" · "+latestSteps.filter(s=>s.status==="done"||s.status==="skipped").length+"/"+latestSteps.length+" 步":"";
   return el("section",{className:"trace-turn","data-turn":turnId},[
-    el("div",{className:"trace-heading"},[el("span",{text:(active?"本轮执行中":"本轮执行记录")+" · "+requests.length+" 次模型请求 · "+tools.length+" 次工具调用"}),el("button",{className:"request-link",type:"button",text:"本轮请求",onclick:()=>showTurnRequests(turnId)})]),
+    el("div",{className:"trace-heading"},[el("span",{text:(active?"本轮执行中":"本轮执行记录")+stepBadge+" · "+requests.length+" 次模型请求 · "+tools.length+" 次工具调用"}),el("button",{className:"request-link",type:"button",text:"本轮请求",onclick:()=>showTurnRequests(turnId)})]),
+    latestSteps?renderTurnSteps(latestSteps,active):null,
     ...entries.map(entry=>{
-      if(entry.kind==="tool")return renderToolTrace(entry.value,tools,{expanded:new Set([...expanded??[]].filter((id):id is string=>!!id))});
+      if(entry.kind==="tool")return renderToolTrace(entry.value,visibleTools,{expanded:new Set([...expanded??[]].filter((id):id is string=>!!id))});
       const r=entry.value;
       return el("button",{className:"trace-request",type:"button",onclick:()=>openRequest(r.id)},[
         el("span",{},[r.model+" · "+(statuses[r.status]||r.status),el("small",{text:"输入 "+nf(r.inputTokens)+" / 输出 "+nf(r.outputTokens)})]),

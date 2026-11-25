@@ -389,6 +389,24 @@ tr:last-child td{border-bottom:0}
 .cache-hit .meter{width:44px}
 .trace-turn{margin:10px 0 18px;padding-left:14px;border-left:2px solid var(--border)}
 .trace-heading{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-bottom:8px;flex-wrap:wrap}
+.trace-steps{border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:10px 13px;margin:6px 0 8px;box-shadow:var(--shadow-sm)}
+.trace-steps-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;font-size:11.5px}
+.trace-steps-count{font-family:var(--mono);font-weight:600;color:var(--ink-2)}
+.trace-steps-state{color:var(--muted)}
+.trace-steps-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.trace-step{display:flex;align-items:flex-start;gap:9px;font-size:13px;line-height:1.45;color:var(--ink)}
+.trace-step-icon{width:15px;height:15px;margin-top:2px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-family:var(--mono);font-weight:700;flex-shrink:0;border:1.5px solid var(--border-strong);color:var(--muted);background:var(--surface)}
+.trace-step.is-done{color:var(--muted)}
+.trace-step.is-done .trace-step-icon{border-color:var(--ok-dot);background:var(--ok-bg);color:var(--ok-fg)}
+.trace-step.is-in_progress{font-weight:500}
+.trace-step.is-in_progress .trace-step-icon{border-color:var(--teal);background:var(--teal-soft);color:var(--teal);animation:step-pulse 1.6s ease-in-out infinite}
+.trace-step.is-paused .trace-step-icon{border-color:var(--border-strong);background:var(--subtle);color:var(--ink-2);font-size:9px;letter-spacing:-1px}
+.trace-step.is-failed{color:var(--bad-fg)}
+.trace-step.is-failed .trace-step-icon{border-color:var(--bad-dot);background:var(--bad-bg);color:var(--bad-fg)}
+.trace-step.is-skipped{color:var(--muted)}
+.trace-step.is-skipped .trace-step-title{text-decoration:line-through}
+.trace-step-title{min-width:0;overflow-wrap:anywhere}
+@keyframes step-pulse{0%,100%{opacity:1}50%{opacity:.45}}
 .trace-request{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;border:1px solid var(--border);background:var(--surface);padding:9px 12px;margin:5px 0;border-radius:7px;text-align:left;cursor:pointer;font-size:12px}
 .trace-request:hover{border-color:var(--teal)}
 .trace-request small{display:block;color:var(--muted);margin-top:2px}

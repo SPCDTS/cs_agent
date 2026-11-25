@@ -1,10 +1,26 @@
 import { Type, type Static } from "typebox";
 
+export const StepStatus = Type.Union([
+  Type.Literal("pending"),
+  Type.Literal("in_progress"),
+  Type.Literal("done"),
+  Type.Literal("skipped"),
+  Type.Literal("failed"),
+]);
+export type StepStatus = Static<typeof StepStatus>;
+export const StepItem = Type.Object({
+  title: Type.String({ minLength: 1, maxLength: 120 }),
+  status: StepStatus,
+}, { additionalProperties: false });
+export type StepItem = Static<typeof StepItem>;
+
 export const ToolSummary = Type.Object({
   id: Type.String(), thread: Type.String(), actor: Type.Optional(Type.String()),
   binding: Type.Object({ turnId: Type.String(), inputId: Type.String(), generation: Type.Number() }),
   callId: Type.String(), parentCallId: Type.Optional(Type.String()), name: Type.String(),
-  argumentPreview: Type.Optional(Type.String()), startedAt: Type.Number(), endedAt: Type.Union([Type.Number(), Type.Null()]),
+  argumentPreview: Type.Optional(Type.String()),
+  steps: Type.Optional(Type.Array(StepItem, { maxItems: 12 })),
+  startedAt: Type.Number(), endedAt: Type.Union([Type.Number(), Type.Null()]),
   status: Type.Union([Type.Literal("running"), Type.Literal("done"), Type.Literal("error"), Type.Literal("interrupted")]),
   detailAvailable: Type.Optional(Type.Boolean()),
 });
