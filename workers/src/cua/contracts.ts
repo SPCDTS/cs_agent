@@ -11,6 +11,10 @@ export const CuaGrantInput = Type.Object({
   scope:CuaScope, spaces:Type.Array(CuaDeviceId, {uniqueItems:true, maxItems:64}), expectedRevision:Type.String({minLength:1,maxLength:64}),
 }, {additionalProperties:false});
 export type CuaGrantInput = Static<typeof CuaGrantInput>;
+export const CuaDeviceGrantInput = Type.Object({
+  space:CuaDeviceId, scopes:Type.Array(CuaScope, {uniqueItems:true, maxItems:256}), expectedRevision:Type.String({minLength:1,maxLength:64}),
+}, {additionalProperties:false});
+export type CuaDeviceGrantInput = Static<typeof CuaDeviceGrantInput>;
 const displayName = Type.String({maxLength:64,pattern:'^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028-\\u202e\\u2066-\\u2069]*$'});
 export const CuaNameInput = Type.Object({
   space:CuaDeviceId, name:displayName, expectedName:displayName, expectedRevision:Type.String({minLength:1,maxLength:64}),
@@ -30,6 +34,7 @@ export const CuaDirectory = Type.Object({
   bridgeUrl:Type.Optional(Type.String()),
   configured:Type.Boolean(), online:Type.Boolean(), enabled:Type.Boolean(), available:Type.Boolean(),
   error:Type.Optional(Type.Literal('directory_unavailable')),
+  tools:Type.Optional(Type.Array(Type.String())),
   revision:Type.String(), devices:Type.Array(Type.Object({...Card.properties, defaultName:Type.Optional(Type.String()), alias:Type.Optional(displayName), scopes:Type.Array(CuaScope)})),
   grants:Type.Array(Grant), threads:Type.Array(Type.Object({key:CuaScope, name:Type.Optional(Type.String())})),
 });

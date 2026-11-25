@@ -1,6 +1,6 @@
 import { issuePairing } from '../cua/pairing';
 import { Check } from 'typebox/value';
-import { CuaDeviceId, CuaGrantInput, CuaNameInput, CuaScope, CuaSetupInput, cuaCards, deviceAlias, type CuaCard } from '../cua/contracts';
+import { CuaDeviceGrantInput, CuaDeviceId, CuaGrantInput, CuaNameInput, CuaScope, CuaSetupInput, cuaCards, deviceAlias, type CuaCard } from '../cua/contracts';
 import type { Env } from '../env';
 import { McpConnection } from '../mcp/connection';
 import { setupFailure } from '../mcp/manage';
@@ -14,7 +14,7 @@ async function directory(env: Env) {
   const config = await registry.mcpConfig();
   const server = config.servers.find(row => row.id === 'cua' && row.transport.kind === 'reverse-websocket');
   const view = {configured:!!server, enabled:!!(config.enabled && server?.enabled), online:false, available:false,
-    revision:server?.access.revision, devices:[] as CuaCard[], error:undefined as 'directory_unavailable' | undefined};
+    revision:server?.access.revision, tools:server?.tools.allow ?? [], devices:[] as CuaCard[], error:undefined as 'directory_unavailable' | undefined};
   if (!server) return view;
   const bridge = env.BRIDGE.getByName('mcp-reverse:' + connectionDigest(server));
   const signal = AbortSignal.timeout(MCP_CONFIG.limits.callMs);
@@ -64,7 +64,7 @@ export const CUA_ROUTES: AdminRoute[] = [
     }
     const bridgeUrl = new URL('/mcp/reverse/cua',publicOrigin(env.PUBLIC_ORIGIN));
     bridgeUrl.protocol = 'wss:';
-    return adminJson({setup,bridgeUrl:bridgeUrl.href,configured:view.configured,enabled:view.enabled,online:view.online,available:view.available,error:view.error,...after,
+    return adminJson({setup,bridgeUrl:bridgeUrl.href,configured:view.configured,enabled:view.enabled,online:view.online,available:view.available,error:view.error,tools:view.tools,...after,
       devices:view.devices.map(row => {
         const alias = deviceAlias(names,row.id);
         return {...row,defaultName:row.name,alias,name:alias ?? row.name,scopes:scopesByDevice.get(row.id) ?? []};
@@ -97,6 +97,26 @@ export const CUA_ROUTES: AdminRoute[] = [
       revision = view.revision;
     }
     const result = await registry.cuaGrantsPut(input,revision);
+    if (result.status !== 'ok') throw new HttpError(result.status === 'conflict' ? 409 : 400,result.status);
+    return adminJson({revision:result.revision,grants:result.grants});
+  }},
+  {method:'PUT',path:'/admin/cua/device-grants',handle:async ({env,request}) => {
+    const input = await readAdminBody(request,CuaDeviceGrantInput,{maxBytes:32768});
+    const registry = env.REGISTRY.getByName('main');
+    const current = await registry.cuaGrantsList();
+    if (current.revision !== input.expectedRevision) throw new HttpError(409,'conflict');
+    const prior = current.grants.filter(grant => grant.spaces.includes(input.space)).map(grant => grant.scope);
+    const additions = input.scopes.filter(scope => !prior.includes(scope));
+    let revision: string | undefined;
+    if (additions.length) {
+      const view = await directory(env);
+      if (!view.available) throw new HttpError(503,'cua_directory_unavailable');
+      if (!view.devices.some(row => row.id === input.space && Check(CuaDeviceId,row.id))) {
+        throw new HttpError(400,'unknown_space');
+      }
+      revision = view.revision;
+    }
+    const result = await registry.cuaDeviceGrantsPut(input,revision);
     if (result.status !== 'ok') throw new HttpError(result.status === 'conflict' ? 409 : 400,result.status);
     return adminJson({revision:result.revision,grants:result.grants});
   }},
