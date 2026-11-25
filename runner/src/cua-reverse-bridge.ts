@@ -10,15 +10,28 @@ import { CallToolRequestSchema, CallToolResultSchema, ErrorCode, JSONRPCMessageS
 const localMcp = new URL('http://localhost/mcp');
 const bytes = 12 * 1024 * 1024;
 const frameBytes = bytes + 4096;
-const requestBytes = 32 * 1024;
+const requestBytes = 300 * 1024;
+const maxImageBytes = 4 * 1024 * 1024;
+const maxErrorTextLength = 4000;
 const sessionId = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const deviceId = /^(?:relay:[a-z0-9][a-z0-9-]{6,62}[a-z0-9]|direct:(?:[a-zA-Z0-9._-]+|\[[0-9a-fA-F:]+\]):[0-9]{1,5})$/;
+const jobIdPattern = /^[A-Za-z0-9._-]{1,128}$/;
+const envKeyPattern = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const driverToolPattern = /^[a-zA-Z0-9_.-]{1,128}$/;
 const spaceProperty = {type:'string' as const,pattern:deviceId.source,maxLength:256,description:'设备卡上的完整 ID'};
-const maxScreenshotDimension = 768;
-const maxScreenshotBytes = 3 * 1024 * 1024;
-const frameKeys = ['x','y','width','height'] as const;
-const positionSchema = {type:'integer',minimum:-32768,maximum:32767};
-const sizeSchema = {type:'integer',minimum:1,maximum:32767};
+const untilSchema = {
+  type:'object',
+  description:'等待条件（start 时与 command 二选一互斥；以下条件字段四选一）。',
+  properties:{
+    file:{type:'string',minLength:1,maxLength:4096},
+    port:{type:'integer',minimum:1,maximum:65535},
+    host:{type:'string',minLength:1,maxLength:253,description:'仅与 port 配合使用，默认 127.0.0.1。'},
+    command:{type:'string',minLength:1,maxLength:32768},
+    pr_checks:{type:'string',minLength:1,maxLength:256},
+    interval:{type:'integer',minimum:1,maximum:300},
+  },
+  additionalProperties:false,
+};
 const bridgeTools: Record<string,Tool> = {
   list_spaces: {
     name:'list_spaces', description:'列出此会话可见的设备卡，返回设备名称、完整 ID、系统与状态。',
@@ -32,17 +45,51 @@ const bridgeTools: Record<string,Tool> = {
     }, required:['space','service'], additionalProperties:false}, annotations:{readOnlyHint:true},
   },
   space_bash: {
-    name:'space_bash', description:'在选定设备运行 hostname，读取系统主机名。',
-    inputSchema:{type:'object',properties:{space:spaceProperty,command:{type:'string',enum:['hostname']}},
-      required:['space','command'],additionalProperties:false}, annotations:{readOnlyHint:true},
+    name:'space_bash', description:'在选定设备执行短暂的 Shell 命令（Linux/macOS 走 /bin/sh -c，Windows 走 cmd.exe /C）。默认超时 30 秒，最长 50 秒；长任务请改用 space_job。',
+    inputSchema:{type:'object',properties:{
+      space:spaceProperty,
+      command:{type:'string',minLength:1,maxLength:32768},
+      timeout:{type:'integer',minimum:1,maximum:50,description:'超时秒数，默认 30，最长 50。'},
+    },required:['space','command'],additionalProperties:false}, annotations:{readOnlyHint:false},
+  },
+  space_job: {
+    name:'space_job', description:'在 Linux 或 macOS 设备后台运行长耗时命令（start/status/logs/cancel/list）；不支持 Windows。',
+    inputSchema:{type:'object',properties:{
+      space:spaceProperty,
+      action:{type:'string',enum:['start','status','logs','cancel','list']},
+      command:{type:'string',minLength:1,maxLength:32768},
+      job:{type:'string',minLength:1,maxLength:128,pattern:jobIdPattern.source},
+      name:{type:'string',minLength:1,maxLength:80},
+      cwd:{type:'string',minLength:1,maxLength:4096},
+      env:{
+        type:'object',
+        maxProperties:64,
+        propertyNames:{type:'string',pattern:envKeyPattern.source},
+        additionalProperties:{type:'string',maxLength:4096},
+      },
+      timeout:{type:'integer',minimum:1,maximum:86400},
+      until:untilSchema,
+      offset:{type:'integer',minimum:0,maximum:Number.MAX_SAFE_INTEGER},
+      limit:{type:'integer',minimum:1,maximum:262144},
+      follow_ms:{type:'integer',minimum:0,maximum:25000},
+    },required:['space','action'],additionalProperties:false}, annotations:{readOnlyHint:false},
+  },
+  space_write: {
+    name:'space_write', description:'向选定设备上的指定绝对路径写入文本内容（自动创建缺失父目录并覆盖目标文件）。',
+    inputSchema:{type:'object',properties:{
+      space:spaceProperty,
+      path:{type:'string',minLength:1,maxLength:4096},
+      content:{type:'string',maxLength:200000},
+    },required:['space','path','content'],additionalProperties:false}, annotations:{readOnlyHint:false},
   },
   call_tool: {
-    name:'call_tool', description:'用 list_windows 查询窗口，按 PID 和窗口 ID 用 set_window_frame 调整位置与大小。macOS 提供 get_window_state 截图与 bring_to_front 前置窗口，前置也可能带起同一应用的其他窗口。',
+    name:'call_tool', description:'调用选定设备上 Driver 服务（service="driver"）的工具；先用 list_tools 查询可用工具名与 arguments 参数结构。',
     inputSchema:{type:'object',properties:{
-      space:spaceProperty, service:{type:'string',enum:['driver']}, tool:{type:'string',enum:['list_windows','get_window_state','bring_to_front','set_window_frame']},
-      arguments:{type:'object',properties:{app:{type:'string',minLength:1,maxLength:128},pid:{type:'integer',minimum:1,maximum:0x7fffffff},
-        window_id:{type:'integer',minimum:1,maximum:Number.MAX_SAFE_INTEGER},x:positionSchema,y:positionSchema,width:sizeSchema,height:sizeSchema},additionalProperties:false},
-    },required:['space','service','tool','arguments'],additionalProperties:false},annotations:{readOnlyHint:false},
+      space:spaceProperty,
+      service:{type:'string',enum:['driver']},
+      tool:{type:'string',minLength:1,maxLength:128,pattern:driverToolPattern.source},
+      arguments:{type:'object',additionalProperties:true},
+    },required:['space','service','tool'],additionalProperties:false}, annotations:{readOnlyHint:false},
   },
 };
 const methods = new Set(['initialize', 'notifications/initialized', 'notifications/cancelled', 'ping', 'tools/list', 'tools/call']);
@@ -101,29 +148,108 @@ function localFetch(socketPath: string): FetchLike {
   };
 }
 
-function validToolArgs(name: string, args: Record<string, unknown>): boolean {
-  const keys = Object.keys(args);
-  if (name === 'list_spaces') return keys.length === 0;
-  if (typeof args.space !== 'string' || !args.space || args.space.length > 256) return false;
-  switch (name) {
-    case 'space_bash': return keys.length === 2 && args.command === 'hostname';
-    case 'call_tool': {
-      const input = args.arguments;
-      if (keys.length !== 4 || args.service !== 'driver' || !isRecord(input)) return false;
-      if (args.tool === 'get_window_state' || args.tool === 'bring_to_front')
-        return Object.keys(input).length === 2 && positiveInteger(input.pid,0x7fffffff) && positiveInteger(input.window_id,0xffffffff);
-      if (args.tool === 'set_window_frame')
-        return Object.keys(input).length === 6 && positiveInteger(input.pid,0x7fffffff) && positiveInteger(input.window_id,Number.MAX_SAFE_INTEGER)
-          && frameKeys.every(key => Number.isSafeInteger(input[key]) && (input[key] as number) >= (key === 'x' || key === 'y' ? -32768 : 1)
-            && (input[key] as number) <= 32767);
-      return args.tool === 'list_windows' && Object.keys(input).every(key => key === 'app' || key === 'pid')
-        && (input.pid === undefined || positiveInteger(input.pid,0x7fffffff))
-        && (input.app === undefined || typeof input.app === 'string' && !!input.app.trim() && input.app.length <= 128);
+function nonEmptyText(value: unknown, maxLength: number, rejectNull = true): value is string {
+  return typeof value === 'string' && value.length >= 1 && value.length <= maxLength && (!rejectNull || !value.includes('\0'));
+}
+
+function validUntil(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return;
+  const keys = Object.keys(value);
+  if (!keys.every(k => ['file', 'port', 'host', 'command', 'pr_checks', 'interval'].includes(k))) return;
+  const conds = ['file', 'port', 'command', 'pr_checks'].filter(k => value[k] !== undefined);
+  if (conds.length !== 1) return;
+  if (value.file !== undefined && !nonEmptyText(value.file, 4096)) return;
+  if (value.port !== undefined && !positiveInteger(value.port, 65535)) return;
+  if (value.command !== undefined && !nonEmptyText(value.command, 32768)) return;
+  if (value.pr_checks !== undefined && !nonEmptyText(value.pr_checks, 256)) return;
+  if (value.host !== undefined && (value.port === undefined || !nonEmptyText(value.host, 253) || /\s/.test(value.host))) return;
+  if (value.interval !== undefined && !positiveInteger(value.interval, 300)) return;
+  return {
+    ...(value.file !== undefined ? { file: value.file } : {}),
+    ...(value.port !== undefined ? { port: value.port } : {}),
+    ...(value.host !== undefined ? { host: value.host } : {}),
+    ...(value.command !== undefined ? { command: value.command } : {}),
+    ...(value.pr_checks !== undefined ? { pr_checks: value.pr_checks } : {}),
+    ...(value.interval !== undefined ? { interval: value.interval } : {}),
+  };
+}
+
+function parseJobArgs(space: string, args: Record<string, unknown>, keys: string[]): Record<string, unknown> | undefined {
+  const action = args.action;
+  if (action === 'list') return keys.length === 2 ? { space, action } : undefined;
+  if (action === 'status' || action === 'cancel') {
+    if (keys.length !== 3 || typeof args.job !== 'string' || !jobIdPattern.test(args.job)) return;
+    return { space, action, job: args.job };
+  }
+  if (action === 'logs') {
+    if (!keys.every(k => ['space', 'action', 'job', 'offset', 'limit', 'follow_ms'].includes(k))) return;
+    if (typeof args.job !== 'string' || !jobIdPattern.test(args.job)) return;
+    if (args.offset !== undefined && (typeof args.offset !== 'number' || !Number.isSafeInteger(args.offset) || args.offset < 0)) return;
+    if (args.limit !== undefined && !positiveInteger(args.limit, 262144)) return;
+    if (args.follow_ms !== undefined && (typeof args.follow_ms !== 'number' || !Number.isSafeInteger(args.follow_ms) || args.follow_ms < 0 || args.follow_ms > 25000)) return;
+    return {
+      space,
+      action,
+      job: args.job,
+      ...(args.offset !== undefined ? { offset: args.offset } : {}),
+      ...(args.limit !== undefined ? { limit: args.limit } : {}),
+      ...(args.follow_ms !== undefined ? { follow_ms: args.follow_ms } : {}),
+    };
+  }
+  if (action !== 'start') return;
+  if (!keys.every(k => ['space', 'action', 'command', 'name', 'cwd', 'env', 'timeout', 'until'].includes(k))) return;
+  if ((args.command !== undefined) === (args.until !== undefined)) return;
+  if (args.command !== undefined && !nonEmptyText(args.command, 32768)) return;
+  const until = args.until !== undefined ? validUntil(args.until) : undefined;
+  if (args.until !== undefined && !until) return;
+  if (args.name !== undefined && (!nonEmptyText(args.name, 80) || /[\r\n]/.test(args.name))) return;
+  if (args.cwd !== undefined && !nonEmptyText(args.cwd, 4096)) return;
+  if (args.timeout !== undefined && !positiveInteger(args.timeout, 86400)) return;
+  if (args.env !== undefined) {
+    if (!isRecord(args.env) || Object.keys(args.env).length > 64) return;
+    for (const [k, v] of Object.entries(args.env)) {
+      if (!envKeyPattern.test(k) || typeof v !== 'string' || v.length > 4096 || v.includes('\0')) return;
     }
+  }
+  return {
+    space,
+    action,
+    ...(args.command !== undefined ? { command: args.command } : {}),
+    ...(until !== undefined ? { until } : {}),
+    ...(args.name !== undefined ? { name: args.name } : {}),
+    ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
+    ...(args.env !== undefined ? { env: args.env } : {}),
+    ...(args.timeout !== undefined ? { timeout: args.timeout } : {}),
+  };
+}
+
+function parseToolArgs(name: string, args: Record<string, unknown>): Record<string, unknown> | undefined {
+  const keys = Object.keys(args);
+  if (name === 'list_spaces') return keys.length === 0 ? {} : undefined;
+  if (typeof args.space !== 'string' || !args.space || args.space.length > 256) return;
+  const space = args.space;
+  switch (name) {
     case 'list_tools':
-      return keys.every(k => ['space','service','name'].includes(k)) && args.service === 'driver'
-        && (args.name === undefined || typeof args.name === 'string' && args.name.length <= 128);
-    default: return false;
+      if (!keys.every(k => k === 'space' || k === 'service' || k === 'name') || args.service !== 'driver') return;
+      if (args.name !== undefined && (typeof args.name !== 'string' || args.name.length > 128)) return;
+      return { space, service: 'driver', ...(args.name !== undefined ? { name: args.name } : {}) };
+    case 'space_bash':
+      if (!keys.every(k => k === 'space' || k === 'command' || k === 'timeout') || !nonEmptyText(args.command, 32768)) return;
+      if (args.timeout !== undefined && !positiveInteger(args.timeout, 50)) return;
+      return { space, command: args.command, timeout: typeof args.timeout === 'number' ? args.timeout : 30 };
+    case 'space_job':
+      return parseJobArgs(space, args, keys);
+    case 'space_write':
+      if (keys.length !== 3 || !nonEmptyText(args.path, 4096) || typeof args.content !== 'string'
+          || args.content.length > 200000 || Buffer.byteLength(args.content, 'utf8') > 256 * 1024) return;
+      return { space, path: args.path, content: args.content };
+    case 'call_tool':
+      if (!keys.every(k => ['space', 'service', 'tool', 'arguments'].includes(k)) || args.service !== 'driver') return;
+      if (typeof args.tool !== 'string' || !driverToolPattern.test(args.tool)) return;
+      if (args.arguments !== undefined && !isRecord(args.arguments)) return;
+      return { space, service: 'driver', tool: args.tool, arguments: isRecord(args.arguments) ? args.arguments : {} };
+    default:
+      return;
   }
 }
 
@@ -163,49 +289,25 @@ function driverDirectory(data: unknown) {
   return {service:'driver',services:['driver'],count:tools.length,tools};
 }
 
-function hostnameResult(result: CallToolResult): CallToolResult {
-  const block = result.content[0];
-  const match = result.content.length === 1 && block?.type === 'text' && block.text.length <= 265
-    && /^([^\r\n]+)\r?\n\[exit 0\]$/.exec(block.text);
-  const hostname = match && match[0] === block.text && match[1];
-  if (!hostname || hostname.length > 253 || !hostname.replace(/\.$/,'').split('.').every(
-    label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label))) {
-    throw new McpError(ErrorCode.InternalError,'设备未返回有效主机名。',{reason:'hostname_unavailable'});
+function detectedImageMime(raw: Buffer): 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' | undefined {
+  if (raw.length >= 33 && raw.readBigUInt64BE(0) === 0x89504e470d0a1a0an && raw.toString('ascii', 12, 16) === 'IHDR') return 'image/png';
+  if (raw.length >= 3 && raw[0] === 0xff && raw[1] === 0xd8 && raw[2] === 0xff) return 'image/jpeg';
+  if (raw.length >= 6) {
+    const gif = raw.toString('ascii', 0, 6);
+    if (gif === 'GIF87a' || gif === 'GIF89a') return 'image/gif';
   }
-  return {content:[{type:'text',text:hostname}]};
+  if (raw.length >= 12 && raw.toString('ascii', 0, 4) === 'RIFF' && raw.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  return undefined;
 }
 
-function screenshotUnavailable() {
-  return new McpError(ErrorCode.InternalError,'无法确认目标窗口或获取其截图。',{reason:'window_screenshot_unavailable'});
-}
-
-function windowChangeUnverified() {
-  return new McpError(ErrorCode.InternalError,'无法确认所选窗口或操作结果。',{reason:'window_change_unverified'});
-}
-
-function selectedWindow(result: CallToolResult, pid: number, windowId: number) {
-  const windows = result.structuredContent?.windows;
-  if (!Array.isArray(windows) || windows.length > 1024) throw windowChangeUnverified();
-  const matches = windows.filter((row:unknown) => isRecord(row) && row.window_id === windowId);
-  if (matches.length !== 1 || matches[0].pid !== pid || matches[0].layer !== 0) throw windowChangeUnverified();
-  return matches[0] as Record<string,unknown>;
-}
-
-function windowImage(result: CallToolResult, pid: number, windowId: number) {
-  const meta = result.structuredContent;
-  const images = result.content.filter(part => part.type === 'image');
-  const image = images[0];
-  if (meta?.pid !== pid || meta.window_id !== windowId || meta.screenshot_frame_valid !== true
-      || !positiveInteger(meta.screenshot_width,maxScreenshotDimension) || !positiveInteger(meta.screenshot_height,maxScreenshotDimension)
-      || images.length !== 1 || image?.mimeType !== 'image/png' || image.data.length > 4 * Math.ceil(maxScreenshotBytes / 3))
-    throw screenshotUnavailable();
-  const png = Buffer.from(image.data,'base64');
-  // 对照实际 PNG 的 IHDR 和 IEND，防止伪报尺寸或无效 base64 穿过桥接层。
-  if (png.length < 45 || png.length > maxScreenshotBytes || png.toString('base64') !== image.data
-      || png.readBigUInt64BE(0) !== 0x89504e470d0a1a0an || png.readUInt32BE(8) !== 13 || png.toString('ascii',12,16) !== 'IHDR'
-      || png.readUInt32BE(16) !== meta.screenshot_width || png.readUInt32BE(20) !== meta.screenshot_height
-      || png.subarray(-12).toString('hex') !== '0000000049454e44ae426082') throw screenshotUnavailable();
-  return {type:'image' as const, mimeType:'image/png', data:image.data};
+function validatedImage(data: unknown, mimeType: unknown) {
+  if (typeof data !== 'string' || typeof mimeType !== 'string' || !data || data.length % 4 !== 0
+      || data.length > 4 * Math.ceil(maxImageBytes / 3) || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) return;
+  const raw = Buffer.from(data, 'base64');
+  if (!raw.length || raw.length > maxImageBytes || raw.toString('base64') !== data) return;
+  const detected = detectedImageMime(raw);
+  if (!detected || detected !== mimeType) return;
+  return {type:'image' as const, mimeType:detected, data};
 }
 
 class DirectorySession {
@@ -228,102 +330,65 @@ class DirectorySession {
       } catch { throw new McpError(ErrorCode.InternalError, '无法读取 Cua 工具目录'); }
     });
     this.server.setRequestHandler(CallToolRequestSchema, async ({params}, {signal}) => {
-      const args = params.arguments ?? {};
-      if (!validToolArgs(params.name, args)) throw new McpError(ErrorCode.InvalidParams,'不支持此设备操作或参数。');
+      const normalized = parseToolArgs(params.name, params.arguments ?? {});
+      if (!normalized) throw new McpError(ErrorCode.InvalidParams,'不支持此设备操作或参数。');
       const cards = spaceCards(await this.readDirectory('list_spaces',{},signal));
       if (params.name === 'list_spaces') return {content:[{type:'text',text:JSON.stringify(cards)}]};
 
       // Cua 还接受裸名称、URL 和未登记的地址。只使用本次目录中的唯一规范 ID。
-      const space = args.space as string, matching = cards.filter(card => card.id === space);
+      const space = normalized.space as string, matching = cards.filter(card => card.id === space);
       if (!deviceId.test(space) || !matching.length)
         throw new McpError(ErrorCode.InvalidParams,'未登记此设备 ID，请使用 list_spaces 返回的完整 ID。',{reason:'space_not_registered'});
       if (matching.length > 1)
         throw new McpError(ErrorCode.InternalError,'Cua 目录中此设备 ID 出现多次，无法确认目标。',{reason:'space_ambiguous'});
-      if (params.name === 'space_bash')
-        return hostnameResult(await this.call('space_bash',{space,command:'hostname',timeout:5},signal));
-      if (params.name === 'call_tool') {
-        const os = matching[0]!.os;
-        if (args.tool === 'get_window_state' && os !== 'macos')
-          throw new McpError(ErrorCode.InvalidParams,'此设备尚未提供经验证的精确窗口截图。',{reason:'window_screenshot_unsupported'});
-        if (args.tool === 'bring_to_front' && os !== 'macos')
-          throw new McpError(ErrorCode.InvalidParams,'此设备的 Driver 无法按 PID 验证要前置的窗口。',{reason:'window_change_unsupported'});
-        if (os !== 'macos' && os !== 'windows')
-          throw new McpError(ErrorCode.InvalidParams,'此设备不支持窗口查询。',{reason:'window_list_unsupported'});
-        const input = args.arguments as Record<string,unknown>;
-        if (os === 'macos' && input.window_id !== undefined && !positiveInteger(input.window_id,0xffffffff))
-          throw new McpError(ErrorCode.InvalidParams,'窗口 ID 超出 macOS 的范围。');
-        return this.windowTool(os,space,args.tool as string,input,signal);
+      if (params.name === 'list_tools') {
+        const directory = driverDirectory(await this.readDirectory('list_tools', normalized, signal));
+        return {content:[{type:'text',text:JSON.stringify(directory)}]};
       }
-      const directory = driverDirectory(await this.readDirectory('list_tools',args,signal));
-      return {content:[{type:'text',text:JSON.stringify(directory)}]};
+      return this.forwardOperation(params.name, normalized, signal);
     });
   }
 
-  private async windowTool(os: 'macos'|'windows', space: string, name: string, input: Record<string,unknown>, signal: AbortSignal): Promise<CallToolResult> {
-    const {tools} = driverDirectory(await this.readDirectory('list_tools',{space,service:'driver',name:'window'},signal));
-    const supports = (name: string, keys: string[]) => {
-      const matches = tools.filter(tool => tool.name === name);
-      const properties = matches[0]?.inputSchema?.properties;
-      return matches.length === 1 && isRecord(properties) && keys.every(key => Object.hasOwn(properties,key));
+  private async forwardOperation(name: string, upstreamArgs: Record<string,unknown>, signal: AbortSignal): Promise<CallToolResult> {
+    let result: CallToolResult;
+    try {
+      result = await this.client.request({method:'tools/call',params:{name,arguments:upstreamArgs}},CallToolResultSchema,{signal});
+    } catch {
+      throw new McpError(ErrorCode.InternalError,'Cua 未能完成设备操作。',{reason:'device_operation_failed'});
+    }
+    if (result.isError) {
+      const message = result.content
+        .flatMap(part => part.type === 'text' ? [part.text] : [])
+        .join('\n')
+        .trim()
+        .slice(0, maxErrorTextLength);
+      return {isError:true, content:[{type:'text', text:message || 'Cua 设备操作返回错误。'}]};
+    }
+    const content: CallToolResult['content'] = [];
+    let imageCount = 0;
+    for (const part of result.content) {
+      if (part.type === 'text') {
+        content.push({type:'text', text:part.text});
+      } else if (part.type === 'image') {
+        const checked = imageCount < 4 ? validatedImage(part.data, part.mimeType) : undefined;
+        if (checked) {
+          imageCount++;
+          content.push(checked);
+        } else {
+          content.push({type:'text', text:'[Cua 图片超出格式或大小限制，已省略]'});
+        }
+      } else if (part.type === 'resource') {
+        content.push({type:'text', text:'text' in part.resource ? `[Cua 资源：${part.resource.uri}]\n${part.resource.text}` : '[Cua 二进制资源已省略]'});
+      } else if (part.type === 'resource_link') {
+        content.push({type:'text', text:`[Cua 链接，未访问] ${part.uri}`});
+      } else if (part.type === 'audio') {
+        content.push({type:'text', text:'[Cua 音频已省略]'});
+      }
+    }
+    return {
+      content,
+      ...(isRecord(result.structuredContent) ? {structuredContent:result.structuredContent} : {}),
     };
-    const callDriver = (tool: string, args: Record<string,unknown>) =>
-      this.call('call_tool',{space,service:'driver',tool,arguments:args},signal);
-    if (name === 'list_windows') {
-      if (!supports('list_windows',Object.keys(input))) throw new McpError(ErrorCode.InvalidParams,'设备不支持该窗口查询。');
-      const {windows} = (await callDriver(name,input)).structuredContent ?? {};
-      if (!Array.isArray(windows) || windows.length > 1024) throw invalidDirectory();
-      const maxWindowId = os === 'windows' ? Number.MAX_SAFE_INTEGER : 0xffffffff;
-      const rows = windows.map(row => {
-        if (!isRecord(row) || !positiveInteger(row.pid,0x7fffffff) || !positiveInteger(row.window_id,maxWindowId)
-            || (input.pid !== undefined && row.pid !== input.pid)) throw invalidDirectory();
-        const title = typeof row.title === 'string' ? row.title.slice(0,128) : '';
-        return {pid:row.pid,window_id:row.window_id,title};
-      });
-      return {content:[{type:'text',text:JSON.stringify({windows:rows})}]};
-    }
-    const pid = input.pid as number, windowId = input.window_id as number;
-    if (name === 'bring_to_front' || name === 'set_window_frame') {
-      // Cua 的 name 只匹配工具名子串；bring_to_front 不在 window 目录中。
-      if (name === 'bring_to_front') {
-        const focus = driverDirectory(await this.readDirectory('list_tools',{space,service:'driver',name},signal));
-        tools.push(...focus.tools);
-      }
-      if (!supports(name,Object.keys(input)) || !supports('list_windows',['pid']))
-        throw new McpError(ErrorCode.InvalidParams,'当前设备的 Driver 缺少此窗口操作。',{reason:'window_change_unsupported'});
-      const checkTarget = async () => selectedWindow(await callDriver('list_windows',{pid}),pid,windowId);
-      await checkTarget();
-      const report = (await callDriver(name,input)).structuredContent;
-      if (name === 'bring_to_front') {
-        const effect = report?.exact_window_effect, observed = report?.observed;
-        if (report?.code !== 'bring_to_front_exact_window_verified' || report.status !== 'activated' || report.activated !== true
-            || report.pid !== pid || report.window_id !== windowId || report.process_activated !== true
-            || !isRecord(effect) || effect.verified !== true || effect.focused !== true || effect.front_in_process_on_display !== true
-            || !isRecord(observed) || observed.frontmost_pid !== pid || observed.focused_window_id !== windowId
-            || observed.process_front_window_on_display !== windowId) throw windowChangeUnverified();
-        await checkTarget();
-        return {content:[{type:'text',text:JSON.stringify({pid,window_id:windowId,activated:true})}]};
-      }
-      if (report?.effect !== 'confirmed' || !Array.isArray(report.evidence) || !report.evidence.some(
-        (item:unknown) => isRecord(item) && item.kind === 'value_readback')) throw windowChangeUnverified();
-      const {bounds} = await checkTarget();
-      // WindowServer 的原生核验容许每项最多两个点的误差；Windows 的 DWM 读回要求逐项相等。
-      const tolerance = os === 'macos' ? 2 : 0;
-      if (!isRecord(bounds) || !frameKeys.every(key => typeof bounds[key] === 'number' && Number.isFinite(bounds[key])
-        && ((key !== 'width' && key !== 'height') || bounds[key] > 0)
-        && Math.abs(bounds[key] - (input[key] as number)) <= tolerance)) throw windowChangeUnverified();
-      const {x,y,width,height} = input;
-      return {content:[{type:'text',text:JSON.stringify({pid,window_id:windowId,frame:{x,y,width,height}})}]};
-    }
-    const capture = {pid,window_id:windowId,include_accessibility_tree:false,include_screenshot:true,
-      display_only:true,screenshot_format:'png',max_dimension:maxScreenshotDimension};
-    if (!supports('get_window_state',Object.keys(capture)) || !supports('list_windows',['pid']))
-      throw new McpError(ErrorCode.InvalidParams,'设备的 Driver 缺少精确窗口截图支持。',{reason:'window_screenshot_unsupported'});
-    const image = windowImage(await callDriver('get_window_state',capture),pid,windowId);
-    // Driver 拍摄前已检查窗口归属；拍摄期间退出或易主时，也须丢弃图像。
-    const {windows} = (await callDriver('list_windows',{pid})).structuredContent ?? {};
-    if (!Array.isArray(windows) || windows.filter(w => isRecord(w) && w.pid === pid && w.window_id === windowId).length !== 1)
-      throw screenshotUnavailable();
-    return {content:[image]};
   }
 
   private async call(name: string, args: Record<string,unknown>, signal: AbortSignal): Promise<CallToolResult> {

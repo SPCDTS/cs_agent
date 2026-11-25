@@ -102,7 +102,7 @@ test('两个反向会话独立协商本机目录，兼容 JSON 与 SSE，仅列�
       if (rpc.method === 'notifications/initialized' || rpc.method === 'notifications/cancelled') { res.writeHead(202).end(); return; }
       calls.push(session + '/' + rpc.method);
       if (rpc.method === 'tools/list') {
-        result = {tools:['list_spaces','list_tools','fixture_hello','create_space','delete_space'].map(name => ({name,inputSchema:{type:'object'}}))};
+        result = {tools:['list_spaces','list_tools','fixture_hello','create_space','delete_space','add_space','remove_space','upload','download','send_file'].map(name => ({name,inputSchema:{type:'object'}}))};
       } else {
         assert.equal(rpc.method,'tools/call');
         directoryCalls.push(session + '/' + rpc.params.name);
@@ -154,6 +154,10 @@ test('两个反向会话独立协商本机目录，兼容 JSON 与 SSE，仅列�
       const before = calls.length;
       assert.ok((await ws.rpc(a,'tools/call',{name:'fixture_hello',arguments:{}})).error);
       assert.ok((await ws.rpc(a,'tools/call',{name:'create_space',arguments:{on:'local',durable:false,reuse:false}})).error);
+      for (const tool of ['add_space','remove_space'])
+        assert.ok((await ws.rpc(a,'tools/call',{name:tool,arguments:{space:card.id}})).error);
+      for (const tool of ['upload','download','send_file'])
+        assert.ok((await ws.rpc(a,'tools/call',{name:tool,arguments:{space:card.id,path:'/tmp/x'}})).error);
       for (const space of ['local:session-test',card.id])
         assert.ok((await ws.rpc(a,'tools/call',{name:'delete_space',arguments:{space}})).error);
       assert.ok((await ws.rpc(a,'resources/list')).error);
@@ -215,78 +219,52 @@ test('两个反向会话独立协商本机目录，兼容 JSON 与 SSE，仅列�
   }
 });
 
-test('设备操作只用登记目标、固定命令和同一进程的精确窗口，并过滤上游结果', async t => {
-  const dir = await mkdtemp(join(tmpdir(),'cua-read-'));
-  const path = process.platform === 'win32' ? '\\\\.\\pipe\\cua-read-' + randomUUID() : join(dir,'daemon.sock');
-  const space = 'relay:fixture01', pid = 122, window_id = 501;
-  const driverArgs = (tool:string,args:object) => ({space,service:'driver',tool,arguments:args});
-  const windowArgs = (args:object = {pid,window_id}) => driverArgs('get_window_state',args);
+test('开放完整 6 个桥工具，校验参数与大载荷写入并过滤图片与错误细节', async t => {
+  const dir = await mkdtemp(join(tmpdir(),'cua-exec-'));
+  const path = process.platform === 'win32' ? '\\\\.\\pipe\\cua-exec-' + randomUUID() : join(dir,'daemon.sock');
+  const space = 'relay:fixture01';
+  const driverArgs = (tool:string,args?:object) => ({space,service:'driver',tool,...(args === undefined ? {} : {arguments:args})});
   const png = {type:'image' as const,mimeType:'image/png',data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC'};
-  const meta = {pid,window_id,screenshot_frame_valid:true,screenshot_width:1,screenshot_height:1,window_title:'private title'};
-  let capture: CallToolResult = {content:[png,{type:'text',text:'private title'}],structuredContent:meta};
-  let host = 'mbp14.local\n[exit 0]', os = 'macos', matched = true, screenshotSupported = true;
-  let hwnd = Number.MAX_SAFE_INTEGER, windowsPid = pid;
-  const frame = {x:-10,y:40,width:600,height:300};
-  const target = {pid,window_id};
-  const exactActivation = {...target,status:'activated',code:'bring_to_front_exact_window_verified',activated:true,process_activated:true,
-    exact_window_effect:{verified:true,focused:true,front_in_process_on_display:true,frontmost_ordinary:false},
-    observed:{frontmost_pid:pid,focused_window_id:window_id,process_front_window_on_display:window_id}};
-  const exactFrame = {effect:'confirmed',evidence:[{kind:'value_readback',detail:'private bounds'}]};
-  let bounds = {...frame}, windowLayer = 0, afterMutation = () => {};
-  let actionReport:Record<string,unknown> = exactActivation, actionSupported = true;
-  const mutations:object[] = [];
-  const captureArguments = {pid,window_id,include_accessibility_tree:false,include_screenshot:true,display_only:true,
-    screenshot_format:'png',max_dimension:768};
-  const seen: string[] = [];
+  const jpgBytes = Buffer.from([0xff,0xd8,0xff,0xe0,0x00,0x10,0x4a,0x46,0x49,0x46,0x00,0x01,0x01,0x00,0x00,0x01,0x00,0x01,0x00,0x00,0xff,0xd9]);
+  const jpg = {type:'image' as const,mimeType:'image/jpeg',data:jpgBytes.toString('base64')};
+  const largeContent = 'line-0123456789abcdef\n'.repeat(4000); // > 80 KiB
+  assert.ok(Buffer.byteLength(largeContent, 'utf8') > 80 * 1024);
+
+  const seen: Array<{name:string; args:Record<string,unknown> | undefined}> = [];
+  let nextResult: CallToolResult | undefined;
+  let nextThrow: Error | undefined;
+
   const server = new Server({name:'cua-spaces',version:'test'},{capabilities:{tools:{}}});
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools:['list_spaces','list_tools','space_bash','call_tool','delete_space'].map(name => ({name,inputSchema:{type:'object' as const}})),
+    tools:['list_spaces','list_tools','space_bash','space_job','space_write','call_tool','create_space','delete_space','upload','download','send_file']
+      .map(name => ({name,inputSchema:{type:'object' as const}})),
   }));
   server.setRequestHandler(CallToolRequestSchema,async ({params:{name,arguments:args}}) => {
-    seen.push(name);
+    seen.push({name,args});
     const json = (data: unknown) => ({content:[{type:'text' as const,text:JSON.stringify(data)}]});
-    switch (name) {
-      case 'list_spaces':
-        assert.deepEqual(args,{});
-        return json([{id:space,name:'fixture',os}]);
-      case 'space_bash':
-        assert.deepEqual(args,{space,command:'hostname',timeout:5});
-        return {content:[{type:'text',text:host}]};
-      case 'list_tools':
-        if (args?.name === 'bring_to_front')
-          return json({service:'driver',tools:actionSupported ? [{name:'bring_to_front',description:'test',inputSchema:{properties:target}}] : []});
-        assert.deepEqual(args,{space,service:'driver',name:'window'});
-        return json({service:'driver',tools:[
-          {name:'get_window_state',description:'test',inputSchema:{properties:screenshotSupported ? captureArguments : {}}},
-          {name:'list_windows',description:'test',inputSchema:{properties:{pid:{},app:{}}}},
-          {name:'set_window_frame',description:'test',inputSchema:{properties:{...target,...frame}}},
-        ]});
-      case 'call_tool': {
-        if (args?.tool === 'list_windows') {
-          if (os === 'windows') {
-            const filter = args.arguments as {pid?:number;app?:string};
-            const records = filter.app === 'absent' ? [] : [{window_id:hwnd,pid:windowsPid,app_name:'notepad.exe',
-              title:'Windows fixture',bounds,layer:0,z_index:0,is_on_screen:true,minimized:false}];
-            return {content:[{type:'text',text:'private foreground app'}],structuredContent:{windows:records,current_space_id:null,_legacy_windows:records}};
-          }
-          if ((args.arguments as {app?:string}).app) {
-            assert.deepEqual(args,driverArgs('list_windows',{app:'Test'}));
-            return {content:[],structuredContent:{windows:[{pid,window_id,title:'Fixture window',unrelated:'private'}]}};
-          }
-          assert.deepEqual(args,driverArgs('list_windows',{pid}));
-          return {content:[{type:'text',text:'unrelated window title'}],structuredContent:{windows:matched
-            ? [{pid,window_id,layer:windowLayer,bounds}] : [{pid:pid+1,window_id}]}};
-        }
-        if (args?.tool === 'bring_to_front' || args?.tool === 'set_window_frame') {
-          mutations.push(args);
-          afterMutation();
-          return {content:[{type:'text',text:'private native diagnostics'}],structuredContent:actionReport};
-        }
-        assert.deepEqual(args,{space,service:'driver',tool:'get_window_state',arguments:captureArguments});
-        return capture;
-      }
-      default: throw new Error('unexpected upstream tool');
+    if (name === 'list_spaces') return json([{id:space,name:'fixture',os:'macos'}]);
+    if (name === 'list_tools') return json({service:'driver',tools:[{name:'screenshot',description:'截图',inputSchema:{type:'object'}}]});
+    if (nextThrow) { const err = nextThrow; nextThrow = undefined; throw err; }
+    if (nextResult) { const res = nextResult; nextResult = undefined; return res; }
+    if (name === 'space_bash') {
+      const cmd = String(args?.command ?? '');
+      if (cmd.includes('exit 7')) return {content:[{type:'text',text:'stderr notice\n[exit 7]'}]};
+      return {content:[{type:'text',text:`ran:${cmd}:timeout=${args?.timeout}\n[exit 0]`}]};
     }
+    if (name === 'space_job') {
+      return json({job:{job_id:'job-1',action:args?.action},...(args?.action === 'list' ? {jobs:[{job_id:'job-1',status:'running'}]} : {})});
+    }
+    if (name === 'space_write') {
+      return {content:[{type:'text',text:`wrote ${String((args?.content as string).length)} chars to ${args?.path}`}]};
+    }
+    if (name === 'call_tool') {
+      return {
+        _meta:{upstream_secret:'do-not-leak'},
+        content:[{type:'text',text:`called:${args?.tool}`},png,jpg],
+        structuredContent:{ok:true,tool:args?.tool,echoArgs:args?.arguments},
+      } as CallToolResult;
+    }
+    throw new Error('unexpected upstream tool');
   });
   const transport = new StreamableHTTPServerTransport({sessionIdGenerator:()=>randomUUID(),enableJsonResponse:true});
   await server.connect(transport);
@@ -300,112 +278,112 @@ test('设备操作只用登记目标、固定命令和同一进程的精确窗�
   http.listen(path); await once(http,'listening');
   const session = randomUUID();
   await ws.rpc(session,'initialize',{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'test',version:'1'}});
-  const tools = (await ws.rpc(session,'tools/list')).result.tools;
-  assert.deepEqual(tools.map((tool:{name:string}) => tool.name),['list_spaces','list_tools','space_bash','call_tool']);
-  assert.equal(tools.find((tool:{name:string}) => tool.name === 'call_tool').annotations.readOnlyHint,false);
+  const listed = (await ws.rpc(session,'tools/list')).result.tools as Array<{name:string; annotations?:{readOnlyHint?:boolean}; inputSchema:{properties?:Record<string,unknown>}}>;
+  assert.deepEqual(listed.map(t => t.name),['list_spaces','list_tools','space_bash','space_job','space_write','call_tool']);
+  assert.equal(listed.find(t => t.name === 'list_spaces')?.annotations?.readOnlyHint,true);
+  assert.equal(listed.find(t => t.name === 'list_tools')?.annotations?.readOnlyHint,true);
+  for (const op of ['space_bash','space_job','space_write','call_tool']) {
+    assert.equal(listed.find(t => t.name === op)?.annotations?.readOnlyHint,false);
+  }
+  assert.equal((listed.find(t => t.name === 'space_bash')?.inputSchema.properties?.command as {enum?:unknown})?.enum,undefined);
+  assert.equal((listed.find(t => t.name === 'call_tool')?.inputSchema.properties?.tool as {enum?:unknown})?.enum,undefined);
+
   const call = (name: string,args: object) => ws.rpc(session,'tools/call',{name,arguments:args});
+
+  // 非法参数及屏蔽工具应在到达上游之前被拒
   for (const [name,args] of [
-    ['space_bash',{space,command:'anything'}],['call_tool',windowArgs({pid,window_id:0})],
-    ['call_tool',windowArgs({pid:2**31,window_id})],['call_tool',windowArgs({pid,window_id,path:'test'})],
-    ['space_bash',{space,command:'hostname',timeout:3600}],['call_tool',driverArgs('get_desktop_state',{})],
-  ] as const) assert.ok((await call(name,args)).error);
+    ['create_space',{on:'local'}],
+    ['delete_space',{space}],
+    ['upload',{space,path:'/tmp/a'}],
+    ['download',{space,path:'/tmp/a'}],
+    ['send_file',{space,path:'/tmp/a'}],
+    ['space_bash',{space,command:''}],
+    ['space_bash',{space,command:'echo\0hi'}],
+    ['space_bash',{space,command:'echo hi',timeout:51}],
+    ['space_bash',{space,command:'echo hi',cwd:'/tmp'}],
+    ['space_job',{space,action:'start',command:'sleep 1',notify:{channel:'qq'}}],
+    ['space_job',{space,action:'start',command:'sleep 1',wake:true}],
+    ['space_job',{space,action:'start'}],
+    ['space_job',{space,action:'start',command:'sleep 1',until:{port:8080}}],
+    ['space_job',{space,action:'start',until:{file:'/tmp/a',port:80}}],
+    ['space_job',{space,action:'list',job:'job-1'}],
+    ['space_job',{space,action:'logs',job:'job-1',follow_ms:25001}],
+    ['space_job',{space,action:'start',command:'env',env:{'BAD-KEY':'1'}}],
+    ['space_job',{space,action:'start',command:'env',env:{OK:'a\0b'}}],
+    ['space_write',{space,path:'/tmp/a\0b',content:'hi'}],
+    ['space_write',{space,path:'/tmp/a',content:'x'.repeat(262145)}],
+    ['space_write',{space,path:'/tmp/a',content:'你'.repeat(90000)}], // <= 200k chars 但超过 256 KiB UTF-8
+    ['space_write',{space,path:'/tmp/a',content:'hi',mode:'0644'}],
+    ['call_tool',{space,service:'spaces',tool:'list_windows'}],
+    ['call_tool',{space,service:'driver',tool:'bad/tool'}],
+    ['call_tool',{space,service:'driver',tool:'click',arguments:['not-object']}],
+  ] as const) {
+    assert.ok((await call(name,args)).error,`应拒绝非法调用 ${name}:${JSON.stringify(args)}`);
+  }
   assert.equal(seen.length,0);
-  for (const [name,args] of [['space_bash',{command:'hostname'}],['call_tool',windowArgs()]] as const)
+
+  // 未登记设备拒绝
+  for (const [name,args] of [
+    ['space_bash',{command:'pwd'}],
+    ['space_job',{action:'list'}],
+    ['space_write',{path:'/tmp/x',content:'ok'}],
+    ['call_tool',{service:'driver',tool:'screenshot'}],
+  ] as const) {
     assert.equal((await call(name,{...args,space:'direct:unknown:18181'})).error.data.reason,'space_not_registered');
-  assert.deepEqual((await call('space_bash',{space,command:'hostname'})).result,{content:[{type:'text',text:'mbp14.local'}]});
-  for (host of ['mbp14\n[exit 1]','token\nprivate text\n[exit 0]','-invalid\n[exit 0]','mbp14\n[exit 0]\n']) {
-    const reply = await call('space_bash',{space,command:'hostname'});
-    assert.equal(reply.error.data.reason,'hostname_unavailable');
-    assert.ok(!JSON.stringify(reply).includes('private text'));
   }
-  const snap = () => call('call_tool',windowArgs());
-  os = 'windows';
-  assert.equal((await snap()).error.data.reason,'window_screenshot_unsupported');
-  assert.ok(!seen.includes('call_tool'));
-  const windows = (filter:object) => call('call_tool',driverArgs('list_windows',filter));
-  for (const filter of [{},{pid},{app:'notepad'}]) {
-    const result = (await windows(filter)).result;
-    assert.deepEqual(result,{content:[{type:'text',text:JSON.stringify({windows:[{pid,window_id:hwnd,title:'Windows fixture'}]})}]});
-  }
-  assert.deepEqual(JSON.parse((await windows({app:'absent'})).result.content[0].text),{windows:[]});
-  hwnd = Number.MAX_SAFE_INTEGER + 1;
-  assert.equal((await windows({})).error.data.reason,'directory_invalid');
-  hwnd = window_id; windowsPid = pid + 1;
-  assert.equal((await windows({pid})).error.data.reason,'directory_invalid');
-  os = 'linux';
-  assert.equal((await windows({})).error.data.reason,'window_list_unsupported');
-  const driverCallCount = seen.filter(name => name === 'call_tool').length;
-  os = 'macos'; screenshotSupported = false;
-  assert.equal((await snap()).error.data.reason,'window_screenshot_unsupported');
-  assert.equal(seen.filter(name => name === 'call_tool').length,driverCallCount);
-  screenshotSupported = true;
-  const found = await call('call_tool',driverArgs('list_windows',{app:'Test'}));
-  assert.deepEqual(JSON.parse(found.result.content[0].text),{windows:[{pid,window_id,title:'Fixture window'}]});
-  assert.deepEqual((await snap()).result,{content:[png]});
-  matched = false;
-  assert.equal((await snap()).error.data.reason,'window_screenshot_unavailable');
-  matched = true;
-  for (capture of [
-    {content:[png],structuredContent:{...meta,pid:pid+1}}, {content:[png],structuredContent:{...meta,screenshot_width:769}},
-    {content:[png],structuredContent:{...meta,screenshot_width:2}}, {content:[png,png],structuredContent:meta},
-    {content:[{...png,data:'not a PNG'}],structuredContent:meta}, {content:[{type:'text',text:'private title'}],structuredContent:meta},
-    {content:[png],structuredContent:{...meta,screenshot_frame_valid:false}},
-  ] satisfies CallToolResult[]) assert.equal((await snap()).error.data.reason,'window_screenshot_unavailable');
-  capture = {isError:true,content:[{type:'text',text:'private title'}]};
-  const failed = await snap();
-  assert.equal(failed.error.data.reason,'device_operation_failed');
-  assert.ok(!JSON.stringify(failed).includes('private title'));
 
-  await t.test('macOS 精确前置只接受已核实的焦点，Windows 不执行未检查 PID 的前置',async () => {
-    const focus = (args:object=target) => call('call_tool',driverArgs('bring_to_front',args));
-    for (const args of [{pid},{window_id},{...target,app:'Test'},{pid,window_id:2**32}]) assert.ok((await focus(args)).error);
-    os = 'windows';
-    assert.equal((await focus()).error.data.reason,'window_change_unsupported');
-    os = 'macos'; actionSupported = false;
-    assert.equal((await focus()).error.data.reason,'window_change_unsupported');
-    actionSupported = true; windowLayer = 3;
-    assert.equal((await focus()).error.data.reason,'window_change_unverified');
-    windowLayer = 0; matched = false;
-    assert.equal((await focus()).error.data.reason,'window_change_unverified');
-    assert.equal(mutations.length,0);
-    matched = true;
-    assert.deepEqual((await focus()).result,{content:[{type:'text',text:JSON.stringify({...target,activated:true})}]});
-    assert.deepEqual(mutations,[driverArgs('bring_to_front',target)]);
-    for (actionReport of [{...exactActivation,status:'partial'}, {...exactActivation,window_id:window_id+1},
-      {...exactActivation,observed:{...exactActivation.observed,focused_window_id:window_id+1}}])
-      assert.equal((await focus()).error.data.reason,'window_change_unverified');
-    actionReport = exactActivation; afterMutation = () => { matched = false; };
-    assert.equal((await focus()).error.data.reason,'window_change_unverified');
-    matched = true; afterMutation = () => {};
-  });
+  // space_bash 通用命令与默认/上限超时、非零退出透传
+  const bashDefault = await call('space_bash',{space,command:'uname -a && ls'});
+  assert.equal(bashDefault.result.content[0].text,'ran:uname -a && ls:timeout=30\n[exit 0]');
+  const bashMax = await call('space_bash',{space,command:'false; exit 7',timeout:50});
+  assert.equal(bashMax.result.content[0].text,'stderr notice\n[exit 7]');
 
-  await t.test('两平台调整窗口只返回经 Driver 与同 PID 窗口再次读回的位置和大小',async () => {
-    const move = (args:object) => call('call_tool',driverArgs('set_window_frame',args));
-    const macArgs = {...target,...frame};
-    let prior = mutations.length;
-    for (const args of [{...macArgs,width:0},{...macArgs,height:32768},{...macArgs,x:-32769},{...macArgs,y:0.5},
-      {...macArgs,session:'other'},{...macArgs,window_id:2**32}]) assert.ok((await move(args)).error);
-    assert.equal(mutations.length,prior);
-    const moved = (id:number) => ({content:[{type:'text',text:JSON.stringify({pid,window_id:id,frame})}]});
-    actionReport = exactFrame; bounds = {...frame,x:frame.x+2};
-    assert.deepEqual((await move(macArgs)).result,moved(window_id));
-    assert.deepEqual(mutations.at(-1),driverArgs('set_window_frame',macArgs));
-    bounds.x++;
-    assert.equal((await move(macArgs)).error.data.reason,'window_change_unverified');
-    os = 'windows'; hwnd = Number.MAX_SAFE_INTEGER; windowsPid = pid + 1;
-    const winArgs = {...macArgs,window_id:hwnd};
-    prior = mutations.length;
-    assert.equal((await move(winArgs)).error.data.reason,'window_change_unverified');
-    assert.equal(mutations.length,prior);
-    windowsPid = pid; bounds = {...frame};
-    assert.deepEqual((await move(winArgs)).result,moved(hwnd));
-    assert.deepEqual(mutations.at(-1),driverArgs('set_window_frame',winArgs));
-    bounds.width++;
-    assert.equal((await move(winArgs)).error.data.reason,'window_change_unverified');
-    bounds = {...frame};
-    for (actionReport of [{...exactFrame,effect:'unverifiable'},{effect:'confirmed',evidence:[]}])
-      assert.equal((await move(winArgs)).error.data.reason,'window_change_unverified');
-    actionReport = exactFrame; afterMutation = () => { windowsPid++; };
-    assert.equal((await move(winArgs)).error.data.reason,'window_change_unverified');
-  });
+  // space_job 5 类动作与 until 等待条件
+  assert.deepEqual(JSON.parse((await call('space_job',{space,action:'start',command:'npm test',name:'tests',cwd:'/work',env:{CI:'1'},timeout:600})).result.content[0].text),
+    {job:{job_id:'job-1',action:'start'}});
+  assert.deepEqual(seen.at(-1)?.args,{space,action:'start',command:'npm test',name:'tests',cwd:'/work',env:{CI:'1'},timeout:600});
+  assert.ok((await call('space_job',{space,action:'start',until:{port:8080,host:'127.0.0.1',interval:2}})).result);
+  assert.ok((await call('space_job',{space,action:'status',job:'job-1'})).result);
+  assert.ok((await call('space_job',{space,action:'logs',job:'job-1',offset:0,limit:4096,follow_ms:25000})).result);
+  assert.ok((await call('space_job',{space,action:'cancel',job:'job-1'})).result);
+  assert.ok((await call('space_job',{space,action:'list'})).result);
+
+  // space_write 小文本与 > 32 KiB 大载荷（验证抬高后的 requestBytes）
+  const smallWrite = await call('space_write',{space,path:'/tmp/hello.txt',content:'hello'});
+  assert.equal(smallWrite.result.content[0].text,'wrote 5 chars to /tmp/hello.txt');
+  const bigWrite = await call('space_write',{space,path:'/tmp/large.txt',content:largeContent});
+  assert.equal(bigWrite.result.content[0].text,`wrote ${largeContent.length} chars to /tmp/large.txt`);
+
+  // call_tool 通用调用：默认空 arguments、保留图片与 structuredContent、剔除 _meta
+  const shot = await call('call_tool',driverArgs('screenshot'));
+  assert.deepEqual(seen.at(-1)?.args,{space,service:'driver',tool:'screenshot',arguments:{}});
+  assert.equal((shot.result as {_meta?:unknown})._meta,undefined);
+  assert.deepEqual(shot.result.content,[{type:'text',text:'called:screenshot'},png,jpg]);
+  assert.deepEqual(shot.result.structuredContent,{ok:true,tool:'screenshot',echoArgs:{}});
+
+  const click = await call('call_tool',driverArgs('click',{x:100,y:200,button:'left'}));
+  assert.deepEqual(click.result.structuredContent,{ok:true,tool:'click',echoArgs:{x:100,y:200,button:'left'}});
+
+  // 非法图片、MIME 伪造与超过 4 张上限时省略替换
+  const fakePng = Buffer.from('not-a-valid-png').toString('base64');
+  nextResult = {content:[png,png,png,png,png,{type:'image',mimeType:'image/png',data:fakePng},{...png,mimeType:'image/jpeg'}]};
+  const filteredImages = await call('call_tool',driverArgs('get_desktop_state',{}));
+  assert.deepEqual(filteredImages.result.content,[
+    png,png,png,png,
+    {type:'text',text:'[Cua 图片超出格式或大小限制，已省略]'},
+    {type:'text',text:'[Cua 图片超出格式或大小限制，已省略]'},
+    {type:'text',text:'[Cua 图片超出格式或大小限制，已省略]'},
+  ]);
+
+  // 上游工具返回的 isError 保留并按 4000 字截断
+  nextResult = {isError:true,content:[{type:'text',text:'E'.repeat(5000)}]};
+  const upstreamErr = await call('call_tool',driverArgs('click',{x:1,y:2}));
+  assert.equal(upstreamErr.result.isError,true);
+  assert.equal(upstreamErr.result.content[0].text.length,4000);
+
+  // RPC 传输异常脱敏为 device_operation_failed，不泄露内部异常消息
+  nextThrow = new Error('internal socket stack trace secret_path');
+  const rpcErr = await call('space_bash',{space,command:'pwd'});
+  assert.equal(rpcErr.error.data.reason,'device_operation_failed');
+  assert.ok(!JSON.stringify(rpcErr).includes('secret_path'));
 });

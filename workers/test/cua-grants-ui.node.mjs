@@ -3,23 +3,47 @@ import { test } from 'node:test';
 import { ADMIN_PAGE_HTML } from '../src/admin/app.generated.ts';
 import { bundleModule, mountDom } from './browser-harness.mjs';
 
-test('Cua 窗口工具首次勾选时默认只读，重新打开时显示已保存的窗口权限',async () => {
+test('Cua 工具展示目录只读、固定读写执行以及可选只读桌面/后台查询标记',async () => {
   const page = mountDom(ADMIN_PAGE_HTML,{token:'synthetic-admin'}), ui = await bundleModule('browser/mcp-servers.ts');
   const tools = {allow:[],readOnly:[]};
   ui.mcpServers.rows = [{server:{id:'cua',enabled:true,tools,resourceAllow:[],credential:{kind:'managed'},
     transport:{kind:'reverse-websocket',url:'https://example.test/mcp/reverse/cua'}},revision:'initial',credentialSet:true,
-    discovered:[{name:'call_tool',description:'窗口'},{name:'list_tools',description:'目录'}]}];
+    discovered:[
+      {name:'list_spaces',description:'设备目录'},
+      {name:'list_tools',description:'Driver 目录'},
+      {name:'space_bash',description:'短命令'},
+      {name:'space_job',description:'后台任务'},
+      {name:'space_write',description:'写文件'},
+      {name:'call_tool',description:'桌面操作'},
+    ]}];
   const checkbox = name => page.document.querySelector('input[data-readonly="'+name+'"]');
   ui.mcpServerRender('cua');
-  assert.equal(checkbox('call_tool').parentElement.textContent,'仅允许读取窗口');
-  assert.equal(checkbox('call_tool').checked,true);
-  assert.equal(checkbox('list_tools').parentElement.textContent,'确认为只读');
-  tools.allow = ['call_tool']; tools.readOnly = ['call_tool'];
+  for (const name of ['list_spaces','list_tools']) {
+    assert.equal(checkbox(name).parentElement.textContent,'目录只读');
+    assert.equal(checkbox(name).checked,true);
+    assert.equal(checkbox(name).disabled,true);
+  }
+  for (const name of ['space_bash','space_write']) {
+    assert.equal(checkbox(name).parentElement.textContent,'读写执行');
+    assert.equal(checkbox(name).checked,false);
+    assert.equal(checkbox(name).disabled,true);
+  }
+  assert.equal(checkbox('call_tool').parentElement.textContent,'仅允许只读桌面查询');
+  assert.equal(checkbox('call_tool').disabled,false);
+  assert.equal(checkbox('call_tool').checked,false);
+  assert.equal(checkbox('space_job').parentElement.textContent,'仅允许查询后台任务');
+  assert.equal(checkbox('space_job').disabled,false);
+  assert.equal(checkbox('space_job').checked,false);
+
+  tools.allow = ['list_spaces','list_tools','space_bash','space_job','space_write','call_tool'];
+  tools.readOnly = ['list_spaces','list_tools','call_tool','space_job'];
   ui.mcpServerRender('cua');
   assert.equal(checkbox('call_tool').checked,true);
-  tools.readOnly = [];
+  assert.equal(checkbox('space_job').checked,true);
+  tools.readOnly = ['list_spaces','list_tools'];
   ui.mcpServerRender('cua');
   assert.equal(checkbox('call_tool').checked,false);
+  assert.equal(checkbox('space_job').checked,false);
 });
 
 test('设备分配界面区分群与私聊，节点离线时仍可清空已有分配',async t => {

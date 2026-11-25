@@ -1,6 +1,6 @@
-# Cua 设备目录部署
+# Cua 设备目录与执行部署
 
-这套模板默认让 cs-agent 读取已登记设备及其 Driver 工具清单，可按设备开放主机名、macOS 与 Windows 窗口列表，以及 macOS 单窗口截图。启用后，主人与获分配该设备的会话及其获授权子任务可以执行这些读取。控制机需有 Linux、支持 `LoadCredential` 的 systemd、Caddy 2 和 Node.js 24。上游 `cua-sdk-v0.31.0` 对应的 CLI 与 daemon 为 0.31.0，同一提交的 `cua-relay` 和设备端 `cua-spacesd` 为 0.17.2。示例域名和机器 ID 需按本次接入填写。[Cua 固定版本](https://github.com/trycua/cua/tree/78fe31378569aab57ddb5131a08fc90fc3c6fbb9) [spacesd 版本](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua-spacesd/VERSION)
+这套模板让 cs-agent 通过反向桥读取已登记设备及其 Driver 工具清单，并按设备开放通用 Shell、后台长任务（Linux/macOS）、文本写文件与完整 Driver 桌面操作。启用后，主人及获分配该设备的会话和获授权子任务均可在授权范围内直接执行这些操作。控制机需有 Linux、支持 `LoadCredential` 的 systemd、Caddy 2 和 Node.js 24。上游 `cua-sdk-v0.31.0` 对应的 CLI 与 daemon 为 0.31.0，同一提交的 `cua-relay` 和设备端 `cua-spacesd` 为 0.17.2。示例域名和机器 ID 需按本次接入填写。[Cua 固定版本](https://github.com/trycua/cua/tree/78fe31378569aab57ddb5131a08fc90fc3c6fbb9) [spacesd 版本](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua-spacesd/VERSION)
 
 ## 规划设备身份
 
@@ -22,7 +22,7 @@ Linux amd64 可从 [Relay 构建工作流](../../.github/workflows/build-cua-rel
 3. 每台设备准备两个独立、随机的秘密。*注册令牌*只给该设备和它的 Relay，放入 `relays/18181.token` 或 `relays/18182.token`，每个文件恰好一行。*设备令牌*供设备验证目录请求，稍后写入对应的 `spaces/<目录端口>.env`。可使用密码管理器分发。令牌应直接写入受保护的文件，避免终端输出和命令行参数。
 4. 按表填写 [Caddyfile](Caddyfile)。域名应直接解析到控制机，公网只开放 443/TCP。若与其他站点共用 Caddy，按下节核对完整配置与监听端口。运行 `systemctl enable --now cua-relay@18181 cua-relay@18182 cua-directory`。
 5. 在 cs-agent「模型与接入」展开「接入或管理远程 MCP 服务」，服务名称填 `cua`，认证选择「反向 WebSocket」，点击「保存连接」。管理员用密码管理器生成一枚独立的 64 位随机十六进制令牌，在 `Authorization` 的密码框填入令牌，点击「保存凭据并检测」。首次操作时桥尚未启动，稍后可重新检测。
-6. 把自动生成的 WSS 地址及同一枚令牌写入 `/etc/cs-agent/cua/bridge.env`，格式如下。令牌值直接填原文。运行 `systemctl enable --now cua-directory-bridge`，在管理台「刷新服务」，选中 `cua` 并确认显示「节点在线」。点击「检测连接与工具」，勾选 `list_spaces` 和 `list_tools`，点击「启用选中工具」。资源 URI 前缀留空。
+6. 把自动生成的 WSS 地址及同一枚令牌写入 `/etc/cs-agent/cua/bridge.env`，格式如下。令牌值直接填原文。运行 `systemctl enable --now cua-directory-bridge`，在管理台「刷新服务」，选中 `cua` 并确认显示「节点在线」。点击「检测连接与工具」，按需要勾选 `list_spaces`、`list_tools`、`space_bash`、`space_job`、`space_write`、`call_tool` 并点击「启用选中工具」（若仅开放目录和只读查看，可为 `space_job` / `call_tool` 勾选对应的只读限制）。资源 URI 前缀留空。
 
 ```ini
 REVERSE_MCP_URL=wss://agent.example.org/mcp/reverse/cua
@@ -84,38 +84,35 @@ CUA_ENV_TOKEN=<设备专属令牌>
 
 运行 `systemctl start cua-directory-register@18281`，仅在设备已加入且能力握手成功后登记该条目。Cua 默认采用 `GetCapabilities.hostname` 作为设备卡名称。旧版曾显式指定名称时，安装新版 register unit、运行 `systemctl daemon-reload`，然后对仍在线的设备重新执行同一个 register 服务即可刷新名称。Space ID 和配对凭据保持有效。第二台设备使用另一份文件和端口。到 cs-agent「权限与运维」→「Cua 设备分配」，点「刷新设备与分配」，选择群聊或私聊，核对设备名与完整 Space ID，勾选该设备并点击「保存分配」。会话可列出已分配设备并查看其 Driver 工具清单。列表中的状态反映 Cua 最近的握手结果。管理台可另设显示名（支持中文），清除显示名后恢复设备默认名称。模型按完整 Space ID 调用设备。
 
-## 为一台测试设备启用主机名与窗口读取
+## 为设备启用执行能力（Shell、后台任务、写文件与完整桌面）
 
-在目标设备已用独立设备令牌完成登记后，修改控制机 Caddyfile 中该设备现有的回环站点。以下配置对应表中的工作用 Mac。两条 `import` 必须使用同一台设备的 machine-id 和 Relay 端口。沿用旧模板时，同步把片段定义与已启用的 `import owner-inspection` 更名为 `device-inspection`。
+在目标设备已用独立设备令牌完成登记后，修改控制机 Caddyfile 中该设备现有的回环站点，导入 `(device-execution)` 放行执行与写文件所需的 gRPC 路径（仍仅监听 `127.0.0.1`）。以下配置对应表中的工作用 Mac，两条 `import` 必须使用同一台设备的 machine-id 和 Relay 端口。**沿用旧模板时，务必将片段定义与已启用的 `import owner-inspection` 或 `import device-inspection` 更名为 `import device-execution`**：
 
 ```caddyfile
 http://127.0.0.1:18281 {
-	import device-inspection computer-alpha 18181
+	import device-execution computer-alpha 18181
 	import directory computer-alpha 18181
 }
 ```
 
-用 `caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile` 检查后重新加载配置，并核对 `ss -ltn` 中该端口仅监听 `127.0.0.1`。公网入口继续只在 443/TCP 接受指定机器的 join。Caddy 在回环路径上放行两条额外的 gRPC 方法，并将请求的设备 Bearer 交给该机的 spacesd 验证。设备端需使用 `--token-file`。掌握设备令牌的本地进程可以直接调用这两条原生 RPC，设备令牌应只供该设备和专用目录账号使用。
+用 `caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile` 检查后重新加载配置，并核对 `ss -ltn` 中该端口仅监听 `127.0.0.1`。公网入口继续只在 443/TCP 接受指定机器的 join。Caddy 在回环路径上放行 `ProcessService/{StartProcess,ConnectProcess,SignalProcess}`、`FilesystemService/{WriteFile,BeginUpload,UploadChunk,CommitUpload,AbortUpload}` 与 `DriverService/CallTool`，并将请求的设备 Bearer 交给该机的 spacesd 验证。设备端需使用 `--token-file`。掌握设备令牌的本地进程可以直接调用这些原生 RPC，设备令牌应只供该设备和专用目录账号使用。
 
-| Cua MCP 工具与参数 | 设备原生接口 | 结果 |
+| Cua MCP 工具 | 转发的原生动作与主要边界 | 说明 |
 | --- | --- | --- |
-| `space_bash` 传入 `space` 和 `command="hostname"` | `ProcessService/StartProcess`，固定运行 `hostname`，5 秒超时 | 校验正常退出后返回主机名 |
-| `call_tool` 传入 `space`、`service="driver"`、`tool="list_windows"` 和 `arguments` | `DriverService/CallTool`，可在 `arguments` 中传应用名 `app`、进程号 `pid` 或留空对象 | 返回 macOS 或 Windows 上匹配的窗口及其 PID、窗口 ID |
-| 同一 `call_tool` 传入 `tool="get_window_state"`，`arguments` 传选中行的 `pid` 和 `window_id` | `DriverService/CallTool`，按两个 ID 读取该窗口，再以相同 PID 调用 `list_windows` 复核归属 | 返回指定 macOS 窗口的单张 PNG |
-| `set_window_frame`，传入 `pid`、`window_id` 和目标 `x/y/width/height` | `DriverService/CallTool`，在 macOS 或 Windows 调整指定窗口 | 核验操作后的窗口几何并返回回执 |
-| `bring_to_front`，传入 `pid`、`window_id` | `DriverService/CallTool`，在 macOS 前置指定窗口并激活所属应用 | 应用的其他窗口也可能随之移动到前台 |
+| `space_bash` | 在设备运行任意 Shell 命令（Linux/macOS `/bin/sh -c`，Windows `cmd.exe /C`），默认 30s、最长 50s | `timeout` 在 bridge/Worker 内强限 1–50s；超长命令请改用 `space_job` |
+| `space_job` | 后台长任务管理（`start`/`status`/`logs`/`cancel`/`list`） | **上游仅支持 Linux/macOS**（Windows 由上游拒绝）；已移除跨线程通知参数 `notify`/`wake` |
+| `space_write` | 原子写文本到指定绝对路径并自动创建父目录（底层走 `FilesystemService` 上传） | 单次 `content` ≤ 200,000 字符且 UTF-8 ≤ 256 KiB |
+| `call_tool` | 透传 `service="driver"` 的完整桌面工具与参数（查询、截图、点击、键入、窗口控制等） | 返回的截图（PNG/JPEG/WebP/GIF）经魔数校验并自动存入当前会话媒体库，给出 `imageId`/`imageIds` |
 
-先在管理台核对已获分配的群聊和私聊，再为 `cua` 重新检测并启用所需的 `space_bash` 或 `call_tool`。升级桥后，原有只读配置仍可查看窗口。重新检测新契约、启用 `call_tool` 并取消勾选「仅允许读取窗口」后，已有分配也允许上表中的窗口写操作。测试截图时，在对话里选定 Mac 与专用测试窗口，让模型先列出窗口再按返回的 ID 截图。设备的登录用户需已允许系统录制。返回的 `structuredContent.imageId` 可用于本会话的 `send_message.images`。关闭窗口后重复请求应返回错误。被动事件、agent 回合及定时任务不能执行这些设备操作。Windows 窗口操作依据固定版本的 Driver 契约和合成响应测试验证，本轮未做 Windows 真机测试。Windows Driver 的截图路径可能回退到读取桌面像素，cs-agent 仅在 macOS 开放单窗口截图。[Windows Driver 的截图回退](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua-driver/rust/crates/platform-windows/src/capture.rs#L645-L675)
+先在管理台核对已获分配的群聊和私聊，再为 `cua` **重新检测（probe）并启用**所需工具。如果从仅开放目录/只读窗口的旧版本升级，未重新检测直接启用 `space_bash` 或完整 `call_tool` 会返回 `probe_required`。重新检测新契约后启用即可；管理员也可随时为 `call_tool` 勾选「仅允许只读桌面查询」或为 `space_job` 勾选「仅允许查询后台任务」，将已有授权收紧回只读模式（并自动使旧子任务快照失效）。被动事件、跨会话 `agent` 回合及定时任务不可调用上述设备工具。
 
-要恢复设备的目录模式，移除该回环站点的 `import device-inspection`，校验后重新加载 Caddy。
+为保护控制机（VPS）本地文件系统与系统安全，反向桥刻意拒绝宿主与设备之间搬运 VPS 本地文件的工具（`upload`、`download`、`send_file`）。要回退某台设备回目录模式，只需移除该回环站点的 `import device-execution`，校验并重载 Caddy。
 
-## 临时 Space 的供应边界
+## 临时 Space 的供应边界（仍不向模型开放 `create_space` / `delete_space`）
 
-在开放设备 shell 时，请将控制机目录 daemon 的 Unix socket 和供应凭据保留在专用服务账号下。拥有这些凭据的操作系统账号可以直接使用 Cua 管理资源。
+在开放设备 Shell、文件与桌面操作时，请务必将控制机目录 daemon 的 Unix socket 和供应凭据保留在专用服务账号下。拥有这些凭据的操作系统账号可以直接使用 Cua 管理资源。
 
-本部署将本机 Space 的创建和销毁留在 Cua 管理端。Cua 0.31.0 用 `local:<名称>` 标识本机实例，同名重建后 ID 可以复用。原生 MCP 的 `delete_space` 只接收 `space`，会递归删除子 Space。即便 cs-agent 记下本会话创建过哪个 ID，稍后删除也可能命中同名的新实例或其他会话的子 Space。[本机 Space ID](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/id.rs#L70-L90) [原生 MCP 删除参数](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/mcp/tools.rs#L363-L366) [子树删除逻辑](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/tree.rs#L235-L275)
-
-本机 `create_space.timeout` 限制等待实例就绪的时长。设置到期删除需要后续一步，若控制机在两步之间中断，实例可能持续运行。因此当前目录桥和 Worker 都拒绝原生 `create_space`、`delete_space`。要开放主人会话自动回收，供应端需要在创建时保证到期回收，或支持针对具体实例的持久回收任务，并保证回收仅作用于本会话创建的资源。这些结论针对本机后端，云供应端尚待单独验证。[本机创建参数](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/spaces.rs#L3318-L3347) [设置 Space 到期时间](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/lifetimes.rs#L115-L157)
+本部署继续将 Space 的创建和销毁留在控制端人工管理（反向桥与 Worker 均拒绝 `create_space`、`delete_space` 等生命周期工具），原因如下：Cua 0.31.0 用 `local:<名称>` 标识本机实例，同名重建后 ID 可以复用；原生 MCP 的 `delete_space` 只接收 `space`，会递归删除子 Space。即便 cs-agent 记下本会话创建过哪个 ID，稍后删除也可能命中同名的新实例或其他会话的子 Space。此外本机 `create_space.timeout` 仅限制等待就绪的时长，设置到期删除需要额外一步，若控制机在两步之间中断，实例可能持续运行。[本机 Space ID](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/id.rs#L70-L90) [原生 MCP 删除参数](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/mcp/tools.rs#L363-L366) [子树删除逻辑](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/tree.rs#L235-L275) [本机创建参数](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/spaces.rs#L3318-L3347) [设置 Space 到期时间](https://github.com/trycua/cua/blob/78fe31378569aab57ddb5131a08fc90fc3c6fbb9/libs/cua/crates/cua-spaces/src/lifetimes.rs#L115-L157)
 
 ## 撤销与轮换
 

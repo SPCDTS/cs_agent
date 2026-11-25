@@ -6,7 +6,7 @@ import { MCP_CATALOG_SCHEMA, restoreCatalog } from '../src/mcp/catalog';
 import { serverDigest, toolNames } from '../src/mcp/names';
 import { afterEach, expect, it } from 'vitest';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { CallToolRequestSchema, ListToolsRequestSchema, type JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import worker from '../src/index';
 import { adminEnv } from './mcp-helpers';
@@ -21,13 +21,66 @@ afterEach(reset);
 const id = 'cua', scope = 'group:123456', device = 'direct:fixture-a.test:8080', second = 'direct:fixture-b.test:8080';
 const bearer = 'Bearer '+'g'.repeat(43);
 const windowPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC';
-const fixtureTools = ['list_spaces','list_tools','space_bash','call_tool'];
+const fixtureTools = ['list_spaces','list_tools','space_bash','space_job','space_write','call_tool'];
+const fixtureSchemas: Record<string,Record<string,unknown>> = {
+  list_spaces: {type:'object', properties:{}, additionalProperties:false},
+  list_tools: {
+    type:'object',
+    properties:{space:{type:'string',maxLength:256}, service:{type:'string',enum:['driver']}, name:{type:'string',maxLength:128}},
+    required:['space','service'], additionalProperties:false,
+  },
+  space_bash: {
+    type:'object',
+    properties:{space:{type:'string',maxLength:256}, command:{type:'string',minLength:1,maxLength:32768}, timeout:{type:'integer',minimum:1,maximum:50}},
+    required:['space','command'], additionalProperties:false,
+  },
+  space_job: {
+    type:'object',
+    properties:{
+      space:{type:'string',maxLength:256},
+      action:{type:'string',enum:['start','status','logs','cancel','list']},
+      command:{type:'string',minLength:1,maxLength:32768},
+      job:{type:'string',minLength:1,maxLength:128,pattern:'^[A-Za-z0-9._-]{1,128}$'},
+      name:{type:'string',minLength:1,maxLength:80},
+      cwd:{type:'string',minLength:1,maxLength:4096},
+      env:{type:'object',maxProperties:64,propertyNames:{type:'string',pattern:'^[A-Za-z_][A-Za-z0-9_]{0,127}$'},additionalProperties:{type:'string',maxLength:4096}},
+      timeout:{type:'integer',minimum:1,maximum:86400},
+      until:{
+        type:'object',
+        properties:{
+          file:{type:'string',minLength:1,maxLength:4096}, port:{type:'integer',minimum:1,maximum:65535},
+          host:{type:'string',minLength:1,maxLength:253}, command:{type:'string',minLength:1,maxLength:32768},
+          pr_checks:{type:'string',minLength:1,maxLength:256}, interval:{type:'integer',minimum:1,maximum:300},
+        },
+        additionalProperties:false,
+      },
+      offset:{type:'integer',minimum:0,maximum:Number.MAX_SAFE_INTEGER},
+      limit:{type:'integer',minimum:1,maximum:262144},
+      follow_ms:{type:'integer',minimum:0,maximum:25000},
+    },
+    required:['space','action'], additionalProperties:false,
+  },
+  space_write: {
+    type:'object',
+    properties:{space:{type:'string',maxLength:256}, path:{type:'string',minLength:1,maxLength:4096}, content:{type:'string',maxLength:200000}},
+    required:['space','path','content'], additionalProperties:false,
+  },
+  call_tool: {
+    type:'object',
+    properties:{
+      space:{type:'string',maxLength:256}, service:{type:'string',enum:['driver']},
+      tool:{type:'string',minLength:1,maxLength:128,pattern:'^[a-zA-Z0-9_.-]{1,128}$'},
+      arguments:{type:'object',additionalProperties:true},
+    },
+    required:['space','service','tool'], additionalProperties:false,
+  },
+};
 const admin = (path:string, input?:unknown, authorized = true) => worker.fetch(new Request(env.PUBLIC_ORIGIN+'/admin/cua/'+path,{
   method:input ? 'PUT' : 'GET',headers:authorized ? {Authorization:'Bearer synthetic-admin','Content-Type':'application/json'} : {},
   body:input ? JSON.stringify(input) : undefined,
 }),adminEnv());
 
-async function directoryNode(onQuery?: (name:string,args?:Record<string,unknown>) => void | Promise<void>) {
+async function directoryNode(onQuery?: (name:string,args?:Record<string,unknown>) => CallToolResult | void | Promise<CallToolResult | void>) {
   const registry = env.REGISTRY.getByName('main');
   const initial = await registry.mcpServerPut({id,transport:'reverse-websocket'},'absent');
   const record = await registry.mcpCredentialPut(id,initial.revision,{Authorization:bearer});
@@ -40,18 +93,31 @@ async function directoryNode(onQuery?: (name:string,args?:Record<string,unknown>
     if (!transport) {
       const server = new Server({name:'cua-spaces',version:'0.31.0'},{capabilities:{tools:{}}});
       server.setRequestHandler(ListToolsRequestSchema,() => ({tools:fixtureTools.map(name => ({
-        name,inputSchema:{type:'object' as const,...(name === 'call_tool' ? {properties:{tool:{type:'string',enum:['list_windows','get_window_state','bring_to_front','set_window_frame']}}} : {})},
+        name,inputSchema:fixtureSchemas[name] ?? {type:'object' as const},
       }))}));
       server.setRequestHandler(CallToolRequestSchema,async ({params}) => {
-        await onQuery?.(params.name,params.arguments);
-        if (params.name === 'space_bash') return {content:[{type:'text',text:'mac-fixture.local'}]};
+        const override = await onQuery?.(params.name,params.arguments);
+        if (override) return override;
+        if (params.name === 'space_bash') return {content:[{type:'text',text:`bash:${String(params.arguments?.command ?? '')}\n[exit 0]`}]};
+        if (params.name === 'space_write') return {content:[{type:'text',text:`wrote:${String(params.arguments?.path ?? '')}`}]};
+        if (params.name === 'space_job') {
+          const action = params.arguments?.action;
+          if (action === 'list') return {content:[{type:'text',text:JSON.stringify({jobs:[{job_id:'job-1',status:'running'}]})}]};
+          if (action === 'logs') return {content:[{type:'text',text:JSON.stringify({job_id:params.arguments?.job,chunk:'line-1\n',offset:0,next_offset:7})}]};
+          if (action === 'cancel') return {content:[{type:'text',text:JSON.stringify({job:{job_id:params.arguments?.job,status:'cancelled'}})}]};
+          if (action === 'start') return {content:[{type:'text',text:JSON.stringify({job:{job_id:'job-1',status:'running',command:params.arguments?.command}})}]};
+          return {content:[{type:'text',text:JSON.stringify({job:{job_id:params.arguments?.job,status:'running'}})}]};
+        }
         if (params.name === 'call_tool' && params.arguments?.tool === 'bring_to_front')
-          return {content:[{type:'text',text:JSON.stringify({pid:121,window_id:5,activated:true})}]};
-        if (params.name === 'call_tool' && params.arguments?.tool === 'get_window_state')
+          return {content:[{type:'text',text:JSON.stringify({pid:121,window_id:5,activated:true})}],structuredContent:{pid:121,window_id:5,activated:true}};
+        if (params.name === 'call_tool' && params.arguments?.tool === 'click')
+          return {content:[{type:'text',text:'clicked'}],structuredContent:{ok:true,point:params.arguments?.arguments}};
+        if (params.name === 'call_tool' && (params.arguments?.tool === 'get_window_state' || params.arguments?.tool === 'screenshot'))
           return {content:[{type:'image',mimeType:'image/png',data:windowPng}]};
         if (params.name === 'call_tool') {
           const windowId = params.arguments?.space === second ? Number.MAX_SAFE_INTEGER : 5;
-          return {content:[{type:'text',text:JSON.stringify({windows:[{pid:121,window_id:windowId,title:'测试窗口'}]})}]};
+          const payload = {windows:[{pid:121,window_id:windowId,title:'测试窗口'}]};
+          return {content:[{type:'text',text:JSON.stringify(payload)}],structuredContent:payload};
         }
         const data = params.name === 'list_tools' ? {service:'driver', tools:[{name:'inspect',description:'查看窗口',inputSchema:{type:'object'}}]} : [
           {id:device,name:'fixture-a',display_name:'测试设备',os:'macos',phase:'ready',power_state:'stopped',labels:{private:'sensitive'}},
@@ -134,7 +200,7 @@ it('停用保留会话分配并允许撤销，重新启用同一节点后只恢�
   expect(() => cuaCards({content:[{type:'text',text:JSON.stringify([{id:device,name:'A'},{id:device,name:'B'}])}]})).toThrow('ambiguous');
 });
 
-it('已启用节点取消窗口工具再恢复原选择，原调用版本失效且群分配保留',async () => {
+it('已启用节点取消工具再恢复原选择，原调用版本失效且群分配保留',async () => {
   const {ws,registry,ready,accessRevision} = await directoryNode();
   try {
     const {revision} = await registry.cuaGrantsList();
@@ -176,7 +242,7 @@ it('设备改名保留 ID 和已有分配，过时的改名不能覆盖新名称
   } finally { ws.close(1000); }
 });
 
-it('获配会话与子任务的设备读取仅限连续有效的分配，撤权重授后重新派发才能读取',async () => {
+it('获配会话与子任务的设备只读调用仅限连续有效的分配，撤权重授后重新派发才能访问',async () => {
   const chat = 'group:123456';
   let onReply: (name:string) => Promise<void> = async () => {}, requests = 0;
   const {ws,accessRevision} = await directoryNode(async name => {
@@ -202,8 +268,10 @@ it('获配会话与子任务的设备读取仅限连续有效的分配，撤权�
       try {
         await mcp.restore();
         let snapshot = await mcp.captureCapabilities(who);
-        const windowTool = snapshot.tools.find(tool => tool.startsWith('mcp_cua_call_tool_'))!;
-        expect(windowTool).toBeTruthy();
+        const callTool = snapshot.tools.find(tool => tool.startsWith('mcp_cua_call_tool_'))!;
+        const jobTool = snapshot.tools.find(tool => tool.startsWith('mcp_cua_space_job_'))!;
+        expect(callTool).toBeTruthy();
+        expect(jobTool).toBeTruthy();
         expect(snapshot.cua?.spaces).toEqual([device]);
         expect(toolRegistry.snapshot().tools().map(row => row.tool.name)).toEqual(expect.arrayContaining(snapshot.tools));
         const list = snapshot.tools.find(tool => tool.startsWith('mcp_cua_list_spaces_'))!;
@@ -216,30 +284,35 @@ it('获配会话与子任务的设备读取仅限连续有效的分配，撤权�
         await set([device,second]);
         expect((await call(list,{},child,true)).structuredOutput).toMatchObject({spaces:[{id:device}]});
         const windows = (space:string, args:object) => ({space,service:'driver',tool:'list_windows',arguments:args});
-        expect((await call(windowTool,windows(device,{pid:121}),child,true)).structuredOutput).toEqual({windows:[{pid:121,window_id:5,title:'测试窗口'}]});
-        expect((await call(windowTool,windows(second,{pid:121}))).structuredOutput).toEqual({windows:[{pid:121,window_id:Number.MAX_SAFE_INTEGER,title:'测试窗口'}]});
+        expect((await call(callTool,windows(device,{pid:121}),child,true)).structuredOutput).toEqual({windows:[{pid:121,window_id:5,title:'测试窗口'}]});
+        expect((await call(callTool,windows(second,{pid:121}))).structuredOutput).toEqual({windows:[{pid:121,window_id:Number.MAX_SAFE_INTEGER,title:'测试窗口'}]});
+        expect((await call(jobTool,{space:device,action:'list'},child,true)).structuredOutput).toEqual({jobs:[{job_id:'job-1',status:'running'}]});
+        expect((await call(jobTool,{space:device,action:'status',job:'job-1'},child,true)).structuredOutput).toEqual({job:{job_id:'job-1',status:'running'}});
+        expect((await call(jobTool,{space:device,action:'logs',job:'job-1',offset:0,limit:100},child,true)).structuredOutput)
+          .toEqual({job_id:'job-1',chunk:'line-1\n',offset:0,next_offset:7});
+
         const before = requests;
         expect((await call(tools,{space:second,service:'driver'},child,true)).isError).toBe(true);
         expect((await call(list,{}, {...who,kind:'agent'})).isError).toBe(true);
         expect((await call(tools,{space:device,service:'other'})).isError).toBe(true);
-        expect((await call(windowTool,windows(second,{}),child,true)).isError).toBe(true);
-        expect((await call(windowTool,windows(device,{pid:2**31}))).isError).toBe(true);
+        expect((await call(callTool,windows(second,{}),child,true)).isError).toBe(true);
+        expect((await call(jobTool,{space:second,action:'list'},child,true)).isError).toBe(true);
         const legacy = {...snapshot,cua:{revision:accessRevision,spaces:[device]}};
-        expect((await mcp.invoke({name:windowTool,args:windows(device,{}),operationId:'legacy',snapshot:legacy},async () => child)).isError).toBe(true);
+        expect((await mcp.invoke({name:callTool,args:windows(device,{}),operationId:'legacy',snapshot:legacy},async () => child)).isError).toBe(true);
         expect(requests).toBe(before);
         expect((await call(tools,{space:device,service:'driver'})).structuredOutput).toMatchObject({tools:[{name:'inspect'}]});
         // 在截图回包途中撤销并重新授予相同设备，主模型和冻结子任务都不能取回上一份授权下拍的图。
-        const capture = {space:device,service:'driver',tool:'get_window_state',arguments:{pid:121,window_id:5}};
+        const capture = {space:device,service:'driver',tool:'screenshot',arguments:{display_only:true}};
         onReply = async name => { if (name === 'call_tool') { await set([second]); await set([device,second]); } };
-        expect((await call(windowTool,capture,child,true)).isError).toBe(true);
-        expect((await call(windowTool,capture)).isError).toBe(true);
+        expect((await call(callTool,capture,child,true)).isError).toBe(true);
+        expect((await call(callTool,capture)).isError).toBe(true);
         expect((await env.ASSETS.list()).objects).toEqual([]);
         onReply = async () => {};
         const requestCount = requests;
-        expect((await call(windowTool,capture,child,true)).isError).toBe(true);
+        expect((await call(callTool,capture,child,true)).isError).toBe(true);
         expect(requests).toBe(requestCount);
         snapshot = await mcp.captureCapabilities(who);
-        const image = (await call(windowTool,capture,child,true)).structuredOutput;
+        const image = (await call(callTool,capture,child,true)).structuredOutput;
         if (!image || typeof image !== 'object' || !('imageId' in image) || typeof image.imageId !== 'string')
           throw new Error('missing_window_image');
         const {imageId} = image;
@@ -312,9 +385,11 @@ it('群首次获配和重新启用均可离线装配目录，旧子任务保持�
   });
 });
 
-it('主人发消息可读主机名，其他命令、定时任务与未持有快照的子任务调用在到达桥之前被拒',async () => {
-  let inspections = 0;
-  const {ws} = await directoryNode(name => { if (name === 'space_bash') inspections++; });
+it('主人交互会话与快照子任务可执行通用执行工具，定时任务、事件、越界参数与无快照子任务被拒',async () => {
+  let executions = 0;
+  const {ws} = await directoryNode(name => {
+    if (name !== 'list_spaces' && name !== 'list_tools') executions++;
+  });
   try {
     await runInDurableObject(env.THREAD.getByName('owner'),async (_instance,state) => {
       const db = new DurableObjectSqliteDatabase(state.storage);
@@ -326,32 +401,63 @@ it('主人发消息可读主机名，其他命令、定时任务与未持有快�
       try {
         await mcp.refreshAll();
         const catalog = (await restoreCatalog(db,server,config.limits))!;
-        const tool = catalog.tools.find(tool => tool.name === 'space_bash')!;
-        const name = toolNames(catalog,tool).nativeName;
-        const call = (args:object,actor = who) => mcp.invoke({name,args,operationId:crypto.randomUUID()},async () => actor);
-        expect((await call({space:device,command:'hostname'})).structuredOutput).toEqual({hostname:'mac-fixture.local'});
+        const toolNamed = (base:string) => toolNames(catalog,catalog.tools.find(tool => tool.name === base)!).nativeName;
+        const bashName = toolNamed('space_bash'), writeName = toolNamed('space_write');
+        const jobName = toolNamed('space_job'), callName = toolNamed('call_tool');
+        const invoke = (name:string, args:object, actor = who, snapshot?:Awaited<ReturnType<typeof mcp.captureCapabilities>>) =>
+          mcp.invoke({name,args,operationId:crypto.randomUUID(),...(snapshot ? {snapshot} : {})},async () => actor);
+
+        const bashRes = await invoke(bashName,{space:device,command:'uname -a && ls'});
+        expect(bashRes.isError).toBeFalsy();
+        expect(bashRes.output?.[0]).toEqual({type:'text',text:'bash:uname -a && ls\n[exit 0]'});
         const audit = state.storage.sql.exec<{detail:string}>("SELECT detail FROM events WHERE kind='mcp_call'").one();
-        const remoteBytes = Buffer.byteLength(JSON.stringify({content:[{type:'text',text:'mac-fixture.local'}]}));
-        expect(JSON.parse(audit.detail)).toMatchObject({server:'cua',tool:name,result:'ok',outputBytes:remoteBytes});
-        expect(audit.detail).not.toContain('mac-fixture.local');
+        const remoteBytes = Buffer.byteLength(JSON.stringify({content:[{type:'text',text:'bash:uname -a && ls\n[exit 0]'}]}));
+        expect(JSON.parse(audit.detail)).toMatchObject({server:'cua',tool:bashName,result:'ok',outputBytes:remoteBytes});
+        expect(audit.detail).not.toContain('uname -a');
+
+        expect((await invoke(writeName,{space:device,path:'/tmp/note.txt',content:'hello cua'})).output?.[0])
+          .toEqual({type:'text',text:'wrote:/tmp/note.txt'});
+        expect((await invoke(jobName,{space:device,action:'start',command:'npm test'})).structuredOutput)
+          .toEqual({job:{job_id:'job-1',status:'running',command:'npm test'}});
+        expect((await invoke(callName,{space:device,service:'driver',tool:'click',arguments:{x:12,y:34}})).structuredOutput)
+          .toEqual({ok:true,point:{x:12,y:34}});
+
+        const beforeDenied = executions;
         for (const kind of ['schedule','subagent','event','agent'] as const) {
-          expect((await call({space:device,command:'hostname'},{...who,kind})).isError).toBe(true);
+          expect((await invoke(bashName,{space:device,command:'id'},{...who,kind})).isError).toBe(true);
         }
-        expect((await call({space:device,command:'hostname extra'})).isError).toBe(true);
+        for (const [name,args] of [
+          [bashName,{space:device,command:'id',timeout:51}],
+          [bashName,{space:device,command:'echo\0x'}],
+          [jobName,{space:device,action:'start',command:'id',notify:{channel:'qq'}}],
+          [writeName,{space:device,path:'/tmp/x',content:'你'.repeat(90000)}],
+          [callName,{space:device,service:'spaces',tool:'click'}],
+        ] as const) {
+          expect((await invoke(name,args)).isError).toBe(true);
+        }
+        expect(executions).toBe(beforeDenied);
+
         const snapshot = await mcp.captureCapabilities(who);
-        expect(snapshot.tools).toContain(name);
-        expect(inspections).toBe(1);
+        expect(snapshot.tools).toEqual(expect.arrayContaining([bashName,writeName,jobName,callName]));
+        const child: McpAuthority = {...who,kind:'subagent',subagentId:'owner-child'};
+        expect((await invoke(bashName,{space:second,command:'ver'},child,snapshot)).isError).toBeFalsy();
+        expect(executions).toBe(beforeDenied + 1);
       } finally { await mcp.close(); }
     });
   } finally { ws.close(1000); }
 });
 
-it('设备变更先核对当前授权，成功、未知及撤权重授均不会重放操作',async () => {
-  let writes = 0, afterDispatch: () => Promise<void> = async () => {};
+it('设备变更免审防重放、区分 remote_error 与异常响应，收紧只读后旧子任务失效',async () => {
+  let writes = 0, afterDispatch: () => Promise<void> = async () => {}, overrideReply: CallToolResult | undefined;
   const {ws,ready,accessRevision} = await directoryNode(async (name,args) => {
-    if (name === 'call_tool' && args?.tool === 'bring_to_front') { writes++; await afterDispatch(); }
+    if (name === 'space_bash' || name === 'space_write' || (name === 'space_job' && (args?.action === 'start' || args?.action === 'cancel'))
+        || (name === 'call_tool' && (args?.tool === 'bring_to_front' || args?.tool === 'click'))) {
+      writes++;
+      await afterDispatch();
+      if (overrideReply) { const res = overrideReply; overrideReply = undefined; return res; }
+    }
   });
-  expect(ready.server.tools.readOnly).toEqual(['list_spaces','list_tools','space_bash']);
+  expect(ready.server.tools.readOnly).toEqual(['list_spaces','list_tools']);
   const assign = async (spaces:string[]) => {
     const registry = env.REGISTRY.getByName('main');
     const {revision} = await registry.cuaGrantsList();
@@ -371,37 +477,65 @@ it('设备变更先核对当前授权，成功、未知及撤权重授均不会�
       try {
         await mcp.restore();
         const snapshot = await mcp.captureCapabilities(who);
-        const name = snapshot.tools.find(name => name.startsWith('mcp_cua_call_tool_'))!;
+        const callName = snapshot.tools.find(name => name.startsWith('mcp_cua_call_tool_'))!;
+        const bashName = snapshot.tools.find(name => name.startsWith('mcp_cua_space_bash_'))!;
+        const jobName = snapshot.tools.find(name => name.startsWith('mcp_cua_space_job_'))!;
+        const writeName = snapshot.tools.find(name => name.startsWith('mcp_cua_space_write_'))!;
         const args = {space:device,service:'driver',tool:'bring_to_front',arguments:{pid:121,window_id:5}};
         const invoke = (operationId:string, space = device, actor = who) => mcp.invoke({
-          name,args:{...args,space},operationId,...(actor.subagentId ? {snapshot} : {}),
+          name:callName,args:{...args,space},operationId,...(actor.subagentId ? {snapshot} : {}),
         },async () => actor);
         expect((await invoke('not-assigned',second)).isError).toBe(true);
         expect((await invoke('passive',device,{...who,kind:'event'})).isError).toBe(true);
         expect(writes).toBe(0);
+
         const child = {...who,kind:'subagent' as const,subagentId:'test-child'};
         const result = await invoke('delegated',device,child);
         expect(result.structuredOutput).toEqual({pid:121,window_id:5,activated:true});
         expect((await invoke('delegated',device,child)).structuredOutput).toEqual(result.structuredOutput);
         expect(writes).toBe(1);
 
+        // 获配群无需审批即可执行写文件、后台任务启动与通用命令，并保留回执防重放。
+        expect((await mcp.invoke({name:writeName,args:{space:device,path:'/tmp/a.txt',content:'ok'},operationId:'write-1'},async () => who)).isError).toBeFalsy();
+        expect((await mcp.invoke({name:jobName,args:{space:device,action:'start',command:'sleep 5'},operationId:'job-1'},async () => who)).structuredOutput)
+          .toEqual({job:{job_id:'job-1',status:'running',command:'sleep 5'}});
+
+        // remote.isError 返回业务失败而非 outcome_unknown，并记入 remote_error 回执与审计日志。
+        overrideReply = {isError:true,content:[{type:'text',text:'permission denied on guest'}]};
+        const remoteErr = await mcp.invoke({name:bashName,args:{space:device,command:'cat /root/secret'},operationId:'remote-err'},async () => who);
+        expect(remoteErr.isError).toBe(true);
+        expect(JSON.stringify(remoteErr)).toContain('permission denied on guest');
+        expect(JSON.stringify(remoteErr)).not.toContain('outcome_unknown');
+        const lastAudit = state.storage.sql.exec<{detail:string}>("SELECT detail FROM events WHERE kind='mcp_call' ORDER BY rowid DESC LIMIT 1").one();
+        expect(JSON.parse(lastAudit.detail)).toMatchObject({tool:bashName,result:'remote_error'});
+        expect(JSON.stringify(await mcp.invoke({name:bashName,args:{space:device,command:'cat /root/secret'},operationId:'remote-err'},async () => who)))
+          .toContain('permission denied on guest');
+
+        // !remote.isError 但返回畸形截图导致 cuaResult 报错时，写操作收敛为 outcome_unknown 且不再重放。
+        overrideReply = {content:[{type:'image',mimeType:'image/png',data:Buffer.from('not-valid-png').toString('base64')}]};
+        const badShape = await mcp.invoke({name:callName,args:{space:device,service:'driver',tool:'click',arguments:{x:1,y:2}},operationId:'bad-shape'},async () => who);
+        expect(JSON.stringify(badShape)).toContain('outcome_unknown');
+        expect(JSON.stringify(await mcp.invoke({name:callName,args:{space:device,service:'driver',tool:'click',arguments:{x:1,y:2}},operationId:'bad-shape'},async () => who)))
+          .toContain('outcome_unknown');
+
         expect((await invoke('user')).structuredOutput).toEqual(result.structuredOutput);
+        const beforeFailure = writes;
         afterDispatch = async () => { throw new Error('fixture_lost_reply'); };
         expect(JSON.stringify(await invoke('uncertain'))).toContain('outcome_unknown');
         afterDispatch = async () => {};
         expect(JSON.stringify(await invoke('uncertain'))).toContain('outcome_unknown');
-        expect(writes).toBe(3);
+        expect(writes).toBe(beforeFailure + 1);
         afterDispatch = async () => { await assign([]); await assign([device]); };
         expect(JSON.stringify(await invoke('in-flight'))).toContain('outcome_unknown');
         afterDispatch = async () => {};
         // 新分配无法取回上一份分配的成功回执，也不能重新发出相同操作。
         expect(JSON.stringify(await invoke('user'))).toContain('operation_conflict');
         expect((await invoke('delegated',device,child)).isError).toBe(true);
-        expect(writes).toBe(4);
+        expect(writes).toBe(beforeFailure + 2);
 
         const beforeRestriction = await mcp.captureCapabilities(who);
         const current = await registry.mcpServerGet(id);
-        const limited = await registry.mcpServerActivate(id,current.revision,{allow:fixtureTools,readOnly:['call_tool']});
+        const limited = await registry.mcpServerActivate(id,current.revision,{allow:fixtureTools,readOnly:['call_tool','space_job']});
         if ('error' in limited) throw new Error('fixture_activation_failed');
         expect(limited.server.access.revision).not.toBe(accessRevision);
         expect(await registry.cuaAssigned(scope,limited.server.access.revision!)).toEqual([device]);
@@ -409,35 +543,72 @@ it('设备变更先核对当前授权，成功、未知及撤权重授均不会�
           const config = await registry.mcpConfig(scope);
           await mcp.syncConfig({...config,servers:config.servers.filter(server => server.id === id)});
         };
-        const delegated = (snapshot:typeof beforeRestriction) => mcp.invoke({
-          name:snapshot.tools.find(name => name.startsWith('mcp_cua_call_tool_'))!,args,operationId:'after-reopen',snapshot,
+        const delegated = (snap:typeof beforeRestriction) => mcp.invoke({
+          name:snap.tools.find(name => name.startsWith('mcp_cua_call_tool_'))!,args,operationId:'after-reopen',snapshot:snap,
         },async () => child);
         await sync();
-        expect((await delegated(await mcp.captureCapabilities(who))).isError).toBe(true);
+        const tightSnap = await mcp.captureCapabilities(who);
+        const tightJob = tightSnap.tools.find(name => name.startsWith('mcp_cua_space_job_'))!;
+        const tightCall = tightSnap.tools.find(name => name.startsWith('mcp_cua_call_tool_'))!;
+        expect((await delegated(tightSnap)).isError).toBe(true);
+        expect((await mcp.invoke({name:tightJob,args:{space:device,action:'start',command:'sleep 1'},operationId:'tight-job-write',snapshot:tightSnap},async () => child)).isError).toBe(true);
+        expect((await mcp.invoke({name:tightJob,args:{space:device,action:'status',job:'job-1'},operationId:'tight-job-read',snapshot:tightSnap},async () => child)).structuredOutput)
+          .toEqual({job:{job_id:'job-1',status:'running'}});
+        expect((await mcp.invoke({name:tightCall,args:{space:device,service:'driver',tool:'list_windows'},operationId:'tight-win-read',snapshot:tightSnap},async () => child)).structuredOutput)
+          .toMatchObject({windows:[{pid:121,window_id:5}]});
+
         const reopened = await registry.mcpServerActivate(id,limited.revision,{allow:fixtureTools,readOnly:[]});
         if ('error' in reopened) throw new Error('fixture_activation_failed');
         expect(reopened.server.access.revision).toBe(limited.server.access.revision);
         await sync();
+        const writesBeforeReopen = writes;
         expect((await delegated(beforeRestriction)).isError).toBe(true);
-        expect(writes).toBe(4);
+        expect(writes).toBe(writesBeforeReopen);
         expect((await delegated(await mcp.captureCapabilities(who))).structuredOutput).toEqual(result.structuredOutput);
-        expect(writes).toBe(5);
+        expect(writes).toBe(writesBeforeReopen + 1);
         expect(await mcp.policy.list(scope)).toEqual([]);
       } finally { await mcp.close(); }
     });
   } finally { ws.close(1000); }
 });
 
-it('旧 call_tool 只读授权在更新节点后仍只许读，重新检测并启用才开放变更',async () => {
+it('旧只读授权或含静态 enum 探测在重新检测前不能开放写操作，旧 call_tool 只读保持安全',async () => {
   let writes = 0;
-  const {ws,registry,ready} = await directoryNode((_name,args) => { if (args?.tool === 'bring_to_front') writes++; });
+  const {ws,registry,ready} = await directoryNode((name,args) => {
+    if (name === 'space_bash' || args?.tool === 'bring_to_front') writes++;
+  });
   try {
-    // 还原上一版留下的配置，以及只含两项读取的探测契约。节点本身已经升级。
+    const owner: McpAuthority = {scope:'owner',kind:'message',actor:'10000001',owner:true,generation:1,replyChannel:'qq'};
+    // 模拟升级前遗留的 tools.readOnly = tools.allow：更新节点后 space_bash 和 call_tool 写操作均 fail-closed 被拒。
     await runInDurableObject(registry,(_instance,state) => {
       state.storage.sql.exec("UPDATE mcp_servers SET config=json_set(config,'$.tools.readOnly',json_extract(config,'$.tools.allow')) WHERE id='cua'");
     });
-    const oldProbe = await registry.mcpServerProbe(id,ready.revision,{tools:fixtureTools.map(name => ({
-      name,inputSchema:{type:'object',...(name === 'call_tool' ? {properties:{tool:{type:'string',enum:['list_windows','get_window_state']}}} : {})},
+    await runInDurableObject(env.THREAD.getByName('owner'),async (_instance,state) => {
+      const ownerRegistry = env.REGISTRY.getByName('main');
+      const db = new DurableObjectSqliteDatabase(state.storage);
+      await db.exec(MCP_CATALOG_SCHEMA + 'CREATE TABLE IF NOT EXISTS events(at INTEGER,kind TEXT,detail TEXT)');
+      const config = await ownerRegistry.mcpConfig();
+      const tools = createRegistry(), mcp = new ThreadMcp(db,env,tools,async () => owner,
+        {...config,servers:config.servers.filter(row => row.id === id)},{scope:'owner',current:(id,hash) => ownerRegistry.mcpServerCurrent(id,hash)});
+      try {
+        await mcp.refreshAll();
+        const names = tools.snapshot().tools().map(row => row.tool.name);
+        const callName = names.find(n => n.startsWith('mcp_cua_call_tool_'))!;
+        const bashName = names.find(n => n.startsWith('mcp_cua_space_bash_'))!;
+        expect((await mcp.invoke({name:callName,args:{space:device,service:'driver',tool:'list_windows'},operationId:'legacy-ro'},async () => owner)).structuredOutput)
+          .toMatchObject({windows:[{pid:121,window_id:5}]});
+        expect((await mcp.invoke({name:callName,args:{space:device,service:'driver',tool:'bring_to_front',arguments:{pid:121,window_id:5}},operationId:'legacy-rw'},async () => owner)).isError).toBe(true);
+        expect((await mcp.invoke({name:bashName,args:{space:device,command:'uname -a'},operationId:'legacy-bash'},async () => owner)).isError).toBe(true);
+        expect(writes).toBe(0);
+      } finally { await mcp.close(); }
+    });
+
+    // 探测结果中 call_tool.tool 仍含 enum 时禁止开放写入，仅可保持 call_tool 只读。
+    const callEnumProbe = await registry.mcpServerProbe(id,ready.revision,{tools:fixtureTools.map(name => ({
+      name,
+      inputSchema: name === 'call_tool'
+        ? {type:'object',properties:{tool:{type:'string',enum:['list_windows','get_window_state']}}}
+        : fixtureSchemas[name] ?? {type:'object'},
     }))});
     const expectStaleProbeRejected = async (expectedRevision:string) => {
       const blocked = await worker.fetch(new Request(env.PUBLIC_ORIGIN+'/admin/mcp/manage',{method:'POST',
@@ -446,50 +617,59 @@ it('旧 call_tool 只读授权在更新节点后仍只许读，重新检测并�
       expect(blocked.status).toBe(400);
       expect(await blocked.json()).toEqual({error:'probe_required'});
     };
-    await expectStaleProbeRejected(oldProbe.revision);
-    const readOnlyOld = await registry.mcpServerActivate(id,oldProbe.revision,{allow:fixtureTools,readOnly:['call_tool']});
+    await expectStaleProbeRejected(callEnumProbe.revision);
+    const readOnlyOld = await registry.mcpServerActivate(id,callEnumProbe.revision,{allow:fixtureTools,readOnly:['call_tool']});
     if ('error' in readOnlyOld) throw new Error('fixture_activation_failed');
-    expect(readOnlyOld.server.tools.readOnly).toEqual(fixtureTools);
-    expect(readOnlyOld.server.access.revision).toBe(ready.server.access.revision);
-    const owner: McpAuthority = {scope:'owner',kind:'message',actor:'10000001',owner:true,generation:1,replyChannel:'qq'};
-    await runInDurableObject(env.THREAD.getByName('owner'),async (_instance,state) => {
-      const registry = env.REGISTRY.getByName('main');
-      const db = new DurableObjectSqliteDatabase(state.storage);
-      await db.exec(MCP_CATALOG_SCHEMA + 'CREATE TABLE IF NOT EXISTS events(at INTEGER,kind TEXT,detail TEXT)');
-      const config = await registry.mcpConfig();
-      const tools = createRegistry(), mcp = new ThreadMcp(db,env,tools,async () => owner,
-        {...config,servers:config.servers.filter(row => row.id === id)},{scope:'owner',current:(id,hash) => registry.mcpServerCurrent(id,hash)});
-      try {
-        await mcp.refreshAll();
-        const name = tools.snapshot().tools().map(row => row.tool.name).find(name => name.startsWith('mcp_cua_call_tool_'))!;
-        const invoke = (tool:string,input:object) => mcp.invoke({name,args:{space:device,service:'driver',tool,arguments:input},operationId:'old-'+tool},async () => owner);
-        expect((await invoke('list_windows',{})).structuredOutput).toMatchObject({windows:[{pid:121,window_id:5}]});
-        expect((await invoke('bring_to_front',{pid:121,window_id:5})).isError).toBe(true);
-        expect(writes).toBe(0);
-      } finally { await mcp.close(); }
-    });
-    const reduced = await registry.mcpServerActivate(id,readOnlyOld.revision,{allow:['list_spaces']});
-    if ('error' in reduced) throw new Error('fixture_activation_failed');
-    await expectStaleProbeRejected(reduced.revision);
-    expect(await manageMcp(env,{action:'probe',id,expectedRevision:reduced.revision})).toMatchObject({status:'ready'});
+    expect(readOnlyOld.server.tools.readOnly).toEqual(['list_spaces','list_tools','call_tool']);
+
+    // 探测结果中 space_bash.command 仍含 enum 时，即使限制 call_tool 只读也不得激活 space_bash。
+    const bashEnumProbe = await registry.mcpServerProbe(id,readOnlyOld.revision,{tools:fixtureTools.map(name => ({
+      name,
+      inputSchema: name === 'space_bash'
+        ? {type:'object',properties:{command:{type:'string',enum:['hostname']}}}
+        : fixtureSchemas[name] ?? {type:'object'},
+    }))});
+    const blockedBash = await worker.fetch(new Request(env.PUBLIC_ORIGIN+'/admin/mcp/manage',{method:'POST',
+      headers:{Authorization:'Bearer synthetic-admin','Content-Type':'application/json'},
+      body:JSON.stringify({action:'activate',id,expectedRevision:bashEnumProbe.revision,selection:{allow:fixtureTools,readOnly:['call_tool']}})}),adminEnv());
+    expect(blockedBash.status).toBe(400);
+    expect(await blockedBash.json()).toEqual({error:'probe_required'});
+
+    // 重新探测最新桥契约后即可完整激活。
+    expect(await manageMcp(env,{action:'probe',id,expectedRevision:bashEnumProbe.revision})).toMatchObject({status:'ready'});
     const readOnlyNew = await registry.mcpServerActivate(id,(await registry.mcpServerGet(id)).revision,{allow:fixtureTools,readOnly:['call_tool']});
     if ('error' in readOnlyNew) throw new Error('fixture_activation_failed');
-    expect(readOnlyNew.server.tools.readOnly).toEqual(fixtureTools);
+    expect(readOnlyNew.server.tools.readOnly).toEqual(['list_spaces','list_tools','call_tool']);
     const active = await registry.mcpServerActivate(id,readOnlyNew.revision,{allow:fixtureTools,readOnly:[]});
-    expect(active).toMatchObject({server:{tools:{readOnly:['list_spaces','list_tools','space_bash']}}});
+    expect(active).toMatchObject({server:{tools:{readOnly:['list_spaces','list_tools']}}});
   } finally { ws.close(1000); }
 });
 
-it('窗口回执必须与发起操作的目标和尺寸相符',async () => {
-  const selector = {pid:42,window_id:3};
-  const geometry = {x:-14,y:10,width:560,height:420};
-  const validate = (tool:string,input:object,reply:object) => cuaResult('call_tool',
-    {space:device,service:'driver',tool,arguments:input},{content:[{type:'text',text:JSON.stringify(reply)}]},
-    [device],MCP_CONFIG.limits,env,scope,'fixture');
-  const target = {...selector,...geometry};
-  const frame = {...selector,frame:geometry};
-  expect((await validate('set_window_frame',target,frame)).structuredOutput).toEqual(frame);
-  expect((await validate('set_window_frame',target,{...frame,frame:{...geometry,width:561}})).isError).toBe(true);
-  expect((await validate('bring_to_front',selector,{...selector,window_id:4,activated:true})).isError).toBe(true);
-  expect((await validate('bring_to_front',selector,{...selector,activated:true,title:'private'})).isError).toBe(true);
+it('cuaResult 解析 space_job JSON，写入合法截图并拦截纯伪造图片',async () => {
+  const jobJson = {job:{job_id:'j1',status:'done'}};
+  expect((await cuaResult('space_job',{space:device,action:'status',job:'j1'},
+    {content:[{type:'text',text:JSON.stringify(jobJson)}]},[device],MCP_CONFIG.limits,env,scope,'rev')).structuredOutput)
+    .toEqual(jobJson);
+  expect((await cuaResult('space_job',{space:device,action:'list'},
+    {content:[{type:'text',text:'plain log output'}]},[device],MCP_CONFIG.limits,env,scope,'rev')).structuredOutput)
+    .toBeUndefined();
+
+  const shot = await cuaResult('call_tool',{space:device,service:'driver',tool:'screenshot',arguments:{}},
+    {content:[{type:'image',mimeType:'image/png',data:windowPng}]},[device],MCP_CONFIG.limits,env,scope,'rev');
+  expect(shot.isError).toBeFalsy();
+  const shotOut = shot.structuredOutput as {imageId?:string; imageIds?:string[]};
+  expect(shotOut.imageIds).toHaveLength(1);
+  expect(shotOut.imageId).toBe(shotOut.imageIds?.[0]);
+  expect(shot.output?.some(part => part.type === 'text' && part.text.includes(shotOut.imageId!))).toBe(true);
+  await expect(new MediaRepository({bucket:env.ASSETS,scope:'owner'}).get(shotOut.imageId!)).rejects.toThrow('asset_not_found');
+
+  const invalidOnly = await cuaResult('call_tool',{space:device,service:'driver',tool:'screenshot',arguments:{}},
+    {content:[{type:'image',mimeType:'image/png',data:Buffer.from('not-png').toString('base64')}]},[device],MCP_CONFIG.limits,env,scope,'rev');
+  expect(invalidOnly.isError).toBe(true);
+
+  const mixed = await cuaResult('call_tool',{space:device,service:'driver',tool:'get_desktop_state',arguments:{}},
+    {content:[{type:'text',text:'desktop ok'},{type:'image',mimeType:'image/png',data:Buffer.from('not-png').toString('base64')}]},
+    [device],MCP_CONFIG.limits,env,scope,'rev');
+  expect(mixed.isError).toBeFalsy();
+  expect(mixed.output).toEqual([{type:'text',text:'desktop ok\n[Cua 图片内容无效，已省略]'}]);
 });

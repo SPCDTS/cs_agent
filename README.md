@@ -23,7 +23,7 @@
 - **执行与管理查询严格隔离**：每个会话由独立的 `ThreadDO` 基于 `pi-durable` 驱动，耗时调研与编码任务可派生出独立的 `SubagentDO` 异步推进。主/子 Agent 的每次 OpenAI/Codex 出站请求均经 `ModelAlarm` 在新的 `alarm()` 首行同步派发，隔离入站 RPC 对 `IoContext` 的干扰。管理台所有读取请求只访问 `RequestsDO` 的增量同步展示副本，绝不唤醒执行 DO。
 - **多层次代码执行与个人设备接入**：
   - **Cloudflare 云端编码容器（`cs.coding`）**：由 `SandboxDO` 按需启动 Lite 容器（空闲 3 分钟停止），提供受控 Linux `bash` 与文件读写；`/work` 快照与 SHA-256 去重 blob 持久化至私有 R2，支持为子任务克隆独立工作区及按路径合并产物。
-  - **个人设备与持久 VM**：通过自托管 Cua 查询会话可见的设备卡片和所选设备的 Driver 工具说明。生产切换前须核实真机身份与会话隔离。[接入与切换](docs/DEVICE-MCP.md)
+  - **个人设备与持久 VM**：通过自托管 Cua 将个人电脑与持久 VM 接入对话，开放受控目录（`list_spaces` / `list_tools`）、通用 Shell（`space_bash`）、Linux/macOS 后台任务（`space_job`）、设备内文件写入（`space_write`）及完整 Driver 桌面操作与截图（`call_tool`）。生产切换前须核实真机身份、`(device-execution)` 路由与会话隔离。[接入与切换](docs/DEVICE-MCP.md)
   - **Windows Sandbox**：由 Windows 宿主机 runner 创建与回收临时实例，支持在同一 session 中连续执行、查询收据以及到期清理。
 - **受控 Code Mode 与细粒度权限**：模型在 QuickJS 沙箱中编写脚本编排多步工具调用，内部工具的大体积中间输出不重复挤占模型上下文，MCP 返回的截图可自动落盘并发送。每次调用均由宿主强制校验真实触发身份、会话代次（generation）与作用域。
 - **个人长期记忆、技能演进与外部事件**：按 owner、群聊、私聊分别沉淀长期记忆，支持带原文证据片段的自动抽取、与显式记忆冲突时的待确认保护、遗忘抑制、画像关联失效与整理回滚。Agent 可在编码工作区中编写、检查并通过双版本 CAS 发布新技能。内置 `ScheduleDO` 定时任务与 `EventsDO` 事件引擎（支持 Gmail 推送及多身份独立 GitHub App Webhook 接入，事件统一投递至主人私聊）。

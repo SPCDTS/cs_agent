@@ -55,21 +55,21 @@ relay.example.org {
 	}
 }
 
-# 可选。在允许读取主机名或操作窗口的设备回环站点内导入，spacesd 校验该机 Bearer。
-(device-inspection) {
-	@inspection {
+# 可选。在开放通用 Shell、后台任务、写文件与完整桌面操作的设备回环站点内导入，spacesd 校验该机 Bearer。
+(device-execution) {
+	@execution {
 		remote_ip 127.0.0.1
 		method POST
 		header Content-Type application/grpc*
-		path /m/{args[0]}/cua.env.v1.ProcessService/StartProcess /m/{args[0]}/cua.env.v1.DriverService/CallTool
+		path /m/{args[0]}/cua.env.v1.ProcessService/StartProcess /m/{args[0]}/cua.env.v1.ProcessService/ConnectProcess /m/{args[0]}/cua.env.v1.ProcessService/SignalProcess /m/{args[0]}/cua.env.v1.FilesystemService/WriteFile /m/{args[0]}/cua.env.v1.FilesystemService/BeginUpload /m/{args[0]}/cua.env.v1.FilesystemService/UploadChunk /m/{args[0]}/cua.env.v1.FilesystemService/CommitUpload /m/{args[0]}/cua.env.v1.FilesystemService/AbortUpload /m/{args[0]}/cua.env.v1.DriverService/CallTool
 	}
-	handle @inspection {
+	handle @execution {
 		reverse_proxy h2c://127.0.0.1:{args[1]}
 	}
 }
 
 http://127.0.0.1:18281 {
-	# import device-inspection computer-alpha 18181
+	# import device-execution computer-alpha 18181
 	import directory computer-alpha 18181
 }
 

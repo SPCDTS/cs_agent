@@ -24,10 +24,17 @@ export function mcpServerRender(id:string){
   const list=$("mcp-server-tools");list.replaceChildren();
   if(server)for(const tool of record?.discovered||[]){
     const enabled=el("input",{type:"checkbox","data-tool":tool.name});enabled.checked=server.tools.allow.includes(tool.name);
-    const windowAccess = server.id === "cua" && tool.name === "call_tool";
     const readonly=el("input",{type:"checkbox","data-readonly":tool.name});
-    readonly.checked=(server.tools.readOnly??[]).includes(tool.name) || (windowAccess && !enabled.checked);
-    list.append(el("div",{className:"source"},[el("div",{className:"row"},[el("label",{className:"row"},[enabled,el("strong",{text:tool.name})]),el("label",{className:"row"},[readonly,el("span",{text:windowAccess ? "仅允许读取窗口" : "确认为只读"})])]),
+    let label="确认为只读";
+    if(server.id==="cua"){
+      if(tool.name==="list_spaces"||tool.name==="list_tools"){readonly.checked=true;readonly.disabled=true;label="目录只读";}
+      else if(tool.name==="space_bash"||tool.name==="space_write"){readonly.checked=false;readonly.disabled=true;label="读写执行";}
+      else if(tool.name==="call_tool"||tool.name==="space_job"){readonly.checked=(server.tools.readOnly??[]).includes(tool.name);label=tool.name==="call_tool"?"仅允许只读桌面查询":"仅允许查询后台任务";}
+      else{readonly.checked=(server.tools.readOnly??[]).includes(tool.name);}
+    }else{
+      readonly.checked=(server.tools.readOnly??[]).includes(tool.name);
+    }
+    list.append(el("div",{className:"source"},[el("div",{className:"row"},[el("label",{className:"row"},[enabled,el("strong",{text:tool.name})]),el("label",{className:"row"},[readonly,el("span",{text:label})])]),
       el("div",{className:"muted small",text:tool.description})]));
   }
   paginateChildren($("mcp-server-tools"),{key:"mcp-server-tools:"+id});

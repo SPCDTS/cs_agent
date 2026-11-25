@@ -99,19 +99,32 @@ export class McpServerStore {
     const row = this.row(id, expected), server = this.parse(row);
     if (id === 'cua') {
       if (server.transport.kind !== 'reverse-websocket' || !row.secret || input.allow.some(tool => !isCuaTool(tool)) || input.resourceAllow?.length) throw new McpSetupError('invalid');
-      const windowsReadOnly = input.readOnly?.includes('call_tool') === true;
-      const lostWindowWrites = windowsReadOnly && server.tools.allow.includes('call_tool') && !server.tools.readOnly?.includes('call_tool');
-      // 缩减工具或收回窗口写入后，即使再次开放，已派出的旧任务也不能恢复权限。
-      if (server.enabled && (lostWindowWrites || server.tools.allow.some(tool => !input.allow.includes(tool)))) server.access.revision = crypto.randomUUID();
-      input = { ...input, readOnly: input.allow.filter(name => isCuaReadOnlyTool(name) || (name === 'call_tool' && windowsReadOnly)) };
+      const scopedReadOnly = (name: string) => (name === 'call_tool' || name === 'space_job') && input.readOnly?.includes(name) === true;
+      const tightenedScoped = (name: string) =>
+        (name === 'call_tool' || name === 'space_job')
+        && scopedReadOnly(name)
+        && server.tools.allow.includes(name)
+        && !server.tools.readOnly?.includes(name);
+      // 缩减工具或将通用执行工具收紧为只读后，即使再次开放，已派出的旧任务也不能恢复权限。
+      if (server.enabled && (['call_tool', 'space_job'].some(tightenedScoped) || server.tools.allow.some(tool => !input.allow.includes(tool)))) {
+        server.access.revision = crypto.randomUUID();
+      }
+      input = { ...input, readOnly: input.allow.filter(name => isCuaReadOnlyTool(name) || scopedReadOnly(name)) };
     }
     if (!row.discovered) throw new McpSetupError("probe_required");
     const tools: Tool[] = ListToolsResultSchema.parse(JSON.parse(row.discovered)).tools;
-    if (id === 'cua' && input.allow.includes('call_tool') && !input.readOnly?.includes('call_tool')) {
-      // 初次启用、移除后重新勾选和旧版升级都需要包含窗口操作的探测契约。
-      const selector = tools.find(tool => tool.name === 'call_tool')?.inputSchema.properties?.tool;
-      const modes = selector && typeof selector === 'object' && 'enum' in selector ? selector.enum : undefined;
-      if (!Array.isArray(modes) || !modes.some(mode => mode === 'bring_to_front' || mode === 'set_window_frame')) throw new McpSetupError('probe_required');
+    if (id === 'cua') {
+      if (input.allow.includes('space_bash')) {
+        const command = tools.find(tool => tool.name === 'space_bash')?.inputSchema.properties?.command;
+        const enums = command && typeof command === 'object' && 'enum' in command ? command.enum : undefined;
+        if (Array.isArray(enums)) throw new McpSetupError('probe_required');
+      }
+      if (input.allow.includes('call_tool') && !input.readOnly?.includes('call_tool')) {
+        // 开放完整桌面操作须经最新桥契约探测（不再带硬编码窗口 enum 白名单）。
+        const selector = tools.find(tool => tool.name === 'call_tool')?.inputSchema.properties?.tool;
+        const modes = selector && typeof selector === 'object' && 'enum' in selector ? selector.enum : undefined;
+        if (Array.isArray(modes)) throw new McpSetupError('probe_required');
+      }
     }
     if (input.allow.some(name => !tools.some(tool => tool.name === name))) throw new McpSetupError("invalid");
     const next = parseMcpConfig({ version: 1, enabled: true, servers: [{ ...server, enabled: true,

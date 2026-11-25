@@ -45,9 +45,8 @@ export class ThreadMcp {
     this.registry.install(defineExtension({ name: "cs.mcp.control",
       sections: [section("mcp-policy", () => {
         const visible = this.entries.has("cua") && (this.scope === "owner" || !!this.config.cuaSpaces?.length);
-        const directory = visible ? " Cua 的 list_spaces 返回 structuredContent.spaces。用完整设备 ID 和 service=driver 调用 list_tools；用 name 筛选工具并读取参数契约。" : "";
-        const inspect = visible ? " 已启用的 space_bash 接受 command=hostname。在 macOS 和 Windows 上用 call_tool 的 service=driver、tool=list_windows 查询窗口。macOS 可传 tool=get_window_state、arguments={pid,window_id} 获取截图。structuredContent.imageId 可用于 send_message.images。管理员重新检测并启用操作后，可用精确的 PID 与窗口 ID 调用 bring_to_front（Mac）或 set_window_frame（Mac / Windows）。" : "";
-        return MCP_RULE + MCP_RESULT_INSTRUCTIONS + directory + inspect;
+        const cua = visible ? " Cua 设备工具按已启用清单开放：先用 list_spaces 取完整设备 ID；list_tools(service='driver') 查 Driver 参数；space_bash 跑短命令（最长 50 秒）；space_job 在 Linux/macOS 跑后台长任务；space_write 写文件；call_tool(service='driver') 调桌面工具（返回图片会自动保存并给出 structuredContent.imageId / imageIds，可用于 send_message.images）。" : "";
+        return MCP_RULE + MCP_RESULT_INSTRUCTIONS + cua;
       })],
       tools: [
       defineTool({ name: "mcp_refresh_tools", description: "在 codemode 中刷新 MCP 目录，不执行远端业务操作。",
@@ -280,7 +279,7 @@ export class ThreadMcp {
           dispatched = mutation;
           const remote = await connection.callTool(tool.name, owned, {scope}, signal);
           outputBytes = jsonBytes(remote);
-          // 在途撤权时丢弃设备内容。窗口变更一旦发出，失去回执后就不能安全地重试。
+          // 在途撤权时丢弃设备内容。写操作一旦发出，失去回执后就不能安全地重试。
           const access = await currentAccess();
           if (!access) {
             classification = mutation ? 'outcome_unknown' : 'denied';
@@ -290,23 +289,43 @@ export class ThreadMcp {
           }
           const {effective} = access;
           const result = await cuaResult(tool.name,owned,remote,effective,this.config.limits,this.env,authority.scope,revision);
+          const savedImages = tool.name === 'call_tool' && Boolean(result.output?.some(part => part.type === 'image'));
           if (claimId) {
             if (result.isError) {
+              if (remote.isError) {
+                if (!await currentAccess()) {
+                  classification = 'outcome_unknown';
+                  const unknown = mcpFailure(classification);
+                  await this.policy.finish(claimId,unknown,true);
+                  return unknown;
+                }
+                classification = 'remote_error';
+                await this.policy.finish(claimId,result);
+                return result;
+              }
+              classification = 'outcome_unknown';
+              const unknown = mcpFailure(classification);
+              await this.policy.finish(claimId,unknown,true);
+              return unknown;
+            }
+            if (!await currentAccess()) {
               classification = 'outcome_unknown';
               const unknown = mcpFailure(classification);
               await this.policy.finish(claimId,unknown,true);
               return unknown;
             }
             await this.policy.finish(claimId,result);
-            if (!await currentAccess()) { classification = 'denied'; return mcpFailure(classification); }
           }
-          if (tool.name === 'list_spaces' || (tool.name === 'call_tool' && owned.tool === 'get_window_state')) {
-            // 读取别名和保存截图需要额外的存储请求。发布结果前按最新会话和设备授权收口。
+          if (tool.name === 'list_spaces') {
+            // 读取别名需要额外的存储请求。发布结果前按最新会话和设备授权收口。
             const latest = permitted(await assignments()), target = await authorized();
             if (!target || callerScope(target) !== scope || !await this.current(entry) ||
                 (latest && effective?.some(id => !latest.includes(id)))) { classification = 'denied'; return mcpFailure(classification); }
+          } else if (!claimId && savedImages) {
+            // 只读 call_tool 保存截图需要额外的存储请求，落盘前按当前目标设备授权收口。
+            if (!await currentAccess()) { classification = 'denied'; return mcpFailure(classification); }
           }
-          classification = result.isError ? 'result_rejected' : 'ok';
+          classification = remote.isError ? 'remote_error' : result.isError ? 'result_rejected' : 'ok';
           return result;
         }
         const grantRevision = isEnvironmentTool(tool.name) && authority.scope !== 'owner' ? (await this.policy.grant(authority.scope, entry.server.id))?.revision : undefined;
