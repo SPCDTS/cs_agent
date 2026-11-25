@@ -31,6 +31,33 @@ REVERSE_MCP_TOKEN=<管理员生成并在服务凭据中保存的令牌>
 
 目录 daemon 和登记命令均设置 `CUA_CREDENTIAL_STORE=file`，服务账号将凭据保存在专用的 `0700` 状态目录 `/var/lib/cs-agent-cua` 中。原生 MCP 仅监听 Unix socket。daemon 和各 Relay unit 的 systemd IP 策略只允许回环网络。桥会出站连接上面指定的 cs-agent WSS 地址。
 
+### 通过 GitHub Actions 发布反向桥
+
+每次推送到 `main` 或在 Actions 选中 `main` 手动运行 `ci`，`deploy Cua VPS` 都会核对 VPS 版本。它等待 `workers check` 和本次需要的 Worker 发布成功，用 runner 的锁文件构建桥，并将 bundle 和对应的 systemd unit 一起发布。相同内容只检查连接并更新提交记录。原生 Cua 和 Relay 的安装、共享 Caddy 的路由、配对容量和设备凭据由控制机管理员维护。管理台配对还需完成下方「首次配置 VPS 配对入口」。
+
+**首次接入一台已运行反向桥的 VPS**
+
+1. 在已运行反向桥的 VPS 上使用 root 从本仓库安装以下文件，系统需有 Python 3、systemd、`runuser` 且可通过 HTTPS 访问 GitHub API。先将两个程序安装成 root 所有的 `0755`。为 `cua-deploy` 创建同名系统组和系统账号，以转发程序为登录 shell，家目录及其 SSH 配置由 root 管理。该账号唯一可用的发布入口是组权限为 `0660` 的本机套接字。
+
+   ```sh
+   install -m 0755 deploy/cua/ci/receive.py /usr/local/sbin/cs-agent-receive-cua
+   install -m 0755 deploy/cua/ci/forward.py /usr/local/sbin/cs-agent-forward-cua
+   useradd --system --user-group --no-create-home --home-dir /var/lib/cua-deploy --shell /usr/local/sbin/cs-agent-forward-cua cua-deploy
+   install -d -m 0755 /var/lib/cua-deploy /var/lib/cua-deploy/.ssh
+   install -m 0644 deploy/cua/ci/cs-agent-cua-deploy.socket deploy/cua/ci/cs-agent-cua-deploy@.service /etc/systemd/system/
+   systemctl daemon-reload
+   systemctl enable --now cs-agent-cua-deploy.socket
+   ```
+
+2. 单独生成一对 Ed25519 发布密钥，在该账号的 `authorized_keys` 中写入下面一行，替换示例公钥并将文件设为 root 所有、模式 `0644`。转发器接受 `probe` 或 `deploy <GitHub 产物 ID>`。独立的 systemd 服务向 GitHub 核对当前主分支提交、工作流运行来源、归档摘要和 unit 源码。此配置适用于公开仓库。发布程序和套接字配置由管理员核对后更新，桥服务已有的路径覆盖可放在 unit 的 drop-in 中。
+
+   ```text
+   restrict,command="/usr/local/sbin/cs-agent-forward-cua" ssh-ed25519 <发布公钥> cua-vps-ci
+   ```
+
+3. 在 GitHub 仓库的 **Settings → Environments → vps** 仅放行 `main` 分支，配置四项环境秘密。用 `VPS_HOST`、`VPS_PORT` 填写已经开放的 SSH 地址和端口，`VPS_DEPLOY_KEY` 填写这把专用私钥。`VPS_KNOWN_HOSTS` 填写 `cua-vps ssh-ed25519 <主机公钥>`，主机公钥取自已经核对指纹的管理员 SSH 记录。桥的业务令牌继续由 VPS 上的 `bridge.env` 提供。
+4. 手动运行主分支 `ci` 可重试当前版本。部署会等待本次桥进程成功连接 Worker，并检查目录服务和 Unix socket。升级失败时自动恢复原先的 bundle 和 unit；中断的部署会在下次发布时先恢复。可在 VPS 运行 `cat /opt/cs-agent/cua/.ci-release` 核对最近一次成功的提交，并用 `journalctl -u cua-directory-bridge` 查启动原因。
+
 ### 共享 Caddy 时仅开放 443/TCP
 
 模板的全局 `auto_https disable_redirects` 关闭自动 HTTP 跳转，作用于同一 Caddy 实例上的所有站点。ACME 的 HTTP-01 由各站点的证书签发策略单独控制。Relay 和同机 LLM 等所有使用 ACME 的公网域名都需配置签发方式。采用 TLS-ALPN-01 时，将下段加入每个相关站点现有的 `tls` 配置，并确保 443/TCP 上的证书验证流量直接抵达该 Caddy。已有通过 DNS-01 签发的站点可沿用现有策略。检查全局选项、导入文件和显式的 `:80`、`http://域名` 站点。[Caddy 自动 HTTPS](https://caddyserver.com/docs/caddyfile/options#auto-https) · [ACME 签发与挑战配置](https://caddyserver.com/docs/caddyfile/directives/tls#acme)

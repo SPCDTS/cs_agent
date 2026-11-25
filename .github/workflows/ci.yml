@@ -50,6 +50,7 @@ jobs:
         run: npm --prefix runner ci
       # 包含类型检查、测试卫生门禁、Vitest（附耗时摘要与红线）、独立 Node 测试及不发布的打包检查。
       - run: npm --prefix workers run typecheck
+      - run: python3 -B -m unittest discover -s deploy/cua/ci
       - run: npm run test:ci
       - name: Run Vitest suite
         shell: bash
@@ -142,3 +143,60 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: workers
           command: deploy --config wrangler.deploy.json --var CS_AGENT_COMMIT:${{ github.sha }}
+
+  deploy-vps:
+    name: deploy Cua VPS
+    needs: [check, deploy-workers]
+    if: >-
+      ${{ !cancelled() && needs.check.result == 'success' &&
+          (needs.deploy-workers.result == 'success' || needs.deploy-workers.result == 'skipped') &&
+          github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: vps
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: runner/package-lock.json
+      - run: npm --prefix runner ci && npm --prefix runner run build:cua
+      - name: Stage bridge and service
+        run: |
+          mkdir "$RUNNER_TEMP/cua-vps"
+          cp runner/dist/reverse-mcp-bridge.cjs deploy/cua/cua-directory-bridge.service "$RUNNER_TEMP/cua-vps/"
+      - id: artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cua-vps-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cua-vps/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Deliver verified archive and wait for bridge registration
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          VPS_DEPLOY_KEY: ${{ secrets.VPS_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          staging=$(mktemp -d)
+          trap 'rm -rf -- "$staging"' EXIT
+          [[ "$VPS_HOST" =~ ^[[:alnum:]][[:alnum:].:-]*$ && "$VPS_PORT" =~ ^[0-9]{1,5}$ ]]
+          printf '%s\n' "$VPS_DEPLOY_KEY" > "$staging/key"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$staging/known_hosts"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$staging/bridge.zip"
+          ssh -F /dev/null -T -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile="$staging/known_hosts" -o HostKeyAlias=cua-vps \
+            -o ConnectTimeout=12 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+            -i "$staging/key" -p "$VPS_PORT" "cua-deploy@$VPS_HOST" "deploy $ARTIFACT_ID" < "$staging/bridge.zip"

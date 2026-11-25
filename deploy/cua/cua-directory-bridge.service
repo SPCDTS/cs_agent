@@ -7,6 +7,8 @@ Wants=network-online.target
 [Service]
 User=cua-directory
 Group=cua-directory
+RuntimeDirectory=cs-agent-cua-bridge
+RuntimeDirectoryMode=0700
 StateDirectory=cs-agent-cua-pairing
 StateDirectoryMode=0700
 ReadWritePaths=/var/lib/cs-agent-cua

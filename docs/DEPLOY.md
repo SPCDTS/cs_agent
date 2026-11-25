@@ -41,6 +41,7 @@ NapCat 独立运行，在其反向 WebSocket 客户端中配置 `wss://<Worker �
 仅在用户明确授权发布时执行。GitHub 仓库配置 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`，部署 job 使用 `workers` environment。
 
 - PR 和 main 的 CI 均运行 `npm run check`；runner 或 CI 改动还会在 Windows 上运行 WSB runner 测试。合并必需的 `workers check` 汇总相关检查结果。
+- 发布到 `main` 后，CI 等待 Worker 部署成功，再将 Cua 反向桥发布到 VPS。可在 Actions 查看 `deploy Cua VPS` 的独立结果。首次配置和故障处理见 [VPS 自动发布](../deploy/cua/README.md#通过-github-actions-发布反向桥)。
 - main 上检查成功后，CI 自动发布 Worker 和 coding 沙箱，并把提交号写入 `CS_AGENT_COMMIT`。因此通过 GitHub 合并 PR 属于发布操作；禁止直接推送 main。
 - 手动发布在 `workers/` 运行 `npm run deploy -- deployments/my.local.json --var CS_AGENT_COMMIT:<已批准的提交号>`；检查待发布差异和目标账号，不上传私有本机目录。
 

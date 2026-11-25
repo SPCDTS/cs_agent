@@ -1,0 +1,13 @@
+[Unit]
+Description=Receive Cua releases from the deployment account
+
+[Socket]
+ListenStream=/run/cs-agent-cua-deploy.sock
+SocketUser=root
+SocketGroup=cua-deploy
+SocketMode=0660
+Accept=yes
+MaxConnections=2
+
+[Install]
+WantedBy=sockets.target
