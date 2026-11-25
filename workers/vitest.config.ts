@@ -2,6 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
+import { NODE_TESTS } from "./test/projects.mjs";
 
 // 测试显式使用合成服务目录与 faux 测试模型，生产默认目录为空且不打包 faux。
 const ALIAS = [
@@ -9,27 +10,11 @@ const ALIAS = [
   { find: "./providers/faux", replacement: fileURLToPath(new URL("./test/fixtures/models-faux.ts", import.meta.url).href) },
 ];
 
-// 不依赖 cloudflare:test / workerd 运行时的纯逻辑单测划入轻量 node 项目，加快反馈。
-const NODE_TESTS = [
-  "test/chat-navigation-layout.test.ts",
-  "test/events-model.test.ts",
-  "test/execution-env.test.ts",
-  "test/github-app.test.ts",
-  "test/github-connect-diagnostics.test.ts",
-  "test/github-upstream-diagnostics.test.ts",
-  "test/github-user-auth.test.ts",
-  "test/mcp-transport.test.ts",
-  "test/memory-permissions.test.ts",
-  "test/topology-layout.test.ts",
-  "test/web-page.test.ts",
-  "test/web-search.test.ts",
-];
-
 // Vitest 4 的内联 projects 不会继承顶层 testTimeout，各子项目需显式复用同一上限。
-const TEST_TIMEOUT = 20_000;
+const TEST_TIMEOUT = 12_000;
 
 export default defineConfig({
-  // 保留每个测试文件的隔离；本机并发 2 个，CI 在同一台 runner 内并发 4 个。
+  // 双池架构：node 池运行纯逻辑单测；workers 池保持 isolate: true，靠按业务域整合控制 workerd 启动次数（本机 2 并发、CI 4 并发）。
   test: {
     testTimeout: TEST_TIMEOUT,
     maxWorkers: process.env.CI ? 4 : 2,

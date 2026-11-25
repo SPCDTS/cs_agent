@@ -2,20 +2,17 @@ import { env } from "cloudflare:test";
 import { vi } from "vitest";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import worker from "../src/index";
+import { sampleTools } from "./fixtures/mcp-tools";
+
+export { sampleTools };
 
 // 全部为合成测试值，不读取开发机或线上凭据。
 export const TEST_STORE_KEY = "01".repeat(32);
 export const ACCESS = "synthetic-access-token", REFRESH = "synthetic-refresh-token";
 export const issuer = "https://auth.example.test";
 export const callback = `${env.PUBLIC_ORIGIN}/mcp/oauth/callback`;
-export const sampleTools: Tool[] = [
-  { name: "notion-search", description: "搜索资料", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false } },
-  { name: "notion-fetch", inputSchema: { type: "object", properties: {} } },
-  { name: "notion-create-pages", inputSchema: { type: "object", properties: { bad: { type: "string", secretKeyword: true } } } },
-  { name: "not-allowed", inputSchema: { type: "object" } },
-];
 const Rpc = Type.Object({ id: Type.Optional(Type.Union([Type.Number(), Type.String()])), method: Type.String(), params: Type.Optional(Type.Record(Type.String(), Type.Unknown())) });
 export function fakeRemote(endpoint = "https://mcp.notion.com/mcp") {
   const requests: { url: string; method: string; body: string; headers: Headers; redirect: string }[] = [];

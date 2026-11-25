@@ -45,9 +45,26 @@ jobs:
           cache-dependency-path: |
             workers/package-lock.json
             runner/package-lock.json
-      - run: npm run install:workers
-      # 包含类型检查、workerd 测试、所有独立 Node 测试及不发布的打包检查。
-      - run: npm run check
+      - run: npm --prefix workers ci
+      - if: needs.native-changes.outputs.changed == 'true'
+        run: npm --prefix runner ci
+      # 包含类型检查、测试卫生门禁、Vitest（附耗时摘要与红线）、独立 Node 测试及不发布的打包检查。
+      - run: npm --prefix workers run typecheck
+      - run: npm run test:ci
+      - name: Run Vitest suite
+        shell: bash
+        run: npm --prefix workers test -- --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-report.json"
+      - name: Check Vitest duration budget & summary
+        if: "!cancelled()"
+        shell: bash
+        run: |
+          if [ -f "$RUNNER_TEMP/vitest-report.json" ]; then
+            node scripts/ci-vitest-summary.mjs "$RUNNER_TEMP/vitest-report.json"
+          fi
+      - run: npm --prefix workers run test:node
+      - run: npm --prefix workers run build
+      - if: needs.native-changes.outputs.changed == 'true'
+        run: npm --prefix runner run typecheck && npm --prefix runner test && npm --prefix runner run build
 
   runner-native:
     name: windows WSB runner
@@ -63,6 +80,7 @@ jobs:
           cache: npm
           cache-dependency-path: runner/package-lock.json
       - run: npm --prefix runner ci
+      - run: npm --prefix runner run typecheck
       - run: npm --prefix runner run build
       - run: npm --prefix runner test
 

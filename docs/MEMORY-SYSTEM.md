@@ -53,6 +53,6 @@
 
 ## 5. 验证覆盖
 
-- `memory-rules.test.ts` / `memory-rules-harness.test.ts` / `memory-rule-history.test.ts`：版本/正文 CAS、并发与 ABA、作用域与触发器保护、`14a9465` 旧表真实 `initialize` 升级、`memory_history_append` 原子回滚、历史标签防篡改及真实 Harness 恢复。
+- `memory-rules.test.ts`：版本/正文 CAS、并发与 ABA、作用域与触发器保护、`14a9465` 旧表真实 `initialize` 升级、`memory_history_append` 原子回滚、历史标签防篡改及真实 Harness 恢复。
 - `memory-rules-pi.node.mjs`：锁定 Pi section planner 行为（throw 保旧、稳定无 patch、null 删除、两种 `supportsMidConvoSystemMessages` HTTP payload）。
 - `memory-browser.node.mjs`：真实前端模块的乱序响应、版本编辑/遗忘、画像冲突草稿与规则编辑器生命周期隔离。

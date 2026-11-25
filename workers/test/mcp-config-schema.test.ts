@@ -4,7 +4,7 @@ import { compileMcpSchema } from "../src/mcp/schema";
 import { makeCatalog } from "../src/mcp/catalog";
 import { toolNames } from "../src/mcp/names";
 import { convertMcpResult } from "../src/mcp/result";
-import { sampleTools } from "./mcp-helpers";
+import { sampleTools } from "./fixtures/mcp-tools";
 
 describe("MCP fixture config and strict schema", () => {
   it("validates the owner-only Notion CIMD fixture without credentials", () => {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { inboundKey, isAllowed, isTriggered, normalizeMessage, ownerIds, policyFrom, renderText, threadKey } from "../src/policy";
 import { defaultSettings } from "../src/settings";
-import { event, input } from "./helpers";
+import { event, input } from "./fixtures/qq";
 
 const secrets = { QQ_OWNER: "10000001,10000002", QQ_ALLOW_USERS: " 10000003 ", QQ_ALLOW_GROUPS: "200000001" };
 const policy = policyFrom(secrets, defaultSettings(secrets));
