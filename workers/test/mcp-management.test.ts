@@ -61,6 +61,23 @@ function scriptedModel(steps: Step[]) {
 }
 
 describe("runtime MCP onboarding", () => {
+  it("原生节点列出 Space 生命周期工具时，管理台仍拒绝将其开放给会话", async () => {
+    const cua = await registry().mcpServerPut({ id: "cua", transport: "reverse-websocket" }, "absent");
+    const credential = await registry().mcpCredentialPut("cua", cua.revision, { Authorization: "Bearer " + "f".repeat(40) });
+    const tools = ["list_spaces", "create_space", "delete_space"].map(name => ({ name, inputSchema: { type: "object" } }));
+    const probed = await registry().mcpServerProbe("cua", credential.revision, { tools });
+    const active = await registry().mcpServerActivate("cua", probed.revision, { allow: ["list_spaces"] });
+    if ("error" in active) throw new Error("fixture_activation_failed");
+    for (const name of ["create_space", "delete_space"]) {
+      const response = await worker.fetch(new Request("https://test/admin/mcp/manage", { method: "POST",
+        headers: { Authorization: "Bearer synthetic-admin", "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "activate", id: "cua", expectedRevision: active.revision,
+          selection: { allow: ["list_spaces", name], readOnly: [name] } }) }), adminEnv());
+      expect(response.status).toBe(400);
+      expect((await registry().mcpServerGet("cua")).server.tools.allow).toEqual(["list_spaces"]);
+    }
+  });
+
   it("preserves seeded services, encrypts admin credentials, probes via the existing SDK and invalidates old group grants", async () => {
     const remote = remoteFixture(), initial = await registry().mcpConfig();
     expect(initial.servers).toEqual(MCP_CONFIG.servers);

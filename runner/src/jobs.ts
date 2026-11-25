@@ -32,10 +32,10 @@ export class Jobs {
   private timer?: NodeJS.Timeout;
   private pending?: Promise<void>;
   private stopped = false;
-  private backends: Record<Target['kind'], Backend>;
+  private readonly backend: Backend;
   private now: () => number;
-  constructor(stateDir: string, backends: Record<Target['kind'], Backend>, now: () => number = Date.now) {
-    this.backends = backends; this.now = now;
+  constructor(stateDir: string, backend: Backend, now: () => number = Date.now) {
+    this.backend = backend; this.now = now;
     mkdirSync(stateDir, { recursive: true });
     this.databasePath = path.join(stateDir, 'jobs.sqlite');
     this.db = new DatabaseSync(this.databasePath);
@@ -45,12 +45,16 @@ export class Jobs {
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, principal TEXT NOT NULL, scope TEXT NOT NULL, target TEXT NOT NULL, state TEXT NOT NULL, expires INTEGER NOT NULL, idle_until INTEGER NOT NULL, idle_ms INTEGER NOT NULL);`);
     this.details = new JobDetails(this.db, this.now());
     this.db.exec("CREATE INDEX IF NOT EXISTS jobs_errors_created ON jobs(principal,scope,target,created DESC) WHERE json_extract(status,'$.state') IN ('unknown','failed')");
+    // 升级前遗留的 VM 工作永远不会发送给 WSB。已下发的任务保留结果未知的收据。
+    this.db.prepare(`UPDATE jobs SET phase='terminal', finished=?,
+      status=CASE WHEN phase='queued' THEN '{"state":"cancelled"}' ELSE '{"state":"unknown","error":"retired_backend_outcome_unknown"}' END
+      WHERE phase!='terminal' AND json_extract(execution,'$.target.kind')='hyperv'`).run(this.now());
     // dispatching 表示进程可能已接到命令；恢复时只能 inspect。
     this.db.exec("UPDATE jobs SET phase='active' WHERE phase='dispatching'");
   }
   bindTargets(targets: Target[]) {
     for (const target of targets) {
-      const identity = stable(target.kind === 'hyperv' ? { kind: target.kind, vmId: target.vmId.toLowerCase() } : { kind: target.kind });
+      const identity = stable({ kind: target.kind });
       const old = this.db.prepare('SELECT identity FROM targets WHERE id=?').get(target.id);
       if (old && old.identity !== identity) throw new Error('target_id_reused_for_different_environment');
       this.db.prepare('INSERT OR IGNORE INTO targets(id,identity) VALUES(?,?)').run(target.id, identity);
@@ -88,21 +92,18 @@ export class Jobs {
         if (prior.fingerprint !== fingerprint) throw new Error('request_id_conflict');
         return this.receipt(prior);
       }
-      if (target.kind === 'hyperv' && target.drainOnly) throw new Error('hyperv_target_draining');
       let deadline = this.now() + command.timeoutMs;
-      if (target.kind === 'wsb') {
-        if (sessionId) {
-          const session = this.session(subject, target, sessionId);
-          if (!session || session.state !== 'open' || session.expires <= this.now() || (session.idle_until <= this.now() && !this.rows().some(row => this.execution(row).sessionId === sessionId))) throw new Error('session_unavailable');
-          deadline = Math.min(deadline, session.expires);
-          this.db.prepare('UPDATE sessions SET idle_until=? WHERE id=?').run(Math.min(session.expires, this.now() + target.idleTimeoutMs), sessionId);
-        } else {
-          if (this.db.prepare("SELECT id FROM sessions WHERE state != 'closed'").get()) throw new Error('wsb_busy');
-          sessionId = randomUUID(); deadline = Math.min(deadline, this.now() + target.maxLifetimeMs);
-          this.db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?)').run(sessionId, subject.principal, subject.scope, target.id, 'open', this.now() + target.maxLifetimeMs, this.now() + target.idleTimeoutMs, target.idleTimeoutMs);
-        }
-      } else if (sessionId) throw new Error('session_not_supported');
-      const execution: Execution = { id: randomUUID(), requestId, subject, target, command, ...(sessionId ? { sessionId } : {}), deadline };
+      if (sessionId) {
+        const session = this.session(subject, target, sessionId);
+        if (!session || session.state !== 'open' || session.expires <= this.now() || (session.idle_until <= this.now() && !this.rows().some(row => this.execution(row).sessionId === sessionId))) throw new Error('session_unavailable');
+        deadline = Math.min(deadline, session.expires);
+        this.db.prepare('UPDATE sessions SET idle_until=? WHERE id=?').run(Math.min(session.expires, this.now() + target.idleTimeoutMs), sessionId);
+      } else {
+        if (this.db.prepare("SELECT id FROM sessions WHERE state != 'closed'").get()) throw new Error('wsb_busy');
+        sessionId = randomUUID(); deadline = Math.min(deadline, this.now() + target.maxLifetimeMs);
+        this.db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?)').run(sessionId, subject.principal, subject.scope, target.id, 'open', this.now() + target.maxLifetimeMs, this.now() + target.idleTimeoutMs, target.idleTimeoutMs);
+      }
+      const execution: Execution = { id: randomUUID(), requestId, subject, target, command, sessionId, deadline };
       const { command: _command, ...metadata } = execution;
       this.db.prepare('INSERT INTO jobs(id,principal,scope,target,request_id,fingerprint,execution,phase,status,created) VALUES(?,?,?,?,?,?,?,?,?,?)').run(execution.id, subject.principal, subject.scope, target.id, requestId, fingerprint, JSON.stringify(metadata), 'queued', JSON.stringify({ state: 'running' }), this.now());
       this.details.insert(execution);
@@ -121,7 +122,7 @@ export class Jobs {
   }
   async status(subject: Subject, target: Target): Promise<EnvironmentStatus> {
     let readiness: Readiness;
-    try { readiness = await this.backends[target.kind].probe?.(target) ?? { state: 'unknown', error: 'probe_not_supported' }; }
+    try { readiness = await this.backend.probe?.(target) ?? { state: 'unknown', error: 'probe_not_supported' }; }
     catch { readiness = { state: 'unavailable', error: 'probe_unavailable' }; }
     // 不等待 tick，也不 submit 探测命令；已阻塞的执行链不阻塞只读队列快照。
     const rows = this.rows().filter(row => row.target === target.id);
@@ -133,7 +134,7 @@ export class Jobs {
     return {
       targetId: target.id, kind: target.kind, checkedAt: this.now(), readiness, ledger: this.ledger(subject, target),
       queue: {
-        busy: rows.some(row => row.phase !== 'queued') || (target.kind === 'wsb' && Boolean(this.db.prepare("SELECT 1 FROM sessions WHERE target=? AND state!='closed'").get(target.id))),
+        busy: rows.some(row => row.phase !== 'queued') || Boolean(this.db.prepare("SELECT 1 FROM sessions WHERE target=? AND state!='closed'").get(target.id)),
         queued: queued.length, oldestQueuedAt: queued[0]?.created ?? null,
         current: current && receipt ? { requestId: receipt.requestId, jobId: receipt.jobId, ...(receipt.sessionId ? { sessionId: receipt.sessionId } : {}),
           deadline: receipt.deadline, queuedAt: current.created, state: receipt.state === 'cancelling' ? 'cancelling' : receipt.state === 'unknown' ? 'unknown' : 'running',
@@ -180,7 +181,7 @@ export class Jobs {
       this.db.prepare("UPDATE jobs SET phase=CASE WHEN phase='cancelling' AND ?='active' THEN 'cancelling' ELSE ? END,status=?,finished=CASE WHEN ?='terminal' THEN ? ELSE NULL END WHERE id=?").run(phase, phase, JSON.stringify(summary), phase, this.now(), row.id);
     });
     const execution = this.execution(row);
-    if (execution.sessionId && phase === 'terminal') this.db.prepare('UPDATE sessions SET idle_until=MIN(expires,?) WHERE id=?').run(this.now() + (execution.target.kind === 'wsb' ? execution.target.idleTimeoutMs : 0), execution.sessionId);
+    if (execution.sessionId && phase === 'terminal') this.db.prepare('UPDATE sessions SET idle_until=MIN(expires,?) WHERE id=?').run(this.now() + execution.target.idleTimeoutMs, execution.sessionId);
   }
   tick(): Promise<void> {
     if (this.stopped) return Promise.resolve();
@@ -208,11 +209,11 @@ export class Jobs {
     await Promise.allSettled(steps);
     for (const session of this.db.prepare("SELECT * FROM sessions WHERE state='closing'").all() as unknown as SessionRow[]) {
       try {
-        if (await this.backends.wsb.closeSession?.(session.id)) {
+        if (await this.backend.closeSession(session.id)) {
           for (const row of this.rows()) if (this.execution(row).sessionId === session.id) {
             const execution = this.execution(row);
             // 销毁确认与取消请求之间可能已自然完成，优先保留原生终结收据。
-            this.finish(row, await this.backends.wsb.stop(execution));
+            this.finish(row, await this.backend.stop(execution));
           }
           this.db.prepare("UPDATE sessions SET state='closed' WHERE id=?").run(session.id);
         }
@@ -220,7 +221,7 @@ export class Jobs {
     }
   }
   private async advanceJob(row: JobRow, execution: Execution) {
-    const backend = this.backends[execution.target.kind];
+    const backend = this.backend;
     if (execution.deadline <= this.now()) {
       if (row.phase === 'queued') { this.finish(row, { state: 'cancelled' }); return; }
       if (execution.sessionId) this.beginClose(execution.sessionId);

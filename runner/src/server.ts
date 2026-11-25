@@ -27,26 +27,22 @@ export function toolCatalog(config: ServerConfig, jobs: Jobs): Registered[] {
     if (!target) throw new Error('environment_not_found');
     return target;
   }
-  add('env_list', '列出当前调用身份可用的环境。不探测或启动环境；返回 envId、持久/临时类型、工作目录和用途。drainOnly=true 的旧 VM 只处理原任务。', object({}), object({ environments: Type.Array(object({
+  // 输出 schema 纳入 Worker 工具名摘要，保留原契约以兼容已有 WSB 调用。
+  add('env_list', '列出当前调用身份可用的临时 Windows Sandbox，返回 envId、工作目录和用途。', object({}), object({ environments: Type.Array(object({
     envId: EnvIdSchema, kind: Type.Union([Type.Literal('persistent'), Type.Literal('sandbox')]), workdir: Type.String(), instructions: Type.String(), drainOnly: Type.Optional(Type.Boolean()),
   })) }), true, (_args, caller) => result({ environments: config.targets.filter(target => allowsEnvironment(caller.environments, target.id)).map(target => ({
-    envId: target.id, kind: target.kind === 'hyperv' ? 'persistent' : 'sandbox', workdir: target.kind === 'hyperv' ? target.guestWorkdir : 'C:\\AgentWork', instructions: target.instructions ?? '',
-    ...(target.kind === 'hyperv' && target.drainOnly ? { drainOnly: true } : {}),
+    envId: target.id, kind: 'sandbox', workdir: 'C:\\AgentWork', instructions: target.instructions ?? '',
   })) }));
-  add('env_submit', '在 envId 指定的环境执行 PowerShell。持久环境保留磁盘和软件；临时 sandbox 的文件在关闭或到期后都不持久保存。先 env_list 查看用途。若 drainOnly=true，新命令请使用已配对 VM 的 shell_exec。requestId(UUID) 和原参数在重试时必须保持一致；返回收据后用 env_job_get 查询，unknown 禁止另起同一命令。sandbox 首次省略 sessionId，后续沿用；持久环境不能传 sessionId。', object({ ...environment, ...shell, sessionId: Type.Optional(uuid) }), receiptSchema, false,
+  add('env_submit', '在 envId 指定的临时 Windows Sandbox 执行 PowerShell。文件在 session 关闭或到期后清除。首次省略 sessionId，后续命令沿用。重试需使用同一 requestId 和参数。用 env_job_get 查询收据，unknown 时先核实结果。', object({ ...environment, ...shell, sessionId: Type.Optional(uuid) }), receiptSchema, false,
     (args, caller) => result(jobs.submit(caller.subject, targetFor(caller, args.envId), args.requestId, { kind: 'powershell', script: args.script, cwd: args.cwd, timeoutMs: args.timeoutMs ?? 120000 }, args.sessionId)));
-  add('env_status', '独立只读环境状态，不进入执行队列、不创建或启动 VM/sandbox。返回就绪状态、助手版本、当前身份的任务队列和账本容量。数据库容量为匿名全局指标，不包含其他任务或文件路径。', object(environment), EnvironmentStatusSchema, true,
+  add('env_status', '独立只读环境状态，不进入执行队列、不创建或启动 sandbox。返回就绪状态、助手版本、当前身份的任务队列和账本容量。数据库容量为匿名全局指标，不包含其他任务或文件路径。', object(environment), EnvironmentStatusSchema, true,
     async (args, caller) => result(await jobs.status(caller.subject, targetFor(caller, args.envId))));
   add('env_job_get', '查询同一 envId、调用身份下的 requestId。unknown 表示执行结果不确定，应继续查询或取消；details=archived 表示正文已归档，仍保留去重和退出摘要，不得重新执行旧请求。', object({ ...environment, requestId: uuid }), receiptSchema, true,
     (args, caller) => result(jobs.get(caller.subject, targetFor(caller, args.envId), args.requestId)));
-  add('env_job_cancel', '取消当前身份在指定环境中的任务；持久环境只终止对应进程，临时 sandbox 的活跃任务取消会关闭整个 session。持续查询直到确认停止。', object({ ...environment, requestId: uuid }), receiptSchema, false,
+  add('env_job_cancel', '取消当前身份在指定环境中的任务；取消活跃任务会关闭整个临时 session。持续查询直到确认停止。', object({ ...environment, requestId: uuid }), receiptSchema, false,
     (args, caller) => result(jobs.cancel(caller.subject, targetFor(caller, args.envId), args.requestId)));
-  add('env_close', '关闭临时 sandbox session，销毁其中的文件；返回 closing 时继续查询关闭结果。持久环境不支持关闭。', object({ ...environment, sessionId: uuid }), object({ sessionId: uuid, state: Type.Union([Type.Literal('closing'), Type.Literal('closed')]) }), false,
-    (args, caller) => {
-      const target = targetFor(caller, args.envId);
-      if (target.kind !== 'wsb') throw new Error('persistent_environment_cannot_close');
-      return result(jobs.close(caller.subject, target, args.sessionId));
-    });
+  add('env_close', '关闭临时 sandbox session，销毁其中的文件；返回 closing 时继续查询关闭结果。', object({ ...environment, sessionId: uuid }), object({ sessionId: uuid, state: Type.Union([Type.Literal('closing'), Type.Literal('closed')]) }), false,
+    (args, caller) => result(jobs.close(caller.subject, targetFor(caller, args.envId), args.sessionId)));
   return registered;
 }
 export function createMcpHttpServer(config: ServerConfig, jobs: Jobs, env: NodeJS.ProcessEnv = process.env) {
@@ -58,7 +54,7 @@ export function createMcpHttpServer(config: ServerConfig, jobs: Jobs, env: NodeJ
   return createLocalMcpHttpServer({
     authenticate,
     createSession(principalId) {
-      const server = new Server({ name: 'cs-agent-windows', version: '1.0.0' }, { capabilities: { tools: {} }, instructions: '此服务管理宿主机上的临时 WSB 和已配置的旧环境，先用 env_list 查看授权范围。直接配对的持久 VM 通过其设备服务使用 device_info 和 shell_exec。旧任务在原服务用 env_job_get 查询、env_job_cancel 取消。HTTP 断线后先查询原任务。' });
+      const server = new Server({ name: 'cs-agent-windows', version: '1.0.0' }, { capabilities: { tools: {} }, instructions: '此服务管理宿主机的临时 Windows Sandbox。先用 env_list 查看授权范围。HTTP 断线后用 env_job_get 查询原任务。' });
       server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: catalog.map(t => t.tool) }));
       server.setRequestHandler(CallToolRequestSchema, async request => {
         try {
@@ -69,7 +65,7 @@ export function createMcpHttpServer(config: ServerConfig, jobs: Jobs, env: NodeJ
           return { isError: true, content: [{ type: 'text', text: message }] };
         }
       });
-      return { server };
+      return server;
     },
   });
 }

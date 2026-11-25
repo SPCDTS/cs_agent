@@ -23,7 +23,7 @@ export class McpAdmin implements McpAdminRpc {
     if (scope !== undefined) await this.host.prepare(scope);
     const mcp = await this.host.open();
     if (!mcp) throw new Error('mcp_unavailable');
-    await mcp.syncConfig(await this.host.env.REGISTRY.getByName('main').mcpConfig());
+    await mcp.syncConfig(await this.host.env.REGISTRY.getByName('main').mcpConfig(scope ?? mcp.scope));
     return mcp;
   }
   private async reviewer(scope: string): Promise<McpAuthority> {

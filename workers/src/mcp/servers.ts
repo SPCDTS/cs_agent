@@ -2,6 +2,7 @@ import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { ListToolsResultSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MCP_CONFIG, parseMcpConfig, publicOrigin, type McpServerConfig } from "./config";
+import { isCuaReadOnlyTool, isCuaTool } from "../cua/discovery";
 import { secretsEqual } from "../auth";
 import { TokenVault } from "./crypto";
 import { makeCatalog } from "./catalog";
@@ -62,8 +63,17 @@ export class McpServerStore {
     const server = this.parse(row);
     return server.enabled && serverDigest(server) === digest;
   }
+  cuaDirectoryToolsJson(expectedDigest: string) {
+    const row = this.sql.exec<Pick<Row,'config'|'discovered'>>("SELECT config,discovered FROM mcp_servers WHERE id='cua'").toArray()[0];
+    if (!row?.discovered) return;
+    const server = this.parse(row);
+    if (!server.enabled || server.transport.kind !== 'reverse-websocket' || serverDigest(server) !== expectedDigest) return;
+    const {tools} = ListToolsResultSchema.parse(JSON.parse(row.discovered));
+    return JSON.stringify({tools:tools.filter(tool => server.tools.allow.includes(tool.name) && isCuaTool(tool.name))});
+  }
   put(input: ServerSetupInput, expected: string) {
     if (!Check(ServerSetup, input)) throw new McpSetupError("invalid");
+    if (input.id === 'cua' && !('transport' in input)) throw new McpSetupError('invalid');
     const previous = this.sql.exec<Row>("SELECT * FROM mcp_servers WHERE id=?", input.id).toArray()[0];
     if ((previous?.revision ?? "absent") !== expected) throw new McpSetupError("conflict");
     if (!previous && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM mcp_servers").one().n >= 64) throw new McpSetupError("invalid");
@@ -85,11 +95,38 @@ export class McpServerStore {
     return this.get(id);
   }
   activate(id: string, expected: string, input: ServerSelectionInput) {
-    if (!Check(ServerSelection, input)) throw new McpSetupError("invalid");
+    if (!Check(ServerSelection, input) || input.readOnly?.some(name => !input.allow.includes(name))) throw new McpSetupError("invalid");
     const row = this.row(id, expected), server = this.parse(row);
+    if (id === 'cua') {
+      if (server.transport.kind !== 'reverse-websocket' || !row.secret || input.allow.some(tool => !isCuaTool(tool)) || input.resourceAllow?.length) throw new McpSetupError('invalid');
+      const scopedReadOnly = (name: string) => (name === 'call_tool' || name === 'space_job') && input.readOnly?.includes(name) === true;
+      const tightenedScoped = (name: string) =>
+        (name === 'call_tool' || name === 'space_job')
+        && scopedReadOnly(name)
+        && server.tools.allow.includes(name)
+        && !server.tools.readOnly?.includes(name);
+      // 缩减工具或将通用执行工具收紧为只读后，即使再次开放，已派出的旧任务也不能恢复权限。
+      if (server.enabled && (['call_tool', 'space_job'].some(tightenedScoped) || server.tools.allow.some(tool => !input.allow.includes(tool)))) {
+        server.access.revision = crypto.randomUUID();
+      }
+      input = { ...input, readOnly: input.allow.filter(name => isCuaReadOnlyTool(name) || scopedReadOnly(name)) };
+    }
     if (!row.discovered) throw new McpSetupError("probe_required");
     const tools: Tool[] = ListToolsResultSchema.parse(JSON.parse(row.discovered)).tools;
-    if (input.allow.some(name => !tools.some(tool => tool.name === name)) || input.readOnly?.some(name => !input.allow.includes(name))) throw new McpSetupError("invalid");
+    if (id === 'cua') {
+      if (input.allow.includes('space_bash')) {
+        const command = tools.find(tool => tool.name === 'space_bash')?.inputSchema.properties?.command;
+        const enums = command && typeof command === 'object' && 'enum' in command ? command.enum : undefined;
+        if (Array.isArray(enums)) throw new McpSetupError('probe_required');
+      }
+      if (input.allow.includes('call_tool') && !input.readOnly?.includes('call_tool')) {
+        // 开放完整桌面操作须经最新桥契约探测（不再带硬编码窗口 enum 白名单）。
+        const selector = tools.find(tool => tool.name === 'call_tool')?.inputSchema.properties?.tool;
+        const modes = selector && typeof selector === 'object' && 'enum' in selector ? selector.enum : undefined;
+        if (Array.isArray(modes)) throw new McpSetupError('probe_required');
+      }
+    }
+    if (input.allow.some(name => !tools.some(tool => tool.name === name))) throw new McpSetupError("invalid");
     const next = parseMcpConfig({ version: 1, enabled: true, servers: [{ ...server, enabled: true,
       tools: { allow: input.allow, readOnly: input.readOnly ?? [], eventAllow: [] }, resourceAllow: input.resourceAllow ?? [] }] }).servers[0]!;
     const accepted = makeCatalog(next, tools, MCP_CONFIG.limits);
@@ -100,7 +137,10 @@ export class McpServerStore {
   }
   disable(id: string, expected: string) {
     const row = this.row(id, expected);
-    this.sql.exec("UPDATE mcp_servers SET config=?,revision=? WHERE id=?", JSON.stringify({ ...this.parse(row), enabled: false }), crypto.randomUUID(), id);
+    const server = this.parse(row), revision = crypto.randomUUID();
+    // 暂停前已派出的调用和子任务继续使用旧版本；已保存的会话分配由 Registry 迁到新版本。
+    if (id === 'cua') server.access.revision = revision;
+    this.sql.exec("UPDATE mcp_servers SET config=?,revision=? WHERE id=?", JSON.stringify({ ...server, enabled: false }), revision, id);
     return this.get(id);
   }
   remove(id: string, expected: string) { this.row(id, expected); this.sql.exec("DELETE FROM mcp_servers WHERE id=?", id); return { removed: id }; }

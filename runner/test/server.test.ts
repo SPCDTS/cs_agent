@@ -24,11 +24,9 @@ test('真实官方 SDK HTTP：工具发现、结构化回执、断线续查、�
     async stop() { return { state: 'cancelled' }; }, async closeSession() { return true; },
   };
   const config: ServerConfig = { stateDir: dir, host: '127.0.0.1', port: 7791, principals: [{ id: 'worker', tokenEnv: 'TEST_TOKEN' }], targets: [
-    { kind: 'hyperv', id: 'dev', vmId: randomUUID(), credentialPath: 'C:\\credential.xml', guestWorkdir: 'C:\\Work' },
-    { kind: 'hyperv', id: 'group852', vmId: randomUUID(), credentialPath: 'C:\\group-credential.xml', guestWorkdir: 'C:\\GroupWork', drainOnly: true },
     { kind: 'wsb', id: 'temp', memoryMb: 2048, idleTimeoutMs: 60000, maxLifetimeMs: 3600000 },
   ] };
-  const backends = { hyperv: backend, wsb: backend }, jobs = new Jobs(dir, backends);
+  const jobs = new Jobs(dir, backend);
   jobs.bindTargets(config.targets);
   const server = createMcpHttpServer(config, jobs, { TEST_TOKEN: 'x'.repeat(64) });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -47,22 +45,21 @@ test('真实官方 SDK HTTP：工具发现、结构化回执、断线续查、�
   assert.equal(catalog.tools.find(tool => tool.name === 'env_status')?.annotations?.readOnlyHint, true);
   assert.ok(!catalog.tools.some(tool => /desktop|_screen|_input/.test(tool.name)));
   assert.equal((await call(client, { name: 'vm_dev_screen', arguments: {} })).isError, true);
-  assert.match(catalog.tools.find(tool => tool.name === 'env_submit')!.description!, /都不持久/);
+  assert.match(catalog.tools.find(tool => tool.name === 'env_submit')!.description!, /关闭或到期后清除/);
   assert.ok(!catalog.tools.some(tool => /^(vm_|wsb_)|acquire|register/.test(tool.name)));
   const directList = await call(client, { name:'env_list', arguments:{} });
   const environments = directList.structuredContent?.environments;
   assert.ok(Array.isArray(environments));
-  assert.deepEqual(environments.map(target => [target.envId, target.drainOnly]), [['dev', undefined], ['group852', true], ['temp', undefined]]);
-  const draining = await call(client, { name: 'env_submit', arguments: { envId: 'group852', requestId: randomUUID(), script: 'Get-Date' } });
-  assert.equal(draining.isError, true);
-  assert.deepEqual(draining.content, [{ type: 'text', text: 'hyperv_target_draining' }]);
-  assert.equal((await call(client, {name:'env_close',arguments:{envId:'dev',sessionId:randomUUID()}})).isError,true);
+  assert.deepEqual(environments.map(target => target.envId), ['temp']);
   const id = randomUUID(), meta = { [CALLER_META_KEY]: { scope: 'a'.repeat(64), environments: { kind: 'selected', envIds: ['temp'] } } };
+  const unassigned = { [CALLER_META_KEY]: { scope: 'a'.repeat(64), environments: { kind: 'selected', envIds: [] } } };
+  const hidden = await call(client, { name: 'env_list', arguments: {}, _meta: unassigned });
+  assert.deepEqual(hidden.structuredContent?.environments, []);
   const listed = await call(client, { name: 'env_list', arguments: {}, _meta: meta });
   assert.deepEqual(listed.structuredContent?.environments, [{ envId: 'temp', kind: 'sandbox', workdir: 'C:\\AgentWork', instructions: '' }]);
   for (const name of ['env_status', 'env_submit', 'env_job_get', 'env_job_cancel', 'env_close']) {
-    const args = name === 'env_status' ? {envId:'dev'} : name === 'env_close' ? {envId:'dev',sessionId:randomUUID()} : name === 'env_submit' ? {envId:'dev',requestId:id,script:'blocked'} : {envId:'dev',requestId:id};
-    assert.equal((await call(client, {name,arguments:args,_meta:meta})).isError,true);
+    const args = name === 'env_status' ? {envId:'temp'} : name === 'env_close' ? {envId:'temp',sessionId:randomUUID()} : name === 'env_submit' ? {envId:'temp',requestId:id,script:'blocked'} : {envId:'temp',requestId:id};
+    assert.equal((await call(client, {name,arguments:args,_meta:unassigned})).isError,true);
   }
   assert.equal((await call(client, {name:'env_status',arguments:{envId:'temp'},_meta:{[CALLER_META_KEY]:{scope:'a'.repeat(64)}}})).isError,true);
   assert.equal(calls.length, 0);
@@ -99,15 +96,14 @@ test('真实官方 SDK HTTP：工具发现、结构化回执、断线续查、�
   assert.equal((await fetch(url, { headers })).status, 405);
   assert.equal((await fetch(url, { method: 'POST', headers, body: '{' })).status, 400);
 });
-test('配置只允许明确的持久 VM/临时 WSB，拒绝旧连接器配置与环境 ID 混淆', () => {
+test('配置只启用临时 WSB，兼容含已退役 VM 的旧配置', () => {
   const valid = { stateDir: path.resolve('state'), host: '127.0.0.1', port: 7791, principals: [{ id: 'owner', tokenEnv: 'TOKEN' }], targets: [{ kind: 'wsb', id: 'temp', memoryMb: 2048, idleTimeoutMs: 60000, maxLifetimeMs: 60000 }] };
   assert.equal(parseConfig(valid).targets[0]?.kind, 'wsb');
   assert.throws(() => parseConfig({ ...valid, dataDir: 'D:\\sandbox-data' }), /invalid_windows_mcp_config/);
   assert.throws(() => parseConfig({ ...valid, host: '0.0.0.0' }), /invalid_windows_mcp_config/);
   assert.throws(() => parseConfig({ ...valid, targets: [...valid.targets, ...valid.targets] }), /duplicate_id/);
   const vm = { kind: 'hyperv', id: 'dev', vmId: randomUUID(), credentialPath: path.resolve('secret.xml'), guestWorkdir: 'C:\\AgentWork' };
-  assert.equal(parseConfig({ ...valid, targets: [vm] }).targets[0]?.kind, 'hyperv');
-  assert.deepEqual(parseConfig({ ...valid, targets: [{ ...vm, drainOnly: true }] }).targets, [{ ...vm, drainOnly: true }]);
+  assert.deepEqual(parseConfig({ ...valid, targets: [vm, ...valid.targets] }).targets, valid.targets);
+  assert.throws(() => parseConfig({ ...valid, targets: [vm] }), /invalid_windows_mcp_config/);
   assert.throws(() => parseConfig({ ...valid, targets: [{ ...valid.targets[0], drainOnly: true }] }), /invalid_windows_mcp_config/);
-  assert.throws(() => parseConfig({ ...valid, targets: [{ ...vm, desktopMcp: true }] }), /invalid_windows_mcp_config/);
 });

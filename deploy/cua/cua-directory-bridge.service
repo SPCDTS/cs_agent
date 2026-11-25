@@ -1,0 +1,22 @@
+[Unit]
+Description=Publish the read-only Cua directory to cs-agent
+Requires=cua-directory.service
+After=cua-directory.service network-online.target
+Wants=network-online.target
+
+[Service]
+User=cua-directory
+Group=cua-directory
+EnvironmentFile=/etc/cs-agent/cua/bridge.env
+Environment=CUA_SOCKET_PATH=/run/cs-agent-cua/cua.sock
+ExecStart=/usr/bin/node /opt/cs-agent/cua/reverse-mcp-bridge.cjs
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

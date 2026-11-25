@@ -95,6 +95,16 @@ const idOf = (text: string) => {
   return m[0];
 };
 
+async function waitForCompletedReports(subagentId: string, count: number) {
+  const owner = env.THREAD.getByName("owner");
+  await expect.poll(() => runInDurableObject(owner, (_instance, state) =>
+    state.storage.sql.exec<{ total: number }>(
+      "SELECT COUNT(*) AS total FROM inbound WHERE kind = 'subagent' AND instr(message_id, ?) = 1 AND status = 'done'",
+      `subagent-report:${subagentId}:`,
+    ).one().total,
+  ), { timeout: 10_000 }).toBe(count);
+}
+
 describe("owner 非 subagent 自切主模型与子任务模型", () => {
   it("支持查看目录（含模型级推理标记）、自下一回合空闲边界切换自身模型、设置子任务默认模型、按实例覆盖/切换子任务模型并在管理台透出", async () => {
     const { calls, outputs } = setupModels(
@@ -290,7 +300,7 @@ describe("owner 非 subagent 自切主模型与子任务模型", () => {
     const owner = env.THREAD.getByName("owner");
     expect(await owner.submit(input(1, "测试独立主模型可用性", 10000001))).toEqual({ status: "done" });
     spawnedId = idOf(outputs.parent[0]!);
-    await expect.poll(async () => (await owner.syncAdminView("owner"), true)).toBe(true);
+    await waitForCompletedReports(spawnedId, 1);
 
     // 管理台 PUT /admin/model 传 subagentModel: null 可在 Codex 凭据损坏时安全清除 subagentModel，且 PUT /admin/settings 兼容保留
     const viewBefore = await (await worker.fetch(new Request("https://test/admin/model", {
@@ -509,7 +519,8 @@ describe("owner 非 subagent 自切主模型与子任务模型", () => {
     const owner = env.THREAD.getByName("owner");
     expect(await owner.submit(input(1, "启动子任务", 10000001))).toEqual({ status: "done" });
     spawnedId = idOf(outputs.parent[0]!);
-    await expect.poll(() => calls.parent.length).toBeGreaterThanOrEqual(3);
+    await waitForCompletedReports(spawnedId, 1);
+    expect(calls.parent.length).toBeGreaterThanOrEqual(3);
 
     // 模拟该子任务此前持久化的 AgentDoc 与 meta 绑定在 openai-codex，随后 Registry 中 Codex 密文损坏并触发冷启动重开
     const subStub = env.SUBAGENT.getByName(subagentName("owner", spawnedId));
@@ -533,8 +544,9 @@ describe("owner 非 subagent 自切主模型与子任务模型", () => {
     await expect(registry.codexCatalog()).rejects.toThrow();
 
     expect(await owner.submit(input(2, "从损坏的 Codex 切到健康模型", 10000001))).toEqual({ status: "done" });
-    await expect.poll(() => calls.child.length).toBe(2);
-    await expect.poll(() => calls.parent.length).toBeGreaterThanOrEqual(6);
+    await waitForCompletedReports(spawnedId, 2);
+    expect(calls.child).toHaveLength(2);
+    expect(calls.parent.length).toBeGreaterThanOrEqual(6);
     expect(calls.child[1]!.model).toBe("pro");
     await subStub.syncAdminView();
     await owner.syncAdminView("owner");

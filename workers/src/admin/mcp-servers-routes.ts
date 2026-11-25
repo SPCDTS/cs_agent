@@ -2,9 +2,19 @@ import { Type } from "typebox";
 import type { AdminRoute } from "./routes";
 import { adminJson as json, HttpError, readAdminBody } from "./http";
 import { McpManageInput, manageMcp, mcpChange, setupFailure } from "../mcp/manage";
+import { connectionDigest } from "../mcp/names";
 
 export const MCP_SERVER_ROUTES: AdminRoute[] = [
-  { method: "GET", path: "/admin/mcp/servers", handle: async ({ env }) => json({ servers: await env.REGISTRY.getByName("main").mcpServersList(true) }) },
+  { method: "GET", path: "/admin/mcp/servers", handle: async ({ env }) => {
+    const records = await env.REGISTRY.getByName("main").mcpServersList();
+    const servers = await Promise.all(records.map(async record => {
+      if (record.server.transport.kind !== "reverse-websocket" || !record.credentialSet) return record;
+      const relay = env.BRIDGE.getByName("mcp-reverse:" + connectionDigest(record.server));
+      const online = await relay.reverseOnline().catch(() => undefined);
+      return { ...record, online };
+    }));
+    return json({ servers });
+  } },
   { method: "POST", path: "/admin/mcp/manage", handle: async ({ env, request }) => {
     try {
       const input = await readAdminBody(request, McpManageInput);

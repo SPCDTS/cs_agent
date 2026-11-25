@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { Execution, ExecutionStatus, WsbTarget } from "../src/domain.ts";
+import type { Execution, ExecutionStatus, Target } from "../src/domain.ts";
 import { evidence, executionFiles, Marker, SessionIntent, sessionFiles, wsbSessionDir } from "../src/wsb-evidence.ts";
 import { nativeWsb } from "../src/wsb-native.ts";
 import { createWsbBackend } from "../src/wsb.ts";
@@ -13,7 +13,7 @@ if (process.platform !== "win32") throw new Error("Windows required");
 const before = await nativeWsb.list();
 const state = await fs.mkdtemp(path.join(os.tmpdir(), "cs-agent-wsb-mcp-smoke-"));
 const sessions = [randomUUID(), randomUUID(), randomUUID()];
-const target: WsbTarget = { kind: "wsb", id: "wsb", memoryMb: 4096, idleTimeoutMs: 60000, maxLifetimeMs: 480000 };
+const target: Target = { kind: "wsb", id: "wsb", memoryMb: 4096, idleTimeoutMs: 60000, maxLifetimeMs: 480000 };
 let backend = createWsbBackend(state);
 console.log(JSON.stringify({ state }));
 

@@ -1,5 +1,8 @@
 // 每个凭据版本独占一个 DO；一个设备连接承载多个隔离的 SDK 会话。
-export const REVERSE_BYTES = 1024 * 1024;
+const MESSAGE_BYTES = 12 * 1024 * 1024;
+export const REVERSE_BYTES = MESSAGE_BYTES + 4096;
+const sessionId = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const messageHeader = /^\{"session":"([a-f0-9-]{36})","message":/;
 type Peer = { generation: string; session: string; active: boolean };
 export class ReverseRelay {
   constructor(private ctx: DurableObjectState) {}
@@ -13,11 +16,13 @@ export class ReverseRelay {
       return s.readyState === WebSocket.OPEN && peer.active && (generation === undefined || peer.generation === generation);
     });
   }
+  online() { return Boolean(this.live("device")); }
   upgrade(req: Request) {
     if (req.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response(null, { status: 426 });
     const device = new URL(req.url).pathname === "/register";
     let generation: string;
     if (device) {
+      this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
       generation = crypto.randomUUID();
       for (const previous of this.ctx.getWebSockets("device")) this.disconnect(previous);
     } else {
@@ -36,20 +41,38 @@ export class ReverseRelay {
     if (!active) return;
     try {
       if (typeof data !== "string" || Buffer.byteLength(data) > REVERSE_BYTES) throw new Error();
-      const payload = JSON.parse(data);
       if (session === "device") {
-        if (!payload || typeof payload.session !== "string" || !/^[a-f0-9-]{36}$/.test(payload.session) || typeof payload.message !== "object" || !payload.message) throw new Error();
+        if (data === "ping") { socket.send("pong"); return; }
+        // 大截图只拆外层信封，SDK 在目标线程中校验 JSON-RPC。避免共享中继解析并重新编码整份 Base64。
+        const header = messageHeader.exec(data);
+        if (header && sessionId.test(header[1]!) && data[header[0].length] === "{" && data.endsWith("}}")) {
+          const message = data.slice(header[0].length, -1);
+          if (Buffer.byteLength(message) > MESSAGE_BYTES) throw new Error();
+          this.live(header[1]!, generation)?.send(message);
+          return;
+        }
+        // 原协议接受不固定字段顺序的小信封。
+        if (Buffer.byteLength(data) > 1024 * 1024) throw new Error();
+        const payload = JSON.parse(data);
+        if (!payload || typeof payload.session !== "string" || !sessionId.test(payload.session)) throw new Error();
+        if (payload.close === true && !("message" in payload)) {
+          const peer = this.live(payload.session, generation);
+          if (peer) this.disconnect(peer, false);
+          return;
+        }
+        if (typeof payload.message !== "object" || !payload.message) throw new Error();
         this.live(payload.session, generation)?.send(JSON.stringify(payload.message));
       } else {
         const target = this.live("device", generation);
-        if (!target) throw new Error();
-        const frame = JSON.stringify({ session, message: payload });
-        if (Buffer.byteLength(frame) > REVERSE_BYTES) throw new Error();
-        target.send(frame);
+        if (!target || Buffer.byteLength(data) > MESSAGE_BYTES) throw new Error();
+        // 来自 SDK 的逻辑连接仅发送小型请求；先检查结构再包装，避免向设备交付无效信封。
+        const payload = JSON.parse(data);
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error();
+        target.send('{"session":"' + session + '","message":' + data + '}');
       }
     } catch { this.disconnect(socket); }
   }
-  disconnect(socket: WebSocket) {
+  disconnect(socket: WebSocket, notifyDevice = true) {
     const peer = socket.deserializeAttachment() as Peer;
     if (!peer.active) return;
     socket.serializeAttachment({ ...peer, active: false });
@@ -58,7 +81,7 @@ export class ReverseRelay {
       for (const s of this.ctx.getWebSockets("sessions")) {
         if ((s.deserializeAttachment() as Peer).generation === peer.generation) this.disconnect(s);
       }
-    } else {
+    } else if (notifyDevice) {
       try { this.live("device", peer.generation)?.send(JSON.stringify({ session: peer.session, close: true })); } catch { /* disconnected */ }
     }
   }

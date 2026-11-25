@@ -1,4 +1,4 @@
-import client from '../src/devices/cloudflare-client.json' with { type: 'json' };
+import client from '../src/cloudflare/cloudflare-client.json' with { type: 'json' };
 
 export async function ensureCloudflareClient(vars, env = process.env, request = fetch) {
   const pinned = vars.DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID || env.DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID;

@@ -402,14 +402,13 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
   const mcp = new ThreadMcp(host.database, host.env, registry, async (api, callContext) => {
     const input = await host.currentInput(harness, api, api.conversationId, callContext);
     return host.mcpAuthority(input);
-  }, await host.env.REGISTRY.getByName("main").mcpConfig(), { scope: memory.ns, callerNamespace: host.ctx.id.toString(),
+  }, await host.env.REGISTRY.getByName("main").mcpConfig(memory.ns), { scope: memory.ns, callerNamespace: host.ctx.id.toString(),
     current: (id, digest) => host.env.REGISTRY.getByName("main").mcpServerCurrent(id, digest) });
   await mcp?.restore();
   if (memory.ns === "owner") registry.install(createMcpManagementExtension(host.env, ownerMayManage,
-    async refresh => { await mcp.syncConfig(await host.env.REGISTRY.getByName("main").mcpConfig()); if (refresh) await mcp.refreshAll(); },
+    async refresh => { await mcp.syncConfig(await host.env.REGISTRY.getByName("main").mcpConfig(memory.ns)); if (refresh) await mcp.refreshAll(); },
     change => host.audit("mcp_management", { ...change, source: "agent" })));
   const codemode = installCodemode(registry, {
-    catalog: () => harness,
     allowed: async (api, callContext) => await codingAllowed(api, callContext) || await agentFileAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext)
       || (memory.ns === "owner" && await ownerMayManage(api, callContext)),
   });

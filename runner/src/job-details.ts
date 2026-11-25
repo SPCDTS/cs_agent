@@ -18,10 +18,7 @@ const targetFields = { id: Type.String(), instructions: Type.Optional(Type.Strin
 const executionSchema = Type.Object({
   id: Type.String(), requestId: Type.String(), deadline: Type.Number(), sessionId: Type.Optional(Type.String()),
   subject: Type.Object({ principal: Type.String(), scope: Type.String() }),
-  target: Type.Union([
-    Type.Object({ ...targetFields, kind: Type.Literal('hyperv'), vmId: Type.String(), credentialPath: Type.String(), guestWorkdir: Type.String() }),
-    Type.Object({ ...targetFields, kind: Type.Literal('wsb'), memoryMb: Type.Number(), idleTimeoutMs: Type.Number(), maxLifetimeMs: Type.Number() }),
-  ]),
+  target: Type.Object({ ...targetFields, kind: Type.Literal('wsb'), memoryMb: Type.Number(), idleTimeoutMs: Type.Number(), maxLifetimeMs: Type.Number() }),
   command: Type.Object({ kind: Type.Literal('powershell'), script: Type.String(), cwd: Type.Optional(Type.String()), timeoutMs: Type.Number() }),
 });
 

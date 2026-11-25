@@ -1,5 +1,4 @@
 import { Type, type Static, type TSchema } from "typebox";
-import { DeviceService } from "../src/devices/contracts";
 import { ModelSelectionSchema, SettingsSchema } from "../src/settings-schema";
 
 export const Diagnostic = Type.Object({
@@ -27,7 +26,7 @@ export const Overview = Type.Object({
   sendRules: Type.Array(Type.Object({ scope: Type.String(), until: Type.Number() })),
   schedule: Type.Union([Type.Object({ error: Type.String() }), Type.Object({ active: Type.Number(), paused: Type.Number() })]),
   events: Type.Union([Type.Object({ error: Type.String() }), Type.Object({ held: Type.Number() })]),
-  mcp: Type.Array(Type.Object({ server: Type.String(), device: Type.Optional(DeviceService), login: Type.String(), credential: Type.String(), enabled: Type.Boolean(), tools: nullable(Type.Number()) })),
+  mcp: Type.Array(Type.Object({ server: Type.String(), login: Type.String(), credential: Type.String(), enabled: Type.Boolean(), tools: nullable(Type.Number()) })),
   configured: Type.Record(Type.String(), Type.Boolean()),
 });
 export type Overview = Static<typeof Overview>;

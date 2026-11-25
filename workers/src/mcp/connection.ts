@@ -44,6 +44,10 @@ export class McpConnection {
     try {
       await connection.client.connect(connection.transport, { signal, timeout: limits.connectMs, maxTotalTimeout: limits.connectMs });
       signal.throwIfAborted();
+      const cua = connection.client.getServerVersion()?.name === 'cua-spaces';
+      if (cua !== (server.id === 'cua') || (cua && server.transport.kind !== 'reverse-websocket')) {
+        throw new McpConnectionError('cua_identity', 'Cua 聚合节点需要以 cua 登记反向连接');
+      }
       if (!connection.client.getServerCapabilities()?.tools && !connection.client.getServerCapabilities()?.resources) throw new McpConnectionError("protocol_error", "protocol_error");
       return connection;
     } catch (error) { await connection.close(); throw connection.failure ?? safeError(error); }

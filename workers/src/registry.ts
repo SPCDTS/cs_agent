@@ -17,16 +17,18 @@ import { AlertStore, type AlertInput, type TurnReport } from "./alerts";
 import { ownerIds } from "./policy";
 import { SKILLS_SCHEMA, parseSkill, type Skill, type SkillInput, type SkillSummary } from "./skills";
 import { McpServerStore, type ServerSetupInput, type ServerSelectionInput } from "./mcp/servers";
-import { CloudflareManagement } from './devices/cloudflare-management';
-import type { Change, CloudflareInventory, DeviceService } from './devices/contracts';
-import { CloudflareGrant } from './devices/cloudflare';
-import { DeviceStore, type DeviceCreate } from './devices/store';
+import { CloudflareManagement } from './cloudflare/cloudflare-management';
+import type { Change, CloudflareInventory } from './cloudflare/contracts';
+import { CloudflareGrant } from './cloudflare/cloudflare';
+import { retirePairedDevices } from './mcp/retire-paired-devices';
+import { CuaGrants } from './cua/grants';
+import type { CuaGrantInput, CuaNameInput } from './cua/contracts';
 import type { Static } from 'typebox';
 import { connectionDigest } from "./mcp/names";
 
 type TokenRow = { server_id: string; account_id: string; revision: string; issuer: string; access_token: string; refresh_token: string | null; scope: string | null; expires_at: number | null; updated_at: number };
 type LoginRow = { state: string; server_id: string; verifier: string; nonce_hash: string; created_at: number; expires_at: number };
-export type McpStatus = { server: string; device?: DeviceService; enabled: boolean; credential: "none" | "static" | "oauth"; login: "ok" | "needed" | "error" | "unconfigured" };
+export type McpStatus = { server: string; enabled: boolean; credential: "none" | "static" | "oauth"; login: "ok" | "needed" | "error" | "unconfigured" };
 const Pending = Type.Object({ verifier: Type.String(), config: Type.String(), discovery: DiscoverySchema }, { additionalProperties: false });
 const identity = (server: OAuthServer, field: string) => JSON.stringify([server.id, server.credential.accountId, server.credential.revision, field]);
 export type ModelView = { current: ModelSelection; subagent?: ModelSelection; revision: string; providers: ProviderStatus[]; codex: ChatGPTView };
@@ -44,6 +46,7 @@ export class RegistryDO extends DurableObject<Env> {
   private readonly vault = new TokenVault(this.env.OAUTH_STORE_KEY);
   private readonly httpCredentials = new SharedCredentials(this.ctx.storage.sql, this.vault);
   private readonly mcpServers = new McpServerStore(this.ctx.storage.sql, this.vault, this.env.PUBLIC_ORIGIN);
+  private readonly cuaGrants = new CuaGrants(this.ctx.storage);
   private readonly cloudflare = new CloudflareGrant(this.ctx.storage.sql, this.vault, this.env);
   private readonly cloudManager = new CloudflareManagement(this.ctx.storage.sql, scope => this.lock('cf:grant', async () => {
     if (!this.cloudflare.status().domain) throw new Error('device_cloudflare_denied');
@@ -51,7 +54,6 @@ export class RegistryDO extends DurableObject<Env> {
     if (!this.cloudflare.status().scopes.includes(scope)) throw new Error('device_cloudflare_denied');
     return settings;
   }));
-  private readonly devices = new DeviceStore(this.ctx.storage.sql, this.vault, this.mcpServers, this.env, () => this.lock('cf:grant', () => this.cloudflare.settings()));
   private readonly locks = new Map<string, Promise<unknown>>();
   private readonly access = new Map<string, Promise<string | undefined>>();
   private readonly credentials = new SqlCredentialStore(this.ctx.storage.sql, this.vault);
@@ -78,7 +80,7 @@ export class RegistryDO extends DurableObject<Env> {
       ${CHATGPT_SCHEMA}
       ${SKILLS_SCHEMA};
     `);
-    ctx.storage.transactionSync(() => { this.mcpServers.initialize(); this.devices.initialize(); this.cloudflare.initialize(); this.cloudManager.initialize(); });
+    ctx.storage.transactionSync(() => { this.mcpServers.initialize(); this.cuaGrants.initialize(); retirePairedDevices(ctx.storage.sql); this.cloudflare.initialize(); this.cloudManager.initialize(); });
   }
 
   cloudflareStart() { return this.cloudflare.start(); }
@@ -89,14 +91,7 @@ export class RegistryDO extends DurableObject<Env> {
   cloudflarePropose(input: Change) { return this.cloudManager.propose(input); }
   cloudflareChanges() { return this.cloudManager.list(); }
   cloudflareReview(id: string, approve: boolean) { return this.cloudManager.review(id, approve); }
-  devicesList() {
-    const list = this.devices.list(), cloudflare = this.cloudflare.status();
-    return { ...list, cloudflare, configured: cloudflare.domain ? !cloudflare.reauth : list.configured };
-  }
-  deviceCreate(input: Static<typeof DeviceCreate>) { return this.lock('device:' + input.id, () => this.devices.create(input)); }
-  deviceClaim(id: string, token: string, claim: string) { return this.lock('device:' + id, () => this.devices.claim(id, token, claim)); }
-  deviceReady(id: string, token: string, claim: string) { return this.lock('device:' + id, () => this.devices.ready(id, token, claim)); }
-  deviceRevoke(id: string) { return this.lock('device:' + id, () => this.devices.revoke(id)); }
+  cloudflareStatus() { return this.cloudflare.status(); }
 
   sharedCredentialList(scope: string) { return this.httpCredentials.list(scope); }
   async sharedCredentialSave(change: WriteCredential, bytes: Uint8Array) {
@@ -122,12 +117,24 @@ export class RegistryDO extends DurableObject<Env> {
     });
   }
 
-  mcpConfig(): McpConfig { return { ...this.mcpServers.config(), deviceLabels: this.devices.toolLabels() }; }
-  mcpServersList(includeDeviceLabels = false) {
-    const records = this.mcpServers.list();
-    const labels = includeDeviceLabels ? this.devices.serviceLabels(records.map(({ server }) => server.id)) : undefined;
-    return records.map(record => ({ ...record, device: labels?.get(record.server.id) }));
+  mcpConfig(scope?: string): McpConfig {
+    const config = this.mcpServers.config();
+    if (scope !== undefined && scope !== 'owner') {
+      const server = config.servers.find(row => row.id === 'cua' && row.enabled);
+      config.cuaSpaces = config.enabled && server?.access.revision ? this.cuaGrants.assigned(scope,server.access.revision) : [];
+    }
+    return config;
   }
+  cuaAssigned(scope:string, serverRevision:string) { return MCP_CONFIG.enabled ? this.cuaGrants.assigned(scope,serverRevision) : []; }
+  cuaGrantVersions(scope:string, serverRevision:string): Record<string,string> { return MCP_CONFIG.enabled ? this.cuaGrants.grantVersions(scope,serverRevision) : {}; }
+  cuaDirectoryToolsJson(scope:string, serverRevision:string, configDigest:string) {
+    if (this.cuaAssigned(scope,serverRevision).length) return this.mcpServers.cuaDirectoryToolsJson(configDigest);
+  }
+  cuaGrantsList() { return this.cuaGrants.list(); }
+  cuaNames(ids:string[],serverRevision:string) { return this.cuaGrants.names(ids,serverRevision); }
+  cuaRename(input:CuaNameInput,verifiedRevision:string) { return this.cuaGrants.rename(input,verifiedRevision); }
+  cuaGrantsPut(input:CuaGrantInput, verifiedRevision?:string) { return this.cuaGrants.replace(input,verifiedRevision); }
+  mcpServersList() { return this.mcpServers.list(); }
   mcpServerGet(id: string) { return this.mcpServers.get(id); }
   mcpServerCurrent(id: string, digest: string) { return this.mcpServers.current(id, digest); }
   mcpServerPut(input: ServerSetupInput, expected: string) { return this.mcpServers.put(input, expected); }
@@ -528,9 +535,8 @@ export class RegistryDO extends DurableObject<Env> {
     });
   }
 
-  async status(includeDeviceLabels = false): Promise<McpStatus[]> {
+  async status(): Promise<McpStatus[]> {
     const servers = this.mcpServers.config().servers;
-    const labels = includeDeviceLabels ? this.devices.serviceLabels(servers.map(server => server.id)) : undefined;
     return Promise.all(servers.map(async server => {
       let login: McpStatus["login"] = "ok";
       if (isOAuthServer(server)) {
@@ -542,7 +548,7 @@ export class RegistryDO extends DurableObject<Env> {
         }
       } else if (server.credential.kind === "managed") login = this.mcpServers.get(server.id).credentialSet ? "ok" : "needed";
       else if (server.credential.kind === "external-account" && Object.values(server.transport.secretHeaders).some(ref => !referencedSecret(this.env, ref))) login = "unconfigured";
-      return { server: server.id, device: labels?.get(server.id), enabled: MCP_CONFIG.enabled && server.enabled,
+      return { server: server.id, enabled: MCP_CONFIG.enabled && server.enabled,
         credential: server.credential.kind === "external-account" || server.credential.kind === "managed" ? "static" : server.credential.kind, login };
     }));
   }

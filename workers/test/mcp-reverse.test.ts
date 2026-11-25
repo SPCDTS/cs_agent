@@ -79,6 +79,73 @@ it("authenticates registration, probes a real SDK server and isolates replaced/d
   reconnected.close(1000); original.close(1000);
 });
 
+it("reports registration to admins and carries large replies, heartbeat and independent session close", async () => {
+  const registry = env.REGISTRY.getByName("main");
+  const draft = await registry.mcpServerPut({ id, transport: "reverse-websocket" }, "absent");
+  const { server } = await registry.mcpCredentialPut(id, draft.revision, { Authorization: bearer });
+  const relay = env.BRIDGE.getByName("mcp-reverse:" + connectionDigest(server));
+  async function adminOnline() {
+    const res = await worker.fetch(new Request(env.PUBLIC_ORIGIN + "/admin/mcp/servers",
+      { headers: { Authorization: "Bearer synthetic-admin" } }), { ...env, ADMIN_TOKEN: "synthetic-admin" });
+    expect(res.status).toBe(200);
+    const { servers } = await res.json<{ servers: { server: { id: string }; online?: boolean }[] }>();
+    return servers.find(row => row.server.id === id)?.online;
+  }
+  async function openSession() {
+    const response = await relay.fetch("https://relay/session", { headers: { Upgrade: "websocket" } });
+    expect(response.status).toBe(101);
+    response.webSocket!.accept();
+    return response.webSocket!;
+  }
+  function nextMessage(socket: WebSocket) {
+    return new Promise<string>(resolve => socket.addEventListener("message", e => resolve(String(e.data)), { once: true }));
+  }
+  function nextClose(socket: WebSocket) {
+    return new Promise<void>(resolve => socket.addEventListener("close", () => resolve(), { once: true }));
+  }
+  expect(await adminOnline()).toBe(false);
+  const device = (await upgrade(bearer)).webSocket!;
+  device.accept();
+  const first = await openSession(), second = await openSession();
+  try {
+    expect(await adminOnline()).toBe(true);
+    const heartbeat = nextMessage(device);
+    device.send("ping");
+    expect(await heartbeat).toBe("pong");
+
+    const ping = { jsonrpc: "2.0", id: 1, method: "ping" };
+    async function identify(socket: WebSocket) {
+      const received = nextMessage(device);
+      socket.send(JSON.stringify(ping));
+      const frame = JSON.parse(await received);
+      expect(frame.message).toEqual(ping);
+      return frame.session as string;
+    }
+    const firstId = await identify(first), secondId = await identify(second);
+    expect(firstId).not.toBe(secondId);
+    const large = { jsonrpc: "2.0", id: 1, result: { text: "x".repeat(1024 * 1024 + 1) } };
+    const received = nextMessage(first);
+    device.send(JSON.stringify({ session: firstId, message: large }));
+    expect(await received).toBe(JSON.stringify(large));
+
+    const closed = nextClose(first);
+    device.send(JSON.stringify({ session: firstId, close: true }));
+    await closed;
+    expect(await adminOnline()).toBe(true);
+    const remaining = nextMessage(second);
+    const reply = { jsonrpc: "2.0", id: 1, result: {} };
+    device.send(JSON.stringify({ message: reply, session: secondId }));
+    expect(JSON.parse(await remaining)).toEqual(reply);
+
+    const disconnected = nextClose(second);
+    device.close(1000);
+    await disconnected;
+    expect(await adminOnline()).toBe(false);
+  } finally {
+    first.close(1000); second.close(1000); device.close(1000);
+  }
+});
+
 it("requires the normal approval and preserves unknown outcome when an approved write loses its reply", async () => {
   const registry = env.REGISTRY.getByName("main");
   let record = await registry.mcpServerPut({ id, transport: "reverse-websocket" }, "absent");

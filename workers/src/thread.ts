@@ -322,7 +322,7 @@ export class ThreadDO extends DurableObject<Env> {
   }
 
   private async admit({ harness, root, mcp }: Runtime, row: InboundRow): Promise<Submission> {
-    if (mcp) await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig());
+    if (mcp) await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig(await this.namespace()));
     if (row.persona_text === null) await this.database.run("UPDATE inbound SET persona_text=? WHERE message_id=? AND persona_text IS NULL", (await this.env.REGISTRY.getByName("main").persona()).text, row.message_id);
     let whenBusy = row.when_busy;
     if (!whenBusy) {
