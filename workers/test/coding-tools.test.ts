@@ -1,5 +1,5 @@
 import { env, reset, runInDurableObject } from "cloudflare:test";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { SandboxDO } from "../src/sandbox/do";
 import { CLOUDFLARE_INSTRUCTIONS, CLOUDFLARE_RESOURCE_INSTRUCTIONS } from "../src/sandbox/registration";
@@ -21,8 +21,8 @@ describe("coding tools suite", () => {
   const nextInput = (text: string, userId = 10000001, groupId?: number, mention = false) => input(++seq, text, userId, groupId, mention);
   
   afterEach(async () => {
-    vi.restoreAllMocks();
     await reset();
+    vi.restoreAllMocks();
   });
   
   const CODING_TOOLS = ["read", "write", "edit", "bash"];
@@ -218,7 +218,7 @@ describe("coding tools suite", () => {
       return { stdout: "ok", stderr: "", code: 0, timedOut: false, truncated: false };
     });
     const seen = scriptedModel([{ name: "codemode", args: { code: 'const list=await tools.sandbox_list({}); const created=await tools.sandbox_create({providerId:"cloudflare",sourceId:list.assignedSandboxId}); text(created); text(await tools.bash({sandboxId:created.id,command:"pwd"})); text(await tools.bash({command:"pwd"}));' } }]);
-    await env.THREAD.getByName("owner").submit(nextInput("创建独立沙箱", 10000001));
+    expect(await env.THREAD.getByName("owner").submit(nextInput("创建独立沙箱", 10000001))).toEqual({ status: "done" });
     expect(seen.outputs.join("\n")).toContain('"kind":"cloudflare"');
     expect(targets).toHaveLength(2);
     expect(targets[0]).not.toBe(targets[1]);
@@ -228,7 +228,8 @@ describe("coding tools suite", () => {
 
 describe("skills suite", () => {
   const TOKEN = "test-admin-only";
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  beforeEach(async () => { await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   
   function admin(method: string, path: string, body?: unknown, token: string | null = TOKEN) {
     const headers: Record<string, string> = {};
