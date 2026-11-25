@@ -23,7 +23,7 @@ export function pairingCaddy(section: string, capacity?: string) {
   switch (section) {
     case 'servers': return slots.map(s => `servers 127.0.0.1:${s.directoryPort} {\n protocols h1 h2 h2c\n}`).join('\n');
     case 'join': return slots.map(s => `import join ${s.machineId} ${s.relayPort}`).join('\n');
-    case 'directory': return slots.map(s => `http://127.0.0.1:${s.directoryPort} {\n import directory ${s.machineId} ${s.relayPort}\n}`).join('\n');
+    case 'directory': return slots.map(s => `http://127.0.0.1:${s.directoryPort} {\n import device-execution ${s.machineId} ${s.relayPort}\n import directory ${s.machineId} ${s.relayPort}\n}`).join('\n');
     default: throw new Error('invalid_section');
   }
 }

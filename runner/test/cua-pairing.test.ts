@@ -21,11 +21,15 @@ test('同一张配对码绑定首台设备，恢复、重试、退役和耗尽�
   assert.deepEqual(store.request({...claim,client:other}),{status:'used'});
   writeFileSync(join(root,'paired-1','retired'),'');
   assert.equal(store.request(claim).status,'used');
+  const dirCaddy = pairingCaddy('directory');
   for (let i=2; i<=8; i++) {
     const result = store.request({...claim,invitation:randomUUID(),client:i.toString().repeat(64)});
     assert.equal(result.machineId,'paired-'+i);
     assert.match(pairingCaddy('join'),new RegExp('import join paired-'+i+' '+(19100+i)));
-    assert.match(pairingCaddy('directory'),new RegExp('127[.]0[.]0[.]1:'+(19200+i)));
+    assert.match(dirCaddy,new RegExp('127[.]0[.]0[.]1:'+(19200+i)));
+  }
+  for (let i=1; i<=8; i++) {
+    assert.match(dirCaddy,new RegExp(`http://127\\.0\\.0\\.1:${19200+i} \\{\\n import device-execution paired-${i} ${19100+i}\\n import directory paired-${i} ${19100+i}\\n\\}`));
   }
   assert.equal(store.request({action:'ready'}).status,'full');
   assert.equal(store.request({...claim,invitation:randomUUID()}).status,'full');

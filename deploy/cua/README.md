@@ -106,10 +106,10 @@ VPS 首次启用管理台配对后，管理员只需在「权限与运维 → Cu
      node /opt/cs-agent/cua/reverse-mcp-bridge.cjs --print-pair-caddy "$section" > "/etc/caddy/cua-pair/$section.caddy"
    done
    ```
-3. 在 Caddyfile 全局选项的花括号内加入 `import /etc/caddy/cua-pair/servers.caddy`。在 Relay 公网站点的兜底 `handle` 前加入 `import /etc/caddy/cua-pair/join.caddy`。在所有站点之外加入 `import /etc/caddy/cua-pair/directory.caddy`。三个文件复用本仓库 Caddyfile 中的 `(join)` 和 `(directory)` 定义，升级旧配置时先补齐这两个片段。校验并重载 Caddy，沿用既有证书策略和 443/TCP 入口。
+3. 在 Caddyfile 全局选项的花括号内加入 `import /etc/caddy/cua-pair/servers.caddy`。在 Relay 公网站点的兜底 `handle` 前加入 `import /etc/caddy/cua-pair/join.caddy`。在所有站点之外加入 `import /etc/caddy/cua-pair/directory.caddy`。三个文件复用本仓库 Caddyfile 中的 `(join)`、`(device-execution)` 和 `(directory)` 定义，升级旧配置时先补齐这三个片段。校验并重载 Caddy，沿用既有证书策略和 443/TCP 入口。
 4. 将 `CUA_PAIR_RELAY_URL=wss://relay.example.org` 加入原有的 `/etc/cs-agent/cua/bridge.env`（换成实际域名）。执行 `systemctl daemon-reload` 和 `systemctl restart cua-directory-bridge`。此后只有实际兑换的设备才启动原生 Relay。桥进程以 `cua-directory` 身份写入专用状态，在设备握手成功后调用原生 `cua spaces add`。
 
-默认预留 8 个名额。扩大容量时，可在生成三个配置片段的命令环境和桥的环境文件中设置相同的 `CUA_PAIR_CAPACITY`，如 `16`。每个端口段最多容纳 100 台，扩容前检查新增端口是否空闲，重新生成片段、重载 Caddy 并重启桥，保留既有槽位。每台设备独占固定的 Relay 和回环目录端口。默认只开放设备发现和 Driver 工具查询。按下文「为设备启用执行能力」在目标设备的回环站点显式添加执行路由。请备份权限为 0700 的 `/var/lib/cs-agent-cua-pairing` 目录及 Cua 目录状态。已分配的端口永久保留，恢复备份时应与已有分配使用同一组身份。若丢失身份数据，应先停用配对、轮换桥凭据使旧分配失效，再重建。退役单台配对设备时先撤销会话分配，在其 `paired-N` 状态目录内创建空的 `retired` 文件，桥会停止该 Relay。再按「撤销与轮换」移除目录条目，保留槽位目录防止旧授权漂移。
+默认预留 8 个名额。扩大容量时，可在生成三个配置片段的命令环境和桥的环境文件中设置相同的 `CUA_PAIR_CAPACITY`，如 `16`。每个端口段最多容纳 100 台，扩容前检查新增端口是否空闲，重新生成片段、重载 Caddy 并重启桥，保留既有槽位。每台设备独占固定的 Relay 和回环目录端口。`directory.caddy` 默认同时开启目录查询与设备执行路由（`device-execution`），实际可调用的工具与会话范围由管理台设备授权与工具只读开关控制；若需将某个配对槽位降回仅目录模式，可在 `directory.caddy` 中移除该槽位的 `import device-execution` 并重载 Caddy。请备份权限为 0700 的 `/var/lib/cs-agent-cua-pairing` 目录及 Cua 目录状态。已分配的端口永久保留，恢复备份时应与已有分配使用同一组身份。若丢失身份数据，应先停用配对、轮换桥凭据使旧分配失效，再重建。退役单台配对设备时先撤销会话分配，在其 `paired-N` 状态目录内创建空的 `retired` 文件，桥会停止该 Relay。再按「撤销与轮换」移除目录条目，保留槽位目录防止旧授权漂移。
 
 ## 登记一台设备
 
