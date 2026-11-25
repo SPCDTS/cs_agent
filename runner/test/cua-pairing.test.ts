@@ -34,11 +34,15 @@ test('同一张配对码绑定首台设备，恢复、重试、退役和耗尽�
   assert.throws(() => pairingCaddy('directory','101'));
 });
 
-test('Windows PowerShell 接入、私有目录及无配对码重连',{skip:process.platform!=='win32'},async t => {
-  const {execFileSync} = await import('node:child_process');
-  const {fileURLToPath} = await import('node:url');
-  const dir = mkdtempSync(join(tmpdir(),'cua-windows-'));
-  t.after(() => rmSync(dir,{recursive:true,force:true}));
-  execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-File',fileURLToPath(new URL('./fixtures/cua-pair-windows.ps1',import.meta.url)),
-    dir,fileURLToPath(new URL('../../workers/device/join.ps1',import.meta.url)),process.execPath],{timeout:45_000});
-});
+for (const shell of ['powershell.exe','pwsh.exe']) {
+  test(shell+' 接入、私有目录及无配对码重连',{skip:process.platform!=='win32'},async t => {
+    const {execFileSync} = await import('node:child_process');
+    const {fileURLToPath} = await import('node:url');
+    const dir = mkdtempSync(join(tmpdir(),'cua-windows-'));
+    t.after(() => rmSync(dir,{recursive:true,force:true}));
+    const env = {...process.env};
+    for (const key of Object.keys(env)) if (key.toUpperCase() === 'PSMODULEPATH') delete env[key];
+    execFileSync(shell,['-NoProfile','-NonInteractive','-File',fileURLToPath(new URL('./fixtures/cua-pair-windows.ps1',import.meta.url)),
+      dir,fileURLToPath(new URL('../../workers/device/join.ps1',import.meta.url)),process.execPath],{timeout:45_000,env});
+  });
+}

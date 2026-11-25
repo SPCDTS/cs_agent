@@ -20,13 +20,19 @@ function Invoke-WebRequest($Uri,$OutFile,$Method,$Headers,$MaximumRedirection,[s
   Add-Content -LiteralPath (Join-Path $Temp 'claims') -Value 'claimed'
   return [pscustomobject]@{Content=("wss://relay.example.test","paired-1",('a'*64),('b'*64) -join "`n")}
 }
-function Get-FileHash($LiteralPath) {
-  if ((Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath).Hash -ne (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Node).Hash) { throw 'Wrong fixture binary.' }
-  return @{Hash='7ef20a5c8cf9efc2adf1ad15344189094a793ddfed3c0b9a1e17a4733f9af5c7'}
-}
-& $Bootstrap 'https://agent.example.test' 'fixture'
+$stream = [IO.File]::OpenRead($Node)
+try { $digest = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($stream)).Replace('-','').ToLowerInvariant() }
+finally { $stream.Dispose() }
+$fixture = Join-Path $Temp 'fixture.ps1'
+[IO.File]::WriteAllText($fixture,[IO.File]::ReadAllText($Bootstrap).Replace('7ef20a5c8cf9efc2adf1ad15344189094a793ddfed3c0b9a1e17a4733f9af5c7',$digest))
+& $fixture 'https://agent.example.test' 'fixture'
 if ($LASTEXITCODE) { throw 'Join failed.' }
 $local = Get-ChildItem -LiteralPath $Temp -Filter connect.ps1 -Recurse | Select-Object -First 1
 & $local.FullName 'https://agent.example.test'
 if ($LASTEXITCODE -or @(Get-Content -LiteralPath 'claims').Count -ne 1 -or (Get-Content -LiteralPath 'joined').Count -ne 2) { throw 'Reconnect failed.' }
-if (!(Get-Acl -LiteralPath $local.DirectoryName).AreAccessRulesProtected) { throw 'Credential directory still inherits permissions.' }
+$acl = if ($PSVersionTable.PSEdition -eq 'Desktop') {
+  [IO.Directory]::GetAccessControl($local.DirectoryName)
+} else {
+  [IO.FileSystemAclExtensions]::GetAccessControl($local.Directory)
+}
+if (!$acl.AreAccessRulesProtected) { throw 'Credential directory still inherits permissions.' }

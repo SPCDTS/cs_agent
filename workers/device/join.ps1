@@ -6,6 +6,10 @@ if ($arch -ne 'AMD64') { throw 'This Cua release requires Windows x64.' }
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 function Hex([byte[]]$Bytes) { [BitConverter]::ToString($Bytes).Replace('-','').ToLowerInvariant() }
 $sha = [Security.Cryptography.SHA256]::Create()
+function FileDigest([string]$Path) {
+  $stream = [IO.File]::OpenRead($Path)
+  try { Hex ($sha.ComputeHash($stream)) } finally { $stream.Dispose() }
+}
 $prefix = (Hex ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Origin)))).Substring(0,16)
 $base = Join-Path $env:LOCALAPPDATA "cs-agent\cua\$prefix"
 [void][IO.Directory]::CreateDirectory($base)
@@ -14,7 +18,11 @@ $acl = [Security.AccessControl.DirectorySecurity]::new()
 $acl.SetAccessRuleProtection($true,$false)
 $acl.SetOwner($userSid)
 $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($userSid,'FullControl','ContainerInherit, ObjectInherit','None','Allow'))
-Set-Acl -LiteralPath $base -AclObject $acl
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+  [IO.Directory]::SetAccessControl($base,$acl)
+} else {
+  [IO.FileSystemAclExtensions]::SetAccessControl([IO.DirectoryInfo]::new($base),$acl)
+}
 $work = Join-Path $base ([Guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($work)
 $bin = Join-Path $base 'cua-spacesd.exe'
@@ -23,10 +31,10 @@ try {
   $connect = Join-Path $base 'connect.ps1'
   if ($PSCommandPath -ne $connect) { Copy-Item -LiteralPath $PSCommandPath -Destination $connect -Force }
   $want = '7ef20a5c8cf9efc2adf1ad15344189094a793ddfed3c0b9a1e17a4733f9af5c7'
-  if (!(Test-Path -LiteralPath $bin) -or (Get-FileHash -LiteralPath $bin).Hash -ne $want) {
+  if (!(Test-Path -LiteralPath $bin) -or (FileDigest $bin) -ne $want) {
     $file = Join-Path $work 'client.exe'
     Invoke-WebRequest -UseBasicParsing 'https://github.com/trycua/cua/releases/download/cua-spacesd-v0.17.2/cua-spacesd-x86_64-pc-windows-msvc.exe' -OutFile $file
-    if ((Get-FileHash -LiteralPath $file).Hash -ne $want) { throw 'Cua SHA-256 mismatch.' }
+    if ((FileDigest $file) -ne $want) { throw 'Cua SHA-256 mismatch.' }
     Move-Item -LiteralPath $file -Destination $bin -Force
   }
   if (!(Test-Path -LiteralPath $profileDir)) {
