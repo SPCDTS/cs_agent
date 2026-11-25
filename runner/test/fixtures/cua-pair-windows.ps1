@@ -28,6 +28,11 @@ $fixture = Join-Path $Temp 'fixture.ps1'
 & $fixture 'https://agent.example.test' 'fixture'
 if ($LASTEXITCODE) { throw 'Join failed.' }
 $local = Get-ChildItem -LiteralPath $Temp -Filter connect.ps1 -Recurse | Select-Object -First 1
+$guard = [IO.File]::Open((Join-Path $local.DirectoryName 'join.lock'),'Open','ReadWrite','None')
+try {
+  & $local.FullName 'https://agent.example.test'
+  if (@(Get-Content -LiteralPath 'joined').Count -ne 1) { throw 'Concurrent join was not suppressed.' }
+} finally { $guard.Dispose() }
 & $local.FullName 'https://agent.example.test'
 if ($LASTEXITCODE -or @(Get-Content -LiteralPath 'claims').Count -ne 1 -or (Get-Content -LiteralPath 'joined').Count -ne 2) { throw 'Reconnect failed.' }
 $acl = if ($PSVersionTable.PSEdition -eq 'Desktop') {

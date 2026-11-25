@@ -12,6 +12,8 @@ case "$(uname -m)" in
 esac
 base="$HOME/Library/Application Support/cs-agent/cua/$(printf %s "$origin" | shasum -a 256 | cut -c1-16)"
 mkdir -p "$base"
+exec 9>>"$base/join.lock"
+/usr/bin/lockf -s -t 0 9 || { echo '这台设备已有连接进程。' >&2; exit 1; }
 work=$(mktemp -d "$base/.join.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT
 cp "$0" "$work/connect.sh"
@@ -43,8 +45,7 @@ if [[ ! -d "$profile" ]]; then
   printf '%s\n' "$machine" > "$work/device/id"
   printf '%s\n' "$registration" > "$work/device/registration.token"
   printf '%s\n' "$device" > "$work/device/device.token"
-  # BSD mv -h 不保证已存在的目标目录不被嵌套，用同卷的 rename(2) 语义发布。
-  /usr/bin/perl -e 'rename($ARGV[0],$ARGV[1]) or exit(! -d $ARGV[1]);' "$work/device" "$profile"
+  mv "$work/device" "$profile"
 fi
 rm -rf "$work"
 trap - EXIT
