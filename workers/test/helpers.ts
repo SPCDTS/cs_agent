@@ -3,25 +3,16 @@ import { env, SELF } from "cloudflare:test";
 import { expect } from "vitest";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import { normalizeMessage, type InboundInput } from "../src/policy";
+import { event, input } from "./fixtures/qq";
 import { threadView } from "../src/admin/read-views";
+
+export { event, input };
 
 const Action = Type.Object({ action: Type.String(), echo: Type.String(), params: Type.Object({
   user_id: Type.Optional(Type.String()), group_id: Type.Optional(Type.String()),
   message: Type.Optional(Type.Array(Type.Object({ type: Type.String(), data: Type.Object({ text: Type.Optional(Type.String()), qq: Type.Optional(Type.String()) }) }))),
 }) });
 
-export function event(messageId: number, text = "你好", userId = 10000003, groupId?: number, mention = false) {
-  const message = [{ type: "text", data: { text } }];
-  return { post_type: "message", message_type: groupId ? "group" : "private", self_id: 10000000,
-    user_id: userId, message_id: messageId, time: 1700000000 + messageId, sender: { nickname: `成员${userId}` }, group_id: groupId,
-    message: mention ? [{ type: "at", data: { qq: "10000000" } }, ...message] : message };
-}
-export function input(messageId: number, text = "你好", userId = 10000003, groupId?: number, mention = false): InboundInput {
-  const value = normalizeMessage(event(messageId, text, userId, groupId, mention));
-  if (!value) throw new Error("invalid fixture");
-  return value;
-}
 export function reply(socket: WebSocket, echo: string, messageId = 90000001) {
   socket.send(JSON.stringify({ status: "ok", retcode: 0, data: { message_id: messageId }, echo }));
 }

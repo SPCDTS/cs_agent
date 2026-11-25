@@ -37,6 +37,57 @@ async function seed(scope: string) {
     await s.storage.deleteAlarm();
   });
 }
+const tick = () => new Promise<void>(resolve => setTimeout(resolve, 5));
+async function seedStorageProofs(
+  storage: DurableObjectStorage,
+  count: number,
+  options: { generation: number; completed: boolean; startedAt: number; prefix: string },
+) {
+  const entries: [string, unknown][] = [];
+  for (let n = 0; n < count; n++) {
+    const id = `${options.prefix}-${n}`;
+    entries.push([
+      "agent-sent:" + id,
+      options.completed
+        ? {
+            inputHash: "seed-" + id,
+            generation: options.generation,
+            hash: "seed-hash-" + n,
+            receipt: { messageId: "agent:" + String(n).padStart(64, "0"), status: "accepted" },
+            nonce: "seed-nonce-" + n,
+            startedAt: options.startedAt,
+          }
+        : {
+            inputHash: "seed-" + id,
+            generation: options.generation,
+            nonce: "seed-nonce-" + n,
+            startedAt: options.startedAt,
+          },
+    ]);
+  }
+  for (let i = 0; i < entries.length; i += 128) {
+    await storage.put(Object.fromEntries(entries.slice(i, i + 128)));
+  }
+}
+async function seedProofs(
+  stub: DurableObjectStub,
+  count: number,
+  options: { generation: number; completed: boolean; startedAt: number; prefix: string },
+) {
+  await runInDurableObject<DurableObject, void>(stub, async (_i, s) => {
+    await seedStorageProofs(s.storage, count, options);
+  });
+}
+async function seedProofsTo(
+  stub: DurableObjectStub,
+  targetTotal: number,
+  options: { generation: number; completed: boolean; startedAt: number; prefix: string },
+) {
+  await runInDurableObject<DurableObject, void>(stub, async (_i, s) => {
+    const existing = (await s.storage.list({ prefix: "agent-sent:" })).size;
+    if (existing < targetTotal) await seedStorageProofs(s.storage, targetTotal - existing, options);
+  });
+}
 async function reserve(scope: string, args: AgentSend, id: string, at = Date.now()): Promise<AgentTicket> {
   return runInDurableObject(env.THREAD.getByName(scope), async instance => (instance as any).reserveAgentMessage(args, id, at));
 }
@@ -77,23 +128,27 @@ async function child(parent: string) {
 }
 
 it.each(["owner", group])("%s crosses two full proof cycles without resetting and rejects retired, altered and stale-generation calls", async from => {
-  const to = from === "owner" ? group : "owner";
+  const to = from === "owner" ? group : "owner", fromStub = env.THREAD.getByName(from);
   await seed(from); await seed(to);
-  const args = { to, text: "original" }, at = Date.now(), ticket = await reserve(from, args, "original", at);
+  const args = { to, text: "original" }, at = Date.now() - 30, ticket = await reserve(from, args, "original", at);
   const receipt = await deliver(from, args, "original", ticket);
   expect((await deliver(from, args, "original", ticket)).status).toBe("duplicate");
   await expect(deliver(from, { to, text: "altered" }, "original", ticket)).rejects.toThrow("agent_message_conflict");
-  await burst(from, to, SENT_LIMIT * 2 + 5);
-  console.log("proof-cycle-complete", { from, delivered: SENT_LIMIT * 2 + 6 });
+  await tick();
+  await seedProofsTo(fromStub, SENT_LIMIT - 1, { generation: 0, completed: true, startedAt: Date.now() - 15, prefix: "cycle1" });
+  await burst(from, to, 4, "c1");
+  await tick();
+  await seedProofsTo(fromStub, SENT_LIMIT - 1, { generation: 0, completed: true, startedAt: Date.now() - 2, prefix: "cycle2" });
+  await burst(from, to, 4, "c2");
   await expect(deliver(from, args, "original", ticket)).rejects.toThrow("agent_message_expired");
   await expect(reserve(from, args, "original", at)).rejects.toThrow("agent_message_expired");
-  await runInDurableObject(env.THREAD.getByName(from), async (_i, s) => {
+  await runInDurableObject(fromStub, async (_i, s) => {
     expect(await s.storage.get("agent-sent:" + receipt.messageId)).toBeUndefined();
     expect(await s.storage.get<any>("agent-proof-state")).toMatchObject({ generation: 0 });
     expect((await s.storage.list({ prefix: "agent-proof" })).size).toBe(1);
   });
   await runInDurableObject(env.THREAD.getByName(to), async (_i, s) => {
-    expect(s.storage.sql.exec<any>("SELECT count(*) AS n FROM inbound WHERE kind='agent'").one().n).toBe(SENT_LIMIT * 2 + 6);
+    expect(s.storage.sql.exec<any>("SELECT count(*) AS n FROM inbound WHERE kind='agent'").one().n).toBe(9);
     s.storage.sql.exec("UPDATE inbound SET status='done'"); await s.storage.deleteAlarm();
   });
   const lastArgs = { to, text: "last" }, lastTicket = await reserve(from, lastArgs, "last");
@@ -102,40 +157,49 @@ it.each(["owner", group])("%s crosses two full proof cycles without resetting an
   vi.mocked(ThreadDO.prototype.alarm).mockRestore();
   expect(await env.THREAD.getByName(to).resetSession(to, "target-reset", "archive")).toMatchObject({ generation: 1 });
   await expect(deliver(from, lastArgs, "last", lastTicket)).rejects.toThrow("agent_session_revoked");
-}, 120_000);
+});
 
 it("protects reserved and unknown slots across GC and real eviction; definite preparation refusals are reclaimable", async () => {
+  const ownerStub = env.THREAD.getByName("owner");
   await seed("owner");
-  const args = { to: group, text: "pending" }, pending = await reserve("owner", args, "pending");
+  const baseAt = Date.now() - 30;
+  const args = { to: group, text: "pending" }, pending = await reserve("owner", args, "pending", baseAt);
   await expect(deliver("owner", args, "pending", pending)).rejects.toThrow("agent_recipient_not_ready");
-  const prepared = await reserve("owner", { to: group, text: "reserved" }, "reserved");
+  const prepared = await reserve("owner", { to: group, text: "reserved" }, "reserved", baseAt);
   await expect(deliver("owner", { to: group, text: "legacy" }, "legacy")).rejects.toThrow("agent_message_expired");
   await seed(group);
   const bad = { to: group, files: ["/work/secret.txt"] };
   await env.SANDBOX.getByName("owner").saveAttachment("/work/secret.txt", new TextEncoder().encode("password=synthetic-secret-for-test"), "source");
-  const refused = await reserve("owner", bad, "refused");
+  const refused = await reserve("owner", bad, "refused", baseAt);
   await expect(deliver("owner", bad, "refused", refused)).rejects.toThrow("agent_credentials_forbidden");
-  await burst("owner", group, SENT_LIMIT * 2 + 2);
+  await tick();
+  await seedProofsTo(ownerStub, SENT_LIMIT - 1, { generation: 0, completed: true, startedAt: Date.now() - 15, prefix: "gc1" });
+  await burst("owner", group, 4, "gc1");
+  await tick();
+  await seedProofsTo(ownerStub, SENT_LIMIT - 1, { generation: 0, completed: true, startedAt: Date.now() - 2, prefix: "gc2" });
+  await burst("owner", group, 4, "gc2");
   await evict(env.SANDBOX.getByName("owner")); // 本地也覆盖夹具在清理前已离开内存的情形。
-  await evict(env.THREAD.getByName("owner")); await evict(env.THREAD.getByName(group));
+  await evict(ownerStub); await evict(env.THREAD.getByName(group));
   expect((await deliver("owner", args, "pending", pending)).status).toBe("accepted");
   expect((await deliver("owner", { to: group, text: "reserved" }, "reserved", prepared)).status).toBe("accepted");
   await expect(deliver("owner", bad, "refused", refused)).rejects.toThrow("agent_message_expired");
-}, 120_000);
+});
 
 it("all in-flight slots backpressure before file preparation, then one completion automatically admits a fresh send", async () => {
   await seed("owner"); await seed(group);
-  const args = { to: group, text: "in-flight" }, tickets: AgentTicket[] = [];
-  for (let n = 0; n < SENT_LIMIT; n++) tickets.push(await reserve("owner", args, "pending" + n));
+  const args = { to: group, text: "in-flight" };
+  const firstTicket = await reserve("owner", args, "pending0", Date.now() - 20);
+  await seedProofs(env.THREAD.getByName("owner"), SENT_LIMIT - 2, { generation: 0, completed: false, startedAt: Date.now() - 10, prefix: "inflight" });
+  const lastTicket = await reserve("owner", args, "pending511");
   const before = (await env.ASSETS.list()).objects.map(o => o.key);
   await expect(reserve("owner", { to: group, files: ["/work/nonexistent.txt"] }, "full-file")).rejects.toThrow("agent_history_full");
   expect((await env.ASSETS.list()).objects.map(o => o.key)).toEqual(before);
-  expect((await deliver("owner", args, "pending0", tickets[0])).status).toBe("accepted");
+  expect((await deliver("owner", args, "pending0", firstTicket)).status).toBe("accepted");
   const next = await reserve("owner", args, "after-full");
   expect((await deliver("owner", args, "after-full", next)).status).toBe("accepted");
-  await expect(deliver("owner", args, "pending0", tickets[0])).rejects.toThrow("agent_message_expired");
-  expect((await deliver("owner", args, "pending511", tickets[511])).status).toBe("accepted");
-}, 120_000);
+  await expect(deliver("owner", args, "pending0", firstTicket)).rejects.toThrow("agent_message_expired");
+  expect((await deliver("owner", args, "pending511", lastTicket)).status).toBe("accepted");
+});
 
 it("a lost source receipt commit recovers after real eviction without reimporting an edited/deleted attachment", async () => {
   await seed("owner"); await seed(group);
@@ -173,7 +237,7 @@ it("a lost source receipt commit recovers after real eviction without reimportin
 it("a late concurrent completion cannot resurrect a proof already collected after another completion", async () => {
   await seed("owner"); await seed(group);
   await runInDurableObject(env.THREAD.getByName("owner"), async (instance, s) => {
-    const i = instance as any, args = { to: group, text: "concurrent" }, ticket = await i.reserveAgentMessage(args, "concurrent", Date.now());
+    const i = instance as any, args = { to: group, text: "concurrent" }, ticket = await i.reserveAgentMessage(args, "concurrent", Date.now() - 20);
     let release!: () => void, entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; }), reached = new Promise<void>(resolve => { entered = resolve; });
     const real = env.THREAD.getByName(group);
@@ -183,7 +247,9 @@ it("a late concurrent completion cannot resurrect a proof already collected afte
     try {
       const row = s.storage.sql.exec("SELECT * FROM inbound WHERE kind='message'").one();
       expect((await i.sendAgentMessage(args, "concurrent", row, undefined, ticket)).status).toBe("duplicate");
-      for (let n = 0; n < SENT_LIMIT; n++) {
+      await tick();
+      await seedStorageProofs(s.storage, SENT_LIMIT - 2, { generation: 0, completed: true, startedAt: Date.now() - 10, prefix: "later-seed" });
+      for (let n = 0; n < 4; n++) {
         const value = { to: group, text: "later" + n }, id = "later" + n;
         const next = await i.reserveAgentMessage(value, id, Date.now());
         await i.sendAgentMessage(value, id, row, undefined, next);
@@ -194,13 +260,14 @@ it("a late concurrent completion cannot resurrect a proof already collected afte
     expect(await s.storage.get("agent-sent:" + messageId("owner", "0:concurrent"))).toBeUndefined();
     expect((await s.storage.list({ prefix: "agent-sent:" })).size).toBeLessThanOrEqual(SENT_LIMIT);
   });
-}, 120_000);
+});
 
 it.each(["owner", group])("%s child follow-ups, replies and automatic reports continue beyond 512 with bounded proof storage", async parent => {
   const f = await child(parent);
   await runInDurableObject(env.THREAD.getByName(parent), async (instance, s) => {
     const i = instance as any;
-    for (let n = 0; n < SENT_LIMIT + 3; n++) {
+    await seedStorageProofs(s.storage, SENT_LIMIT - 3, { generation: 0, completed: true, startedAt: Date.now() - 10, prefix: "parent-seed" });
+    for (let n = 0; n < 6; n++) {
       const args = { to: f.address, text: "follow-up" + n }, id = "follow" + n;
       const ticket = await i.reserveAgentMessage(args, id, Date.now());
       expect((await i.subagents.message({ identity: f.identity, origin: f.origin }, cid, args.text, id, ticket)).error).toBeUndefined();
@@ -209,13 +276,15 @@ it.each(["owner", group])("%s child follow-ups, replies and automatic reports co
   });
   await runInDurableObject(env.SUBAGENT.getByName(f.address), async (instance, s) => {
     const i = instance as any;
+    const meta = JSON.parse(s.storage.sql.exec<any>("SELECT value FROM meta WHERE key='subagent'").one().value);
+    await seedStorageProofs(s.storage, SENT_LIMIT - 3, { generation: meta.createdAt, completed: true, startedAt: Date.now() - 10, prefix: "child-seed" });
     // 模型回答不是本测试目标；用已持久回答输入真实自动报告状态机。
     s.storage.sql.exec("UPDATE inbox SET status='answered',answer='visible answer',outcome='done',answered_at=?", Date.now());
     const rows = s.storage.sql.exec("SELECT * FROM inbox ORDER BY rowid").toArray();
     for (const [index, row] of rows.entries()) {
       s.storage.sql.exec("UPDATE inbox SET answered_at=? WHERE request_id=?", Date.now(), row.request_id);
-      const meta = JSON.parse(s.storage.sql.exec<any>("SELECT value FROM meta WHERE key='subagent'").one().value);
-      await i.report(meta, row);
+      const currentMeta = JSON.parse(s.storage.sql.exec<any>("SELECT value FROM meta WHERE key='subagent'").one().value);
+      await i.report(currentMeta, row);
       // 自动报告自身跨过 512；普通回复分别在容量轮转前后验证，避免重复一整套压力矩阵。
       if (index === 0 || index === rows.length - 1) {
         const args = { to: parent, text: "reply:" + row.request_id }, id = "reply:" + row.request_id;
@@ -223,31 +292,33 @@ it.each(["owner", group])("%s child follow-ups, replies and automatic reports co
         expect((await i.sendAgentMessage(args, id, undefined, ticket)).status).toBe("accepted");
       }
     }
-    expect(s.storage.sql.exec<any>("SELECT count(*) AS n FROM inbox WHERE status='reported'").one().n).toBe(SENT_LIMIT + 3);
+    expect(s.storage.sql.exec<any>("SELECT count(*) AS n FROM inbox WHERE status='reported'").one().n).toBe(6);
     expect((await s.storage.list({ prefix: "agent-sent:" })).size).toBeLessThanOrEqual(SENT_LIMIT);
     expect(s.storage.sql.exec<any>("SELECT count(*) AS n FROM inbox WHERE report_ticket IS NULL").one().n).toBe(0);
     await s.storage.deleteAlarm();
   });
   await runInDurableObject(env.THREAD.getByName(parent), async (_i, s) => {
-    expect(s.storage.sql.exec<any>("SELECT count(*) AS n FROM inbound WHERE kind='subagent'").one().n).toBe(SENT_LIMIT + 3);
+    expect(s.storage.sql.exec<any>("SELECT count(*) AS n FROM inbound WHERE kind='subagent'").one().n).toBe(6);
     expect(s.storage.sql.exec<any>("SELECT count(*) AS n FROM inbound WHERE kind='agent'").one().n).toBe(2);
     await s.storage.deleteAlarm();
   });
-}, 120_000);
+});
 
 it("legacy pending records remain recoverable after migration; collected legacy successes cannot be reissued", async () => {
   await seed("owner");
-  const pending = { to: group, text: "old pending" }, completed = { to: group, text: "old complete" }, at = Date.now();
+  const pending = { to: group, text: "old pending" }, completed = { to: group, text: "old complete" }, at = Date.now() - 20;
   await expect(deliver("owner", pending, "old-pending")).rejects.toThrow("agent_recipient_not_ready");
   await seed(group);
   await deliver("owner", completed, "old-complete");
-  await burst("owner", group, SENT_LIMIT + 1, "upgrade");
+  await tick();
+  await seedProofsTo(env.THREAD.getByName("owner"), SENT_LIMIT - 1, { generation: 0, completed: true, startedAt: Date.now() - 10, prefix: "upgrade-seed" });
+  await burst("owner", group, 4, "upgrade");
   expect((await deliver("owner", pending, "old-pending")).status).toBe("accepted");
   await expect(deliver("owner", completed, "old-complete")).rejects.toThrow("agent_message_expired");
   await expect(reserve("owner", completed, "old-complete", at)).rejects.toThrow("agent_message_expired");
   await expect(reserve("owner", completed, "old-complete", 0)).rejects.toThrow("agent_message_expired");
   expect(await reserve("owner", pending, "old-pending", 0)).toHaveProperty("nonce");
-}, 120_000);
+});
 
 it.each(["group", "child"] as const)("%s partial attachment commits survive cleanup pressure, then retire only after durable inbox commit", async target => {
   const to = target === "child" ? (await child("owner")).address : group;
@@ -255,7 +326,7 @@ it.each(["group", "child"] as const)("%s partial attachment commits survive clea
   const source = env.SANDBOX.getByName("owner"), recipient = env.SANDBOX.getByName(to);
   await source.saveAttachment("/work/one.txt", new TextEncoder().encode("one"), "source-one");
   await source.saveAttachment("/work/two.txt", new TextEncoder().encode("two"), "source-two");
-  const args = { to, files: ["/work/one.txt", "/work/two.txt"] }, ticket = await reserve("owner", args, "partial");
+  const args = { to, files: ["/work/one.txt", "/work/two.txt"] }, ticket = await reserve("owner", args, "partial", Date.now() - 20);
   const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("two")))).map(n => n.toString(16).padStart(2, "0")).join("");
   await runInDurableObject(recipient, instance => {
     const i = instance as any, bucket = i.workspace.deps.bucket;
@@ -274,7 +345,9 @@ it.each(["group", "child"] as const)("%s partial attachment commits survive clea
   });
   // 另一个可达目标的成功发送触发 GC，不能删除这条部分导入的证明。
   if (target === "child") await seed(group);
-  await burst("owner", group, SENT_LIMIT + 1, "while-partial");
+  await tick();
+  await seedProofsTo(env.THREAD.getByName("owner"), SENT_LIMIT - 1, { generation: 0, completed: true, startedAt: Date.now() - 10, prefix: "partial-seed" });
+  await burst("owner", group, 4, "while-partial");
   await evict(recipient); await evict(env.THREAD.getByName("owner"));
   if (target === "child") await evict(env.SUBAGENT.getByName(to)); else await evict(env.THREAD.getByName(to));
   const receipt = await deliver("owner", args, "partial", ticket);
@@ -283,7 +356,7 @@ it.each(["group", "child"] as const)("%s partial attachment commits survive clea
   expect(new TextDecoder().decode((await recipient.readBlob(receipt.files[1])).bytes)).toBe("two");
   await runInDurableObject(recipient, async (_i, s) => expect((await s.storage.list({ prefix: "workspace:attachment:" })).size).toBe(0));
   expect((await deliver("owner", args, "partial", ticket)).status).toBe("duplicate");
-}, 120_000);
+});
 
 it("an unknown automatic report retains its original ticket across GC, eviction and concurrent completion", async () => {
   const f = await child("owner");
@@ -293,11 +366,13 @@ it("an unknown automatic report retains its original ticket across GC, eviction 
   let originalTicket = "";
   await runInDurableObject(env.SUBAGENT.getByName(f.address), async (instance, s) => {
     const i = instance as any;
-    s.storage.sql.exec("INSERT INTO inbox(request_id,text,received_at,status,answer,outcome,answered_at) VALUES('report','task',?,'answered','complete answer','done',?)", Date.now(), Date.now());
+    s.storage.sql.exec("INSERT INTO inbox(request_id,text,received_at,status,answer,outcome,answered_at) VALUES('report','task',?,'answered','complete answer','done',?)", Date.now() - 20, Date.now() - 20);
     const meta = JSON.parse(s.storage.sql.exec<any>("SELECT value FROM meta WHERE key='subagent'").one().value);
     await expect(i.report(meta, s.storage.sql.exec("SELECT * FROM inbox WHERE request_id='report'").one())).rejects.toThrow("agent_delivery_unknown");
     originalTicket = s.storage.sql.exec<any>("SELECT report_ticket FROM inbox WHERE request_id='report'").one().report_ticket;
-    for (let n = 0; n < SENT_LIMIT + 1; n++) {
+    await tick();
+    await seedStorageProofs(s.storage, SENT_LIMIT - 2, { generation: meta.createdAt, completed: true, startedAt: Date.now() - 10, prefix: "report-seed" });
+    for (let n = 0; n < 4; n++) {
       const args = { to: "owner", text: "later" + n }, id = "later" + n;
       const ticket = await i.reserveAgentMessage(args, id, Date.now());
       await i.sendAgentMessage(args, id, undefined, ticket);
@@ -317,7 +392,7 @@ it("an unknown automatic report retains its original ticket across GC, eviction 
     await s.storage.deleteAlarm();
   });
   await runInDurableObject(env.THREAD.getByName("owner"), (_i, s) => expect(s.storage.sql.exec<any>("SELECT count(*) AS n FROM inbound WHERE kind='subagent'").one().n).toBe(1));
-}, 120_000);
+});
 
 it("the child retention alarm preserves a valid unresolved proof instead of silently deleting it", async () => {
   const f = await child("owner"), realNow = Date.now();
@@ -355,7 +430,7 @@ it("parent follow-up authorization rejects the wrong reply channel before reserv
 it("model-bearing parent follow-ups bind the model to the proof and cannot reapply it on recovery or expiry", async () => {
   const f = await child("owner"), model = { provider: "faux", id: "pro" }, later = { provider: "faux", id: "worker" };
   const args = { to: f.address, text: "model follow-up", childModel: model };
-  const ticket = await reserve("owner", args, "model-followup");
+  const ticket = await reserve("owner", args, "model-followup", Date.now() - 20);
   const follow = () => runInDurableObject(env.THREAD.getByName("owner"), async instance =>
     (instance as any).subagents.message({ identity: f.identity, origin: f.origin }, cid, args.text, "model-followup", ticket, model));
   expect(await follow()).not.toHaveProperty("error");
@@ -379,7 +454,9 @@ it("model-bearing parent follow-ups bind the model to the proof and cannot reapp
     await expect((instance as any).agentReceive({ id: messageId(group, "forged-model"), from: group, to: f.address, text: "not parent", files: [], childModel: model })).rejects.toThrow("agent_invalid_message");
   });
   await expect(reserve("owner", { ...args, childModel: later }, "model-followup")).rejects.toThrow("agent_message_conflict");
-  await burst("owner", f.address, SENT_LIMIT + 1, "model-cap");
+  await tick();
+  await seedProofsTo(env.THREAD.getByName("owner"), SENT_LIMIT - 1, { generation: 0, completed: true, startedAt: Date.now() - 10, prefix: "model-seed" });
+  await burst("owner", f.address, 4, "model-cap");
   await expect(follow()).rejects.toThrow("agent_message_expired");
   expect((await env.SUBAGENT.getByName(f.address).status())?.meta.model).toEqual(later);
-}, 120_000);
+});

@@ -21,7 +21,7 @@ const object = (v: unknown): Record<string, unknown> => v !== null && typeof v =
 const MAX_PAGES = 10, MAX_BYTES = 1024 * 1024;
 export class GitHubAppClient {
   private readonly installationTokens = new Map<number,{token:string;until:number}>();
-  constructor(private readonly secrets: GitHubAppSecrets) {}
+  constructor(private readonly secrets: GitHubAppSecrets, private requestTimeoutMs = 10_000) {}
   configured(): boolean {
     return /^\d{1,16}$/.test(this.secrets.GITHUB_APP_ID ?? "") && /^[a-z0-9][a-z0-9-]{0,99}$/.test(this.secrets.GITHUB_APP_SLUG ?? "")
       && !!this.secrets.GITHUB_APP_PRIVATE_KEY && !!this.secrets.GITHUB_APP_WEBHOOK_SECRET;
@@ -145,7 +145,7 @@ export class GitHubAppClient {
   private async requestJson(url: string, init: RequestInit): Promise<unknown> {
     // Only fixed GitHub origins and internally constructed paths. Never follow redirects or Link.
     let upstreamStatus: number | undefined;
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10_000);
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
     try {
       let request: Request;
       try { request = new Request(url, { ...init, redirect: "manual", signal: controller.signal }); }
