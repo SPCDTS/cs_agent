@@ -1,5 +1,5 @@
 import { env, reset, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createAssistantMessageEventStream, type AssistantMessage, type StreamOptions } from "@earendil-works/pi-ai";
@@ -10,6 +10,7 @@ import { captureModels } from "../src/requests/capture";
 import { snapshot, errorSummary } from "../src/requests/snapshot";
 import { compareContext } from "../src/requests/context-store";
 import { contextSource } from "../src/requests/context-source";
+import { ExecutionStore } from "../src/requests/executions";
 import { totalChars } from "../src/requests/context-types";
 import { argumentPreview, toolResultSnapshot } from "../src/requests/tool-snapshot";
 import type { RequestDetail, RequestQuery, ToolTrace } from "../src/requests/types";
@@ -227,6 +228,53 @@ describe("requests core", () => {
       expect(matches.traces).toMatchObject([{root:binding.turnId,requests:2}]);
       expect(await store.requestSnapshot(req.request.id,true)).not.toHaveProperty("related");
       expect((await store.detail(req.request.id,true))?.related).toHaveLength(2);
+    });
+    it("按执行根和时间窗口限制账本读取，并保留旧请求的独立执行根", async () => {
+      const store = env.REQUESTS.getByName("main"), now = Date.now();
+      const root = { turnId: "turn:root", inputId: "web:root", generation: 0 };
+      const child = { actor: "child", inputId: "task" };
+      const legacy = detail("legacy", now);
+      await store.record(legacy);
+      await store.record({ ...legacy, request: { ...legacy.request, id: "child-model", actor: child.actor,
+        binding: { ...root, inputId: child.inputId, turnId: "turn:child" } } });
+      await store.recordTool({ id: "dispatch", name: "subagent", actor: "thread", thread: "owner", callId: "call",
+        binding: root, dispatch: child, status: "done", startedAt: now, endedAt: now, arguments: {text:"{}", chars:2, truncated:false} });
+
+      await runInDurableObject(store, (_instance, state) => {
+        const sql = state.storage.sql;
+        const batch = `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<512) `;
+        sql.exec(batch + `INSERT INTO requests(id,started,thread,turn_id,model,purpose,status,record)
+          SELECT 'r'||i,1,'owner','outside','m','conversation','done','{}' FROM n`);
+        sql.exec(batch + `INSERT INTO tool_traces(id,thread,turn_id,call_id,started,revision,record,bytes)
+          SELECT 't'||i,'owner','outside','c'||i,1,0,'{}',0 FROM n`);
+        sql.exec(batch + `INSERT INTO turn_timings(thread,input_id,turn_id,ended,revision,record)
+          SELECT 'owner','i'||i,'outside',1,0,'{"receivedAt":1}' FROM n`);
+        const ledger = new ExecutionStore(sql);
+        const queries = vi.spyOn(sql, "exec");
+        function bounded<T>(read: () => T): T {
+          queries.mockClear();
+          const result = read();
+          const reads = queries.mock.results.reduce((n, call) => n + call.value.rowsRead, 0);
+          expect(reads).toBeGreaterThan(0);
+          expect(reads).toBeLessThan(150);
+          return result;
+        }
+        try {
+          const ids = bounded(() => ledger.detail("owner", root.turnId)).observations.map(row => row.id);
+          expect(ids.sort()).toEqual(["child-model", "dispatch"]);
+          const tail = bounded(() => ledger.detail("owner", root.turnId, {at: now, id: "model/child-model"}));
+          expect(tail.observations.map(row => row.id)).toEqual(["dispatch"]);
+          expect(bounded(() => ledger.analysis("owner", root.turnId)).groups).toMatchObject([{actor: child.actor, n:1}]);
+          expect(ledger.detail("owner", "turn:child").observations).toEqual([]);
+          expect(bounded(() => ledger.detail("owner", "request:legacy")).observations).toMatchObject([{id:"legacy"}]);
+          for (const thread of [undefined, "owner"]) {
+            const roots = bounded(() => ledger.list({ since: now, until: now, thread })).traces.map(trace => trace.root);
+            expect(roots.sort()).toEqual(["request:legacy", root.turnId]);
+          }
+        } finally {
+          queries.mockRestore();
+        }
+      });
     });
     it("keeps tool failures separate from model status and reads bodies only in detail", async () => {
       const store=env.REQUESTS.getByName("main"), request=detail(crypto.randomUUID());

@@ -12,6 +12,39 @@ export type TraceQuery = Omit<RequestFilters, "excludeTurnId"> & {
   search?: string;
   cursor?: AdminCursor;
 };
+// JSON 表达式与派工表的 TEXT 键使用相同的类型，SQLite 才能用完整的复合索引连接。
+const actorKey = "CAST(COALESCE(json_extract(record,'$.actor'),'thread') AS TEXT)";
+const modelInput = "CAST(COALESCE(json_extract(record,'$.binding.inputId'),'') AS TEXT)";
+const toolInput = "CAST(json_extract(record,'$.binding.inputId') AS TEXT)";
+const modelFacts = `SELECT 'model' AS kind,id,thread,COALESCE(turn_id,'request:'||id) AS turn,
+  ${actorKey} AS actor,${modelInput} AS input_id,
+  started,COALESCE(json_extract(record,'$.endedAt'),started) AS last,status,model AS label,
+  input_tokens AS input,output_tokens AS output,cache_read AS cached,cost_usd AS cost FROM requests`;
+const toolFacts = `SELECT 'tool' AS kind,id,thread,turn_id AS turn,${actorKey} AS actor,
+  ${toolInput} AS input_id,started,COALESCE(json_extract(record,'$.endedAt'),started) AS last,
+  json_extract(record,'$.status') AS status,json_extract(record,'$.name') AS label,
+  NULL AS input,NULL AS output,NULL AS cached,NULL AS cost FROM tool_traces`;
+const turnFacts = `SELECT 'turn' AS kind,input_id AS id,thread,turn_id AS turn,'thread' AS actor,input_id,
+  json_extract(record,'$.receivedAt') AS started,ended AS last,json_extract(record,'$.status') AS status,
+  json_extract(record,'$.origin') AS label,NULL AS input,NULL AS output,NULL AS cached,NULL AS cost FROM turn_timings`;
+const allFacts = [modelFacts, toolFacts, turnFacts];
+const sameInput = "d.thread=f.thread AND d.actor=f.actor AND d.input_id=f.input_id";
+
+// 直接回合走 turn_id 索引，派工回合从根的派工边逐一按输入查。两组排斥，汇报不会被算入两个根。
+function rootFacts(root: string, sources: string[]) {
+  return sources.map(source => {
+    let direct = source + " WHERE thread=?1 AND turn_id=?2";
+    if (source === modelFacts && root.startsWith("request:")) {
+      direct += " UNION ALL " + source + " WHERE id=substr(?2,9) AND thread=?1 AND turn_id IS NULL";
+    }
+    // 每张表单独合并两种来源，避免超过 workerd 的复合 SELECT 项数限制。
+    return `SELECT * FROM (SELECT f.*, '' AS dispatch FROM (${direct}) f
+      WHERE NOT EXISTS (SELECT 1 FROM agent_dispatch d WHERE ${sameInput})
+      UNION ALL SELECT f.*,d.tool AS dispatch FROM agent_dispatch d CROSS JOIN (${source}) f
+      WHERE d.thread=?1 AND d.root_turn=?2 AND ${sameInput})`;
+  }).join(" UNION ALL ");
+}
+
 // Views are projections over the existing ledger. Only confirmed dispatch edges add stored rows.
 export class ExecutionStore {
   constructor(private readonly sql: SqlStorage) {
@@ -21,18 +54,16 @@ export class ExecutionStore {
       PRIMARY KEY(thread,actor,input_id));
       CREATE INDEX IF NOT EXISTS agent_dispatch_parent ON agent_dispatch(thread,parent_input);
       CREATE INDEX IF NOT EXISTS agent_dispatch_at ON agent_dispatch(at);
-      CREATE VIEW IF NOT EXISTS agent_facts AS
-        SELECT 'model' AS kind,id,thread,COALESCE(turn_id,'request:'||id) AS turn,
-          COALESCE(json_extract(record,'$.actor'),'thread') AS actor,COALESCE(json_extract(record,'$.binding.inputId'),'') AS input_id,
-          started,COALESCE(json_extract(record,'$.endedAt'),started) AS last,status,model AS label,
-          input_tokens AS input,output_tokens AS output,cache_read AS cached,cost_usd AS cost FROM requests
-        UNION ALL SELECT 'tool',id,thread,turn_id,COALESCE(json_extract(record,'$.actor'),'thread'),
-          json_extract(record,'$.binding.inputId'),started,COALESCE(json_extract(record,'$.endedAt'),started),
-          json_extract(record,'$.status'),json_extract(record,'$.name'),NULL,NULL,NULL,NULL FROM tool_traces
-        UNION ALL SELECT 'turn',input_id,thread,turn_id,'thread',input_id,json_extract(record,'$.receivedAt'),ended,
-          json_extract(record,'$.status'),json_extract(record,'$.origin'),NULL,NULL,NULL,NULL FROM turn_timings;
+      CREATE INDEX IF NOT EXISTS agent_dispatch_root ON agent_dispatch(thread,root_turn);
+      CREATE INDEX IF NOT EXISTS requests_trace_input ON requests(thread,${actorKey},${modelInput});
+      CREATE INDEX IF NOT EXISTS tool_traces_input ON tool_traces(thread,${actorKey},${toolInput});
+      CREATE INDEX IF NOT EXISTS tool_traces_started ON tool_traces(started);
+      CREATE INDEX IF NOT EXISTS tool_traces_thread_started ON tool_traces(thread,started);
+      CREATE INDEX IF NOT EXISTS turn_timings_received ON turn_timings(json_extract(record,'$.receivedAt'));
+      CREATE INDEX IF NOT EXISTS turn_timings_thread_received ON turn_timings(thread,json_extract(record,'$.receivedAt'));
+      CREATE VIEW IF NOT EXISTS agent_facts AS ${allFacts.join(" UNION ALL ")};
       CREATE VIEW IF NOT EXISTS agent_observations AS SELECT f.*,COALESCE(d.root_turn,f.turn) AS root,COALESCE(d.tool,'') AS dispatch
-        FROM agent_facts f LEFT JOIN agent_dispatch d ON d.thread=f.thread AND d.actor=f.actor AND d.input_id=f.input_id`);
+        FROM agent_facts f LEFT JOIN agent_dispatch d ON ${sameInput}`);
   }
   bind(tool: ToolSummary) {
     const edge = tool.dispatch;
@@ -132,7 +163,7 @@ export class ExecutionStore {
       .exec<Static<typeof ModelBreakdown>>(
         `WITH rounds AS (
       SELECT *,ROW_NUMBER() OVER(PARTITION BY actor,turn ORDER BY started,id) AS ordinal
-        FROM agent_observations WHERE thread=? AND root=? AND kind='model')
+        FROM (${rootFacts(root, [modelFacts])}))
       SELECT actor,label AS model,CASE WHEN ordinal=1 THEN 'first' ELSE 'followup' END AS round,COUNT(*) AS n,
         SUM(input) input,SUM(output) output,SUM(cached) cached,SUM(CASE WHEN cached IS NOT NULL THEN input END) cacheInput,
         COUNT(cached) measured,AVG(CASE WHEN status!='running' THEN last-started END) ms,SUM(cost) cost,COUNT(cost) priced
@@ -164,8 +195,8 @@ export class ExecutionStore {
         record: string;
       }>(
         `
-      WITH page AS (SELECT * FROM agent_observations WHERE thread=? AND root=?
-        ${cursor ? "AND (started>? OR (started=? AND kind||'/'||id>?))" : ""} ORDER BY started,kind,id LIMIT 81)
+      WITH page AS (SELECT * FROM (${rootFacts(root, allFacts)})
+        ${cursor ? "WHERE (started>? OR (started=? AND kind||'/'||id>?))" : ""} ORDER BY started,kind,id LIMIT 81)
       SELECT p.*,CASE p.kind WHEN 'model' THEN (SELECT record FROM requests WHERE id=p.id)
         WHEN 'tool' THEN (SELECT record FROM tool_traces WHERE id=p.id)
         ELSE (SELECT record FROM turn_timings WHERE thread=p.thread AND input_id=p.id) END AS record FROM page p ORDER BY started,kind,id`,
