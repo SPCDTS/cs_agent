@@ -42,6 +42,7 @@ import type { ScheduleAccess } from "./schedule/tools";
 import { parseScheduleInputKey } from "./schedule/run";
 import type { EventRunStatus } from "./events/model";
 import { SkillCatalog } from "./skills";
+import { executeResolvedSkillBash, jsonToolResult, skillRuntimeErrorCode } from "./skill-runtime/tools";
 import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentOrigin } from "./subagent/parent";
 import { subagentName, RETENTION_MS, type SubagentIdentity, type ParentSubagentStatus, type SubagentReport } from "./subagent/model";
 import { SandboxTasks, SANDBOX_TASK_SCHEMA, type SandboxTask, type SandboxSubject } from "./sandbox/task-access";
@@ -774,7 +775,9 @@ export class ThreadDO extends DurableObject<Env> {
       const generation = await this.sessionGeneration();
       const authority = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE kind='message' AND session_generation=? AND turn_id IS NOT NULL AND user_id<>self_id ORDER BY rowid DESC LIMIT 1", generation);
       if (!authority) throw new Error("agent_recipient_not_ready");
-      const paths = await importFiles(this.env, message, (path, bytes, operationId) => this.env.SANDBOX.getByName(ns).saveAttachment(path, bytes, operationId));
+      const paths = await importFiles(this.env, message, async (path, bytes, operationId) => {
+        await this.env.SANDBOX.getByName(ns).writeFile(path, bytes, operationId, true);
+      });
       await this.database.transaction(async tx => {
         await tx.run("INSERT INTO inbound(message_id,platform_message_id,user_id,self_id,text,received_at,status,chat_kind,chat_id,nickname,scope_name,kind,reply_channel,session_generation,when_busy,agent_from,agent_hash,agent_files,agent_authority) VALUES(?,?,'',?,?,?,'queued',?,?,?,?,'agent','qq',?,NULL,?,?,?,?)",
           message.id, message.id, authority.self_id, incomingText(message, paths), Date.now(), authority.chat_kind, authority.chat_id, "", authority.scope_name,
@@ -857,8 +860,14 @@ export class ThreadDO extends DurableObject<Env> {
     const access = await this.subagents.access(id,completed), as = access?.identity.as;
     if (!access || !as || access.origin.generation === undefined || access.origin.generation !== await this.sessionGeneration()) return;
     const scope = await this.namespace();
-    const { sandboxId, sandboxTask, coding, mcp } = access.origin.capabilities ?? {};
-    const capabilities = { ...(sandboxId === undefined ? {} : { sandboxId }), ...(sandboxTask ? { sandboxTask } : {}), ...(mcp ? { mcp } : {}), coding: !!coding };
+    const { sandboxId, sandboxTask, coding, mcp, skillRuntime } = access.origin.capabilities ?? {};
+    const capabilities = {
+      ...(sandboxId === undefined ? {} : { sandboxId }),
+      ...(sandboxTask ? { sandboxTask } : {}),
+      ...(mcp ? { mcp } : {}),
+      ...(skillRuntime ? { skillRuntime } : {}),
+      coding: !!coding,
+    };
     const subject = { scope, actor: as.userId, owner: as.owner, generation: access.origin.generation, replyChannel: access.origin.replyChannel ?? "qq" } satisfies SandboxSubject;
     // 兼容旧子任务：只从宿主保存且当前仍有效的身份和能力迁移一次授权。
     if (!capabilities.sandboxTask && capabilities.coding) {
@@ -883,6 +892,59 @@ export class ThreadDO extends DurableObject<Env> {
   async subagentSkill(id: string, input: { name: string; path?: string }): ReturnType<SubagentCapabilityHost["subagentSkill"]> {
     if (!await this.validateSubagentAccess(id)) return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
     return { output: [{ type: "text", text: await this.skills.read(input.name, input.path) }] };
+  }
+  async subagentSkillList(id: string): ReturnType<SubagentCapabilityHost["subagentSkillList"]> {
+    const access = await this.validateSubagentAccess(id);
+    const snapshot = access?.capabilities.skillRuntime;
+    if (!access || !snapshot || snapshot.scope !== access.authority.scope) {
+      return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
+    }
+    const skills = await this.env.REGISTRY.getByName("main").skillRuntimeListForSnapshot(access.authority.scope, snapshot);
+    return jsonToolResult({ skills });
+  }
+  async subagentSkillBash(id: string, call: { skill: string; command: string; timeoutSec?: number; operationId: string }): ReturnType<SubagentCapabilityHost["subagentSkillBash"]> {
+    const started = Date.now();
+    const access = await this.validateSubagentAccess(id);
+    const snapshot = access?.capabilities.skillRuntime;
+    if (!access || !snapshot || snapshot.scope !== access.authority.scope) {
+      return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
+    }
+    let outcome = "error";
+    let code: number | null | undefined;
+    try {
+      const result = await executeResolvedSkillBash({
+        scope: access.authority.scope,
+        skill: call.skill,
+        command: call.command,
+        timeoutSec: call.timeoutSec,
+        snapshot,
+        registry: this.env.REGISTRY.getByName("main"),
+        stateSandbox: this.env.SANDBOX.getByName("skill-state:" + call.skill),
+        outputSandbox: this.env.SANDBOX.getByName(access.sandbox?.name ?? access.authority.scope),
+        recheckAccess: async () => {
+          const after = await this.validateSubagentAccess(id);
+          if (!after?.capabilities.skillRuntime || after.capabilities.skillRuntime.scope !== after.authority.scope) {
+            throw new Error("delegation_denied");
+          }
+        },
+      });
+      code = result.code;
+      outcome = "ok";
+      return jsonToolResult(result);
+    } catch (error) {
+      outcome = skillRuntimeErrorCode(error);
+      return { isError: true, output: [{ type: "text", text: outcome }] };
+    } finally {
+      await this.audit("skill_runtime", {
+        op: "subagent_bash",
+        subagentId: id,
+        skill: call.skill,
+        scope: access.authority.scope,
+        result: outcome,
+        ...(code !== undefined ? { code } : {}),
+        ms: Date.now() - started,
+      }).catch(() => {});
+    }
   }
   async subagentCoding(id: string, operation: SubagentCodingOperation): ReturnType<SubagentCapabilityHost["subagentCoding"]> {
     const access = await this.validateSubagentAccess(id);
@@ -924,10 +986,11 @@ export class ThreadDO extends DurableObject<Env> {
     if (resourceId && !resource) throw new Error("delegation_denied");
     return this.env.SANDBOX.getByName(resource?.name ?? subagentName(scope, id));
   }
-  async subagentSaveAttachment(id: string, path: string, bytes: Uint8Array, operationId?: string) {
+  async subagentImportFile(id: string, path: string, bytes: Uint8Array, operationId?: string): Promise<void> {
     const normalized = workPath(path);
     if (!/^\/work\/agent-files\/[0-9a-f]{64}\/[0-9]+-/.test(normalized)) throw new Error("agent_file_access_denied");
-    return (await this.subagentAttachmentWorkspace(id)).saveAttachment(normalized, bytes, operationId);
+    // 收件方只等持久提交完成；跨 DO 只传成功或错误，避免把沙箱 RPC 回执转交给子会话。
+    await (await this.subagentAttachmentWorkspace(id)).writeFile(normalized, bytes, operationId, true);
   }
   async subagentRetireAttachments(id: string, messageId: string, count: number): Promise<void> {
     await (await this.subagentAttachmentWorkspace(id)).retireAgentAttachments(messageId, count);
@@ -938,8 +1001,16 @@ export class ThreadDO extends DurableObject<Env> {
     if (!await this.env.SUBAGENT.getByName(subagentName(await this.namespace(), id)).agentFileAllowed(normalized)) throw new Error("delegation_denied");
     return (await this.subagentAttachmentWorkspace(id)).readBlob(normalized);
   }
-  async subagentWriteFile(id: string, path: string, content: string | Uint8Array) { return (await this.subagentWorkspaceFiles(id)).writeFile(workPath(path), content); }
-  async subagentCreateTempDir(id: string, prefix?: string) { return (await this.subagentWorkspaceFiles(id)).createTempDir(prefix); }
+  async subagentWriteFile(id: string, path: string, content: string | Uint8Array, operationId?: string) {
+    const { bytes } = await (await this.subagentWorkspaceFiles(id)).writeFile(workPath(path), content, operationId);
+    return { bytes };
+  }
+  async subagentCreateOutputPrefix(id: string, prefix?: string) { return (await this.subagentWorkspaceFiles(id)).createOutputPrefix(prefix); }
+  async subagentReadObject(id: string, key: string) { return (await this.subagentWorkspaceFiles(id)).readObject(key); }
+  async subagentWriteObject(id: string, key: string, content: string | Uint8Array) {
+    const { bytes } = await (await this.subagentWorkspaceFiles(id)).writeObject(key, content);
+    return { bytes };
+  }
 
   private async subagentCaller(input: InboundRow | undefined, { spawn = false, sandboxId, mcpTools }: { spawn?: boolean; sandboxId?: string; mcpTools?: McpToolSelection }): Promise<SubagentCaller | undefined> {
     if (input?.kind !== "message" || !input.turn_id || input.user_id === input.self_id || input.session_generation !== await this.sessionGeneration()) return;
@@ -948,15 +1019,24 @@ export class ThreadDO extends DurableObject<Env> {
     if (spawn) {
       const authority = await this.mcpAuthority(input), { mcp } = await this.open();
       const task = await this.sandboxTaskForInput(input), coding = !!task?.permissions.coding && authority?.scope === "owner";
+      const scope = await this.namespace();
       let resource;
       if (coding) {
         const resources = this.env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner");
-        const scope = await this.namespace();
         const id = sandboxId ?? (await resources.list(scope)).assignedSandboxId;
         resource = await resources.get(scope, id);
         if (!resource) throw new Error("sandbox_not_assigned");
       } else if (sandboxId) throw new Error("permission_denied");
-      capabilities = { coding, ...(resource ? { sandboxId: resource.id } : {}), ...(task ? { sandboxTask: task.id } : {}), ...(authority && mcp ? { mcp: await mcp.captureCapabilities(authority, mcpTools) } : {}) };
+      const skillRuntime = scope === "owner" || scope.startsWith("group:")
+        ? await this.env.REGISTRY.getByName("main").skillRuntimeSnapshot(scope)
+        : undefined;
+      capabilities = {
+        coding,
+        ...(resource ? { sandboxId: resource.id } : {}),
+        ...(task ? { sandboxTask: task.id } : {}),
+        ...(authority && mcp ? { mcp: await mcp.captureCapabilities(authority, mcpTools) } : {}),
+        ...(skillRuntime?.grants.length ? { skillRuntime } : {}),
+      };
     }
     return { identity: { turn: "message", as: { userId: input.user_id, nickname: input.nickname, owner, ...(isWebAdmin(input) ? { admin: true as const } : {}) } },
       origin: { capabilities, generation: input.session_generation, target: targetOf(input), selfId: input.self_id, scopeName: input.scope_name, ...(isWeb(input) ? { replyChannel: "web" as const } : {}) } };

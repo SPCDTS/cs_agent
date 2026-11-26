@@ -8,6 +8,7 @@ import { createMcpAdminRoutes } from "./mcp-routes";
 import { CLOUDFLARE_ROUTES } from './cloudflare-routes';
 import { MCP_SERVER_ROUTES } from "./mcp-servers-routes";
 import { CUA_ROUTES } from './cua-routes';
+import { SKILL_RUNTIME_ROUTES } from "./skill-runtime-routes";
 import { accessRoutes } from "./access-routes";
 import { createMemoryAdminRoutes } from "./memory-routes";
 import { createRuleAdminRoutes } from "./rule-routes";
@@ -149,6 +150,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   { method: "GET", path: "/admin/health", handle: async ({ env }) => json(await healthReport(env)) },
   ...MCP_SERVER_ROUTES,
   ...CUA_ROUTES,
+  ...SKILL_RUNTIME_ROUTES,
   ...CLOUDFLARE_ROUTES,
   ...accessRoutes(),
   ...workspaceRoutes({forThread:async(thread,ctx)=>{

@@ -11,6 +11,7 @@ export const NODE_TESTS = [
   "test/mcp-transport.test.ts",
   "test/memory-permissions.test.ts",
   "test/policy.test.ts",
+  "test/skill-runtime-manifest.test.ts",
   "test/topology-layout.test.ts",
   "test/web-page.test.ts",
   "test/web-search.test.ts",

@@ -42,6 +42,8 @@ const FAILURES: Record<SandboxFailure, string> = {
   not_a_directory: "工作目录不存在或不是目录。",
   binary_file: "这是非图片二进制文件；可以用 bash（file、xxd 等）查看。",
   too_large: "文件超过 10 MiB；用 bash 的 head、tail、grep 分段查看。",
+  output_limit: "技能输出超出限制（最多 5 个文件、总计 8 MiB）。",
+  skill_deps_install_failed: "技能 npm 依赖安装失败。",
   offset_out_of_range: "offset 超过了文件总行数。",
   edit_not_found: "有一处 oldText 在文件里找不到；先 read 确认原文（含空白与缩进）。",
   edit_ambiguous: "有一处 oldText 在文件里出现不止一次；带上更多上下文让它唯一。",
@@ -58,6 +60,16 @@ export const SandboxReadOutput = Type.Union([
 ]);
 
 const text = (value: string, isError = false): ToolExecutionResult => ({ ...(isError ? { isError } : {}), output: [{ type: "text", text: value }] });
+
+export function readToolResult(file: ReadResult): ToolExecutionResult {
+  if ("kind" in file) {
+    const image = { type: "image" as const, data: file.data, mimeType: file.mimeType };
+    return { output: [image], structuredOutput: { kind: "image", image } };
+  }
+  const more = file.endLine < file.totalLines ? `\n\n[Showing lines ${file.startLine}-${file.endLine} of ${file.totalLines}. Use offset=${file.endLine + 1} to continue.]` : "";
+  const value = (file.text || "(empty)") + more;
+  return { ...text(value), structuredOutput: { kind: "text", text: value } };
+}
 
 type CodingArgs<P extends TSchema> = Parameters<ToolRegistration<P>["execute"]>[0];
 
@@ -131,13 +143,7 @@ export function createCodingExtension(deps: CodingDeps) {
         const file = attachment ?? (workspace !== undefined && deps.readWorkspace
           ? await deps.readWorkspace({ workspace, path, offset, limit }, api, context)
           : await sandbox.readFile(path, { offset, limit }));
-        if ("kind" in file) {
-          const image = { type: "image" as const, data: file.data, mimeType: file.mimeType };
-          return { result: { output: [image], structuredOutput: { kind: "image", image } } };
-        }
-        const more = file.endLine < file.totalLines ? `\n\n[Showing lines ${file.startLine}-${file.endLine} of ${file.totalLines}. Use offset=${file.endLine + 1} to continue.]` : "";
-        const value = (file.text || "(empty)") + more;
-        return { result: { ...text(value), structuredOutput: { kind: "text", text: value } } };
+        return { result: readToolResult(file) };
       },
     }),
     codingTool(deps, {

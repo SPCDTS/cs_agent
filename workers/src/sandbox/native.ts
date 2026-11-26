@@ -1,17 +1,22 @@
-import { Files, SandboxFileError, SandboxProtocolError } from "@cloudflare/sandbox";
+import { type DirectoryBackup, type DirectoryBackupRecord, Files, SandboxFileError, SandboxProtocolError } from "@cloudflare/sandbox";
 import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
 import { FILE_MAX_BYTES } from "../media/model";
+import { classifyError } from "../shared/diagnostics";
 import { decodeFileRead } from "./read";
-import { EXEC_MAX_TIMEOUT_MS, WORK_ROOT, SandboxError, sandboxFailure, workPath, type SandboxClient } from "./client";
+import { EXEC_MAX_TIMEOUT_MS, WORK_ROOT, SandboxError, sandboxFailure, workPath, type RuntimeSnapshot, type SandboxClient } from "./client";
 
 export type NativeContainer = Pick<Container, "exec">;
 export type NativeFiles = Pick<Files, "readFile" | "writeFile" | "stat" | "readDirectory" | "mkdir" | "remove">;
-type Dependencies = { container(): Promise<NativeContainer>; files?(container: NativeContainer): NativeFiles };
+type Dependencies = { container(): Promise<NativeContainer>; backup?(): Promise<Pick<DirectoryBackup, "backup" | "restore">>; files?(container: NativeContainer): NativeFiles };
 const user = "1000:1000", strict = { additionalProperties: false };
 const File = Type.Object({ path: Type.String(), sha256: Type.String({ pattern: "^[a-f0-9]{64}$" }), bytes: Type.Integer({ minimum: 0, maximum: FILE_MAX_BYTES }), mime: Type.String(), mode: Type.Integer({ minimum: 0, maximum: 511 }) }, strict);
 const Snapshot = Type.Object({ files: Type.Array(File), directories: Type.Array(Type.String()), totalBytes: Type.Integer({ minimum: 0 }) }, strict);
 const Exec = Type.Object({ stdout: Type.String(), stderr: Type.String(), code: Type.Union([Type.Integer(), Type.Null()]), timedOut: Type.Boolean(), truncated: Type.Boolean() }, strict);
+const SkillOutput = Type.Object({ path: Type.String(), bytes: Type.Integer({ minimum: 0 }), sha256: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, strict);
+const SkillExec = Type.Object({ stdout: Type.String(), stderr: Type.String(), code: Type.Union([Type.Integer(), Type.Null()]), timedOut: Type.Boolean(), truncated: Type.Boolean(), outputs: Type.Array(SkillOutput) }, strict);
+const Ready = Type.Object({ ready: Type.Literal(true) }, strict);
+const Cleared = Type.Object({ cleared: Type.Literal(true) }, strict);
 const Failure = Type.Object({ error: Type.String(), issues: Type.Optional(Type.Unknown()) }, strict);
 const Restored = Type.Object({ restored: Type.Literal(true) }, strict);
 const decoder = new TextDecoder("utf-8", { ignoreBOM: true, fatal: false });
@@ -74,18 +79,33 @@ export function nativeSandboxClient(deps: Dependencies): SandboxClient {
   return {
     snapshot: (retainedPaths = []) => helper("snapshot", { retainedPaths }, Snapshot),
     readBlob: path => boundary(() => bytes(path)),
-    restore: (snapshot, readBlob) => boundary(async () => {
+    ...(deps.backup ? {
+      backupDirectory: async (snapshot: RuntimeSnapshot) => {
+        const backup = await deps.backup!();
+        const stage = await helper("stageBackup", { snapshot }, Type.String({ pattern: "^/tmp/cs-backup-[A-Za-z0-9]+/work$" }));
+        try { return await backup.backup({ dir: stage }); }
+        finally {
+          try { await helper("discardBackup", { stage }, Restored); }
+          catch (error) { console.warn({ event: "workspace_archive_stage_cleanup_failed", ...classifyError(error) }); }
+        }
+      },
+      restoreDirectory: async (record: DirectoryBackupRecord) => (await deps.backup!()).restore(record, { dir: WORK_ROOT }),
+    } : {}),
+    restore: (snapshot, readBlob, base) => boundary(async () => {
       const stage = "/tmp/sandbox-import-" + crypto.randomUUID(), fs = await files();
       await fs.mkdir(stage, { user });
       try {
+        const previous = new Map(base?.files.map(file => [file.path, file.sha256]));
+        const reuse: string[] = [];
         for (const file of snapshot.files) {
+          if (previous.get(file.path) === file.sha256) { reuse.push(file.path); continue; }
           const relative = workPath(file.path).slice(WORK_ROOT.length + 1);
           if (!relative) throw new SandboxError("path_denied");
           const target = `${stage}/${relative}`;
           await fs.mkdir(target.slice(0, target.lastIndexOf("/")), { recursive: true, user });
           await fs.writeFile(target, await readBlob(file), { user });
         }
-        await helper("restore", { stage, snapshot }, Restored);
+        await helper("restore", { stage, snapshot, reuse }, Restored);
       } finally { await fs.remove(stage, { recursive: true, force: true, user }); }
     }),
     exec: (command, options) => {
@@ -127,5 +147,36 @@ export function nativeSandboxClient(deps: Dependencies): SandboxClient {
         size: entry.type === "file" ? Number((await fs.stat(`${absolute}/${entry.name}`, { user })).size) : 0,
       })));
     }),
+    materializeSkill: async input => {
+      await helper("materializeSkill", input, Ready, 95_000);
+    },
+    execSkillBash: input => {
+      if (!Number.isFinite(input.timeoutMs)) return Promise.reject(new SandboxError("invalid_request"));
+      const timeoutMs = Math.min(EXEC_MAX_TIMEOUT_MS, Math.max(1, Math.trunc(input.timeoutMs)));
+      return helper("execSkillBash", { ...input, timeoutMs }, SkillExec, timeoutMs);
+    },
+    skillStateSnapshot: () => helper("skillStateSnapshot", {}, Snapshot),
+    skillStateRestore: (snapshot, readBlob) => boundary(async () => {
+      const stage = "/tmp/sandbox-import-" + crypto.randomUUID(), fs = await files();
+      await fs.mkdir(stage, { user });
+      try {
+        for (const file of snapshot.files) {
+          const relative = workPath(file.path).slice(WORK_ROOT.length + 1);
+          if (!relative) throw new SandboxError("path_denied");
+          const target = `${stage}/${relative}`;
+          await fs.mkdir(target.slice(0, target.lastIndexOf("/")), { recursive: true, user });
+          await fs.writeFile(target, await readBlob(file), { user });
+        }
+        await helper("skillStateRestore", { stage, snapshot }, Restored);
+      } finally { await fs.remove(stage, { recursive: true, force: true, user }); }
+    }),
+    readSkillOutBlob: path => boundary(() => {
+      const normalized = workPath(path.startsWith("/") ? path : `${WORK_ROOT}/out/${path}`);
+      if (!normalized.startsWith(`${WORK_ROOT}/out/`)) throw new SandboxError("path_denied");
+      return bytes(normalized);
+    }),
+    clearSkillOut: async () => {
+      await helper("clearSkillOut", {}, Cleared);
+    },
   };
 }

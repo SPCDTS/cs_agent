@@ -1,7 +1,7 @@
 import { test, before, after } from "node:test";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, realpathSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, realpathSync, existsSync, statSync, chmodSync, readdirSync, lstatSync, promises as fs } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { createSandboxRuntime, resolveInside, tailCollector, OUTPUT_CAP } from "../sandbox/runtime.mjs";
@@ -52,6 +52,34 @@ test("native CLI 输出超过 64 KiB 只保留尾部", async () => {
   assert.equal(result.truncated, true); assert.match(result.stdout, /^\[前 \d+ 字节已省略\]\n/);
   assert.ok(result.stdout.endsWith("aEND\n")); assert.ok(Buffer.byteLength(result.stdout.slice(result.stdout.indexOf("\n") + 1)) <= OUTPUT_CAP);
 });
+test("目录备份只暂存追踪文件，保留空目录，文件变更时拒绝生成旧版本备份", async t => {
+  const work = mkdtempSync(path.join(base, "backup-source-"));
+  const user = { uid: 1000, gid: 1000 }, privileged = process.getuid?.() === 0;
+  const chown = privileged ? t.mock.method(fs, "chown") : t.mock.method(fs, "chown", async () => {});
+  const host = createSandboxRuntime({ root: work, user });
+  mkdirSync(path.join(work, "empty", "child"), { recursive: true });
+  mkdirSync(path.join(work, "a", "b"), { recursive: true });
+  mkdirSync(path.join(work, "node_modules"));
+  writeFileSync(path.join(work, "node_modules", "untracked"), "cache");
+  writeFileSync(path.join(work, "a", "b", "report"), Buffer.from([0, 255, 1]));
+  const snapshot = await host.snapshot();
+  snapshot.directories = ["empty/child"];
+  const stage = await host.stageBackup(snapshot);
+  try {
+    assert.deepEqual(readFileSync(path.join(stage, "a", "b", "report")), Buffer.from([0, 255, 1]));
+    assert.equal(existsSync(path.join(stage, "empty", "child")), true);
+    const owned = new Set(chown.mock.calls.filter(({ arguments: [, uid, gid] }) => uid === user.uid && gid === user.gid).map(({ arguments: [file] }) => file));
+    for (const item of ["", "empty", "empty/child", "a", "a/b", "a/b/report"]) {
+      const file = path.join(stage, item);
+      assert.ok(owned.has(file), item);
+      if (privileged) assert.deepEqual([statSync(file).uid, statSync(file).gid], [user.uid, user.gid]);
+    }
+    assert.equal(existsSync(path.join(stage, "node_modules")), false);
+    writeFileSync(path.join(work, "a", "b", "report"), "changed");
+    await assert.rejects(host.stageBackup(snapshot), /workspace_conflict/);
+  } finally { await host.discardBackup(stage); }
+  assert.equal(existsSync(stage), false);
+});
 test("tailCollector 保留中文字符边界", () => {
   const collector = tailCollector(8); for (const part of ["0123", "4567", "89", "中文"]) collector.push(Buffer.from(part));
   assert.deepEqual(collector.result(), { text: "[前 8 字节已省略]\n89中文", truncated: true });
@@ -95,5 +123,129 @@ await writeFile("out/jersey.png", new Uint8Array(await image.arrayBuffer()));`;
   } finally {
     server.closeAllConnections();
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
+
+test("Skill 状态沙箱：只读物化 SKILL.md 与附件、状态写回、/work/out 软链拦截与 ESM npm 依赖", async () => {
+  const skillBase = path.join(base, "skill-env");
+  const skillRoot = path.join(skillBase, "work");
+  const skillCodeRoot = path.join(skillBase, "opt-skill");
+  const skillDepsRoot = path.join(skillBase, "opt-skill-deps");
+  const cacheRoot = path.join(skillBase, "cache");
+  mkdirSync(skillRoot, { recursive: true });
+  const envPath = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  const skillRuntime = createSandboxRuntime({
+    root: skillRoot,
+    shell,
+    env: { PATH: envPath },
+    skillCodeRoot,
+    skillDepsRoot,
+    cacheRoot,
+  });
+
+  const script = [
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const stateFile = path.join(process.env.SKILL_STATE_DIR, 'session.json');",
+    "const prev = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : { count: 0 };",
+    "prev.count += 1;",
+    "prev.skillDoc = fs.readFileSync(path.join(process.env.SKILL_DIR, 'SKILL.md'), 'utf8').trim();",
+    "fs.writeFileSync(stateFile, JSON.stringify(prev));",
+    "fs.writeFileSync(path.join(process.env.SKILL_OUT_DIR, 'result.json'), JSON.stringify({ count: prev.count }));",
+    "console.log('COUNT=' + prev.count);",
+  ].join("\n");
+
+  const makeWritable = target => {
+    if (!existsSync(target)) return;
+    const stat = lstatSync(target);
+    if (stat.isSymbolicLink()) return;
+    if (stat.isDirectory()) {
+      chmodSync(target, 0o755);
+      for (const name of readdirSync(target)) makeWritable(path.join(target, name));
+    } else {
+      chmodSync(target, 0o644);
+    }
+  };
+
+  try {
+    await skillRuntime.materializeSkill({
+      revision: "rev-1",
+      files: {
+        "SKILL.md": "demo-skill-doc",
+        "scripts/run.js": script,
+      },
+    });
+    const first = await skillRuntime.execSkillBash({
+      command: "node scripts/run.js",
+      timeoutMs: 10_000,
+    });
+    assert.equal(first.code, 0, first.stderr);
+    assert.equal(first.stdout.trim(), "COUNT=1");
+    assert.equal(first.outputs.length, 1);
+    assert.equal(first.outputs[0].path, "result.json");
+    const snap = await skillRuntime.skillStateSnapshot();
+    assert.ok(snap.files.some(f => f.path === "session.json"));
+    assert.ok(!snap.files.some(f => f.path === "result.json"));
+
+    const bashRes = await skillRuntime.execSkillBash({
+      command: "cat \"$SKILL_STATE_DIR/session.json\"",
+      timeoutMs: 10_000,
+    });
+    assert.equal(bashRes.code, 0);
+    assert.equal(JSON.parse(bashRes.stdout).skillDoc, "demo-skill-doc");
+
+    await assert.rejects(
+      skillRuntime.execSkillBash({
+        command: "ln -s \"$SKILL_STATE_DIR/session.json\" \"$SKILL_OUT_DIR/leak.txt\"",
+        timeoutMs: 10_000,
+      }),
+      /path_denied/,
+    );
+    await skillRuntime.clearSkillOut();
+
+    // 验证 npm ci 暂存目录同父级放置、缓存目录可写与 ESM import 解析
+    const fakeBin = path.join(skillBase, "fake-bin");
+    mkdirSync(fakeBin, { recursive: true });
+    const fakeNpm = path.join(fakeBin, "npm");
+    writeFileSync(
+      fakeNpm,
+      [
+        "#!/bin/sh",
+        "set -e",
+        "mkdir -p node_modules/esm-demo",
+        "printf '{\"name\":\"esm-demo\",\"type\":\"module\",\"exports\":\"./index.mjs\"}' > node_modules/esm-demo/package.json",
+        "printf 'export const msg = \"esm-ok\";\\n' > node_modules/esm-demo/index.mjs",
+        "printf 'ok' > \"$npm_config_cache/cache-hit\"",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const depsRuntime = createSandboxRuntime({
+      root: skillRoot,
+      shell,
+      env: { PATH: `${fakeBin}:${envPath}` },
+      skillCodeRoot,
+      skillDepsRoot,
+      cacheRoot,
+    });
+    await depsRuntime.materializeSkill({
+      revision: "rev-esm-1",
+      installNpmDeps: true,
+      depsHash: "deps-h1",
+      files: {
+        "SKILL.md": "esm-skill",
+        "package.json": "{\"name\":\"demo\",\"type\":\"module\"}",
+        "package-lock.json": "{\"lockfileVersion\":3}",
+        "scripts/esm-run.mjs": "import { msg } from 'esm-demo'; console.log(msg);\n",
+      },
+    });
+    const esmRes = await depsRuntime.execSkillBash({
+      command: "node scripts/esm-run.mjs",
+      timeoutMs: 10_000,
+    });
+    assert.equal(esmRes.code, 0, esmRes.stderr);
+    assert.equal(esmRes.stdout.trim(), "esm-ok");
+  } finally {
+    makeWritable(skillBase);
+    rmSync(skillBase, { recursive: true, force: true });
   }
 });

@@ -12,6 +12,8 @@ import { boundedJson, compileMcpSchema } from "./schema";
 import { MCP_CONFIG } from "./config";
 import { toolNames } from "./names";
 import { McpAuthoritySchema, snapshotCatalogs, type McpAuthority } from "./access";
+import { SkillRuntimeSnapshotSchema } from "../skill-runtime/grants";
+import { SkillNameSchema } from "../skill-runtime/manifest";
 import { SandboxResourceSchema, type SandboxResource } from "../sandbox/resources";
 import type { SandboxTask } from "../sandbox/task-access";
 import type { SubagentCapabilities } from "../subagent/model";
@@ -27,6 +29,8 @@ export interface SubagentCapabilityHost {
   validateSubagentAccess(id: string): Promise<{ authority: McpAuthority; capabilities: SubagentCapabilities; sandboxTask?: SandboxTask; sandbox?: SandboxResource } | undefined>;
   subagentMcp(id: string, call: { name: string; args: unknown; operationId: string }): Promise<ToolExecutionResult>;
   subagentSkill(id: string, input: { name: string; path?: string }): Promise<ToolExecutionResult>;
+  subagentSkillList(id: string): Promise<ToolExecutionResult>;
+  subagentSkillBash(id: string, call: { skill: string; command: string; timeoutSec?: number; operationId: string }): Promise<ToolExecutionResult>;
   subagentCoding(id: string, operation: SubagentCodingOperation): Promise<ToolExecutionResult>;
 }
 
@@ -76,6 +80,36 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
       structuredOutputSchema: mcpCodemodeSchema(), replay: "safe", callers: ["tools"], execute: async (args, api) => mcpCodemodeResult(await host.subagentMcp(id, { name: `mcp_resources_${action}`, args, operationId: String(api.taskId) })),
     })) }));
   }
+  if (capabilities.skillRuntime?.grants.length) {
+    registry.install(defineExtension({
+      name: "cs.subagent.skill-runtime",
+      namespace: { name: "skills", description: "技能专属加密状态沙箱执行" },
+      tools: [
+        defineTool({
+          name: "skill_list",
+          description: "列出当前子任务可使用 skill_bash 共享状态沙箱的已授权技能。",
+          parameters: Type.Object({}, { additionalProperties: false }),
+          structuredOutputSchema: Type.Record(Type.String(), Type.Unknown()),
+          replay: "safe",
+          callers: ["tools"],
+          execute: () => host.subagentSkillList(id),
+        }),
+        defineTool({
+          name: "skill_bash",
+          description: "在已授权技能的专属加密状态沙箱中执行命令；输出产物 outputs[].path（r2://.tmp/...）可向父会话汇报以供读取或经 send_file 发送。",
+          parameters: Type.Object({
+            skill: SkillNameSchema,
+            command: Type.String({ minLength: 1, maxLength: 16384 }),
+            timeoutSec: Type.Optional(Type.Integer({ minimum: 1, maximum: 120 })),
+          }, { additionalProperties: false }),
+          structuredOutputSchema: Type.Record(Type.String(), Type.Unknown()),
+          replay: "unsafe",
+          callers: ["tools"],
+          execute: (args, api) => host.subagentSkillBash(id, { ...args, operationId: String(api.taskId) }),
+        }),
+      ],
+    }));
+  }
   return installCodemode(registry, {
     allowed: async () => {
       const access = await host.validateSubagentAccess(id);
@@ -118,13 +152,20 @@ export function createSubagentCapabilityHost(stub: object): SubagentCapabilityHo
       const schema = Type.Object({
         authority: McpAuthoritySchema,
         sandbox: Type.Optional(SandboxResourceSchema),
-        capabilities: Type.Object({ sandboxId: Type.Optional(Type.String()), coding: Type.Optional(Type.Boolean()), mcp: Type.Optional(snapshot) }),
+        capabilities: Type.Object({
+          sandboxId: Type.Optional(Type.String()),
+          coding: Type.Optional(Type.Boolean()),
+          mcp: Type.Optional(snapshot),
+          skillRuntime: Type.Optional(SkillRuntimeSnapshotSchema),
+        }),
       });
       if (!Check(schema, value)) throw new Error("delegation_denied");
       return value;
     },
     subagentMcp: (id, call) => result("subagentMcp", [id, call]),
     subagentSkill: (id, input) => result("subagentSkill", [id, input]),
+    subagentSkillList: id => result("subagentSkillList", [id]),
+    subagentSkillBash: (id, call) => result("subagentSkillBash", [id, call]),
     subagentCoding: (id, operation) => result("subagentCoding", [id, operation]),
   };
 }

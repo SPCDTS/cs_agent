@@ -1,7 +1,9 @@
+import type { DirectoryBackupRecord } from "@cloudflare/sandbox";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { WorkspaceGc, type GcOptions } from "./workspace-gc";
 import { FILE_MAX_BYTES, WORKSPACE_MAX_BYTES, sha256 } from "../media/model";
+import { classifyError } from "../shared/diagnostics";
 import { legacyScopePrefix, scopePrefix } from "../media/repository";
 import { SandboxError, type ExecResult, type FileEdit, type ReadResult, type RuntimeSnapshot, type SandboxClient } from "./client";
 
@@ -28,6 +30,9 @@ type OperationRecord = { fingerprint: string; state: "executing" | "unknown"; re
   | { fingerprint: string; state: "committed"; revision: string; result: { kind: "inline"; value: WorkspaceOperationResult } | { kind: "r2"; key: string } }
   | { fingerprint: string; state: "expired"; revision: string }
   | { fingerprint: string; state: "failed"; revision: string; error: string; issues?: unknown };
+export type WorkspaceArchive = { savedAt: number; revision: string; record: DirectoryBackupRecord };
+export const ARCHIVE = "workspace:archive";
+const ARCHIVE_INTERVAL_MS = 15 * 60_000;
 const HEAD = "workspace:head", EPOCH = "workspace:epoch";
 export function relativeWorkPath(raw: string): string {
   const relative = raw.startsWith("/work/") ? raw.slice(6) : raw;
@@ -62,6 +67,7 @@ export function parseManifest(value: unknown): WorkspaceManifest {
 export class WorkspaceManager {
   private queue: Promise<unknown> = Promise.resolve();
   private hydrated = false;
+  private nextBackupAttempt = 0;
   private readonly collector: WorkspaceGc;
   constructor(private readonly deps: { workspace: string; bucket: R2Bucket; storage: WorkspaceStorage; runtime: SandboxClient; resetRuntime(): Promise<unknown>; runtimeReady(): boolean }) {
     this.collector = new WorkspaceGc({ ...deps, prefix: () => this.prefix(), parse: parseManifest });
@@ -113,38 +119,35 @@ export class WorkspaceManager {
     });
   }
   /** 附件不是容器命令：只提交已校验字节、manifest 与成功回执，失败不留下不可重试的命令状态。 */
-  saveAttachment(path: string, bytes: Uint8Array, operationId: string): Promise<void> {
-    return this.serial(async () => {
-      const relative = relativeWorkPath(path);
-      if (!operationId || operationId.length > 240) throw new Error("invalid_request");
-      if (!(bytes instanceof Uint8Array) || bytes.byteLength > FILE_MAX_BYTES) throw new Error("too_large");
-      if (relative.split("/").some(part => [".git", ".wrangler", "node_modules"].includes(part))) throw new Error("path_denied");
-      const hash = await sha256(bytes), fingerprint = await sha256(JSON.stringify([relative, hash]));
-      const receiptKey = "workspace:attachment:" + await sha256(operationId);
-      const receipt = await this.deps.storage.get<{ fingerprint: string }>(receiptKey);
-      if (receipt) {
-        if (receipt.fingerprint !== fingerprint) throw new Error("operation_conflict");
-        return; // 曾经提交成功；即使现在副本已被编辑或删除，也不触碰它。
-      }
-      const current = await this.manifest(), existing = current.files.find(file => file.path === relative);
-      if (existing && existing.sha256 !== hash || current.directories.includes(relative)
-        || current.files.some(file => relative.startsWith(file.path + "/"))) throw new Error("workspace_conflict");
-      const parts = relative.split("/"), directories = [...new Set([...current.directories,
-        ...parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"))])];
-      const file = { path: relative, sha256: hash, bytes: bytes.byteLength, mime: "application/octet-stream", mode: 420 };
-      const manifest = existing ? current : parseManifest({ ...current, revision: crypto.randomUUID(), parentRevision: current.revision,
-        files: [...current.files, file], directories, totalBytes: current.totalBytes + bytes.byteLength });
-      if (!existing) {
-        await this.deps.bucket.put(`${await this.prefix()}/blobs/${hash}`, bytes);
-        await this.deps.bucket.put(`${await this.prefix()}/manifests/${manifest.revision}`, JSON.stringify(manifest));
-      }
-      // 先使运行时失效：即使事务已提交但调用方丢失响应，后续操作也必须从 head 恢复。
-      this.hydrated = false;
-      await this.deps.storage.transaction(async tx => {
-        if ((await tx.get<string>(HEAD) ?? "0") !== current.revision) throw new Error("workspace_conflict");
-        await tx.put({ [HEAD]: manifest.revision, [EPOCH]: (await tx.get<number>(EPOCH) ?? 0) + 1, [receiptKey]: { fingerprint } });
-      });
+  private async createFile(path: string, bytes: Uint8Array, operationId: string): Promise<WorkspaceRunResult> {
+    const relative = relativeWorkPath(path);
+    if (relative.split("/").some(part => [".git", ".wrangler", "node_modules"].includes(part))) throw new Error("path_denied");
+    const hash = await sha256(bytes), fingerprint = await sha256(JSON.stringify([relative, hash]));
+    const receiptKey = "workspace:attachment:" + await sha256(operationId);
+    const receipt = await this.deps.storage.get<{ fingerprint: string; revision?: string }>(receiptKey);
+    if (receipt) {
+      if (receipt.fingerprint !== fingerprint) throw new Error("operation_conflict");
+      return { status: "committed", persistence: "committed", revision: receipt.revision ?? await this.deps.storage.get<string>(HEAD) ?? "0", result: { bytes: bytes.length } };
+    }
+    const current = await this.manifest(), existing = current.files.find(file => file.path === relative);
+    if (existing && existing.sha256 !== hash || current.directories.includes(relative)
+      || current.files.some(file => relative.startsWith(file.path + "/"))) throw new Error("workspace_conflict");
+    const parts = relative.split("/"), directories = [...new Set([...current.directories,
+      ...parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"))])];
+    const file = { path: relative, sha256: hash, bytes: bytes.byteLength, mime: "application/octet-stream", mode: 420 };
+    const manifest = existing ? current : parseManifest({ ...current, revision: crypto.randomUUID(), parentRevision: current.revision,
+      files: [...current.files, file], directories, totalBytes: current.totalBytes + bytes.byteLength });
+    if (!existing) {
+      await this.deps.bucket.put(`${await this.prefix()}/blobs/${hash}`, bytes);
+      await this.deps.bucket.put(`${await this.prefix()}/manifests/${manifest.revision}`, JSON.stringify(manifest));
+    }
+    // 只有清单变化才需重新物化；已写入相同内容时保留热容器。
+    if (!existing) this.hydrated = false;
+    await this.deps.storage.transaction(async tx => {
+      if ((await tx.get<string>(HEAD) ?? "0") !== current.revision) throw new Error("workspace_conflict");
+      await tx.put({ [HEAD]: manifest.revision, [EPOCH]: (await tx.get<number>(EPOCH) ?? 0) + 1, [receiptKey]: { fingerprint, revision: manifest.revision } });
     });
+    return { status: "committed", persistence: "committed", revision: manifest.revision, result: { bytes: bytes.length } };
   }
 
   /** 仅在接收方已持久入箱后调用；部分导入或 unknown 不得释放附件证明。 */
@@ -160,8 +163,39 @@ export class WorkspaceManager {
     this.hydrated = false;
     // DO 重新实例化时先杀旧容器，防止此前失联的命令在恢复后继续写入。
     await this.deps.resetRuntime();
-    await this.deps.runtime.restore(manifest, file => this.blob(file));
+    const runtime = this.deps.runtime;
+    const archive = await this.deps.storage.get<WorkspaceArchive>(ARCHIVE);
+    let base: WorkspaceManifest | undefined;
+    if (archive && runtime.restoreDirectory) {
+      try {
+        await runtime.restoreDirectory(archive.record);
+        if (archive.revision === manifest.revision) { this.hydrated = true; return; }
+        base = await this.manifest(archive.revision);
+      } catch (error) {
+        console.warn({ event: "workspace_archive_restore_failed", ...classifyError(error) });
+      }
+    }
+    await runtime.restore(manifest, file => this.blob(file), base);
+    // 旧工作区和新导入的版本在首次物化后升级，后续冷启动直接恢复一个归档。
+    const next = await this.makeArchive(manifest, base ? archive : undefined);
+    if (next) {
+      await this.deps.storage.put(ARCHIVE, next);
+      await this.discardArchive(archive);
+    }
     this.hydrated = true;
+  }
+  private async makeArchive(manifest: WorkspaceManifest, previous?: WorkspaceArchive): Promise<WorkspaceArchive | undefined> {
+    const now = Date.now();
+    if (!this.deps.runtime.backupDirectory || manifest.revision === "0" || manifest.revision === previous?.revision
+      || now < Math.max(this.nextBackupAttempt, previous ? previous.savedAt + ARCHIVE_INTERVAL_MS : 0)) return;
+    this.nextBackupAttempt = now + ARCHIVE_INTERVAL_MS;
+    try { return { savedAt: now, revision: manifest.revision, record: await this.deps.runtime.backupDirectory(manifest) }; }
+    catch (error) { console.warn({ event: "workspace_archive_create_failed", ...classifyError(error) }); }
+  }
+  private async discardArchive(old?: WorkspaceArchive): Promise<void> {
+    if (!old) return;
+    try { await this.deps.bucket.delete(`${await this.prefix()}/archives/${old.record.id}.tar.zst`); }
+    catch { console.warn({ event: "workspace_archive_cleanup_failed" }); }
   }
   private async commit(snapshot: RuntimeSnapshot, previous: WorkspaceManifest, epoch: number): Promise<WorkspaceManifest> {
     const manifest = parseManifest({ ...snapshot, schemaVersion: 1, workspace: this.deps.workspace, revision: crypto.randomUUID(), parentRevision: previous.revision });
@@ -224,18 +258,8 @@ export class WorkspaceManager {
           }
         }
       }
+      if (input.operation.kind === "writeBytes" && input.operation.createOnly) return this.createFile(input.operation.path, input.operation.data, input.operationId);
       const manifest = await this.manifest();
-      const destination = input.operation.kind === "writeBytes" && input.operation.createOnly ? relativeWorkPath(input.operation.path) : undefined;
-      if (destination) {
-        const existing = manifest.files.find(file => file.path === destination);
-        if (existing && existing.sha256 === digest) {
-          return { status: "committed", persistence: "committed", revision: manifest.revision, result: { bytes: existing.bytes } };
-        }
-        if (existing || manifest.directories.includes(destination) || manifest.files.some(file => destination.startsWith(file.path + "/"))) {
-          throw new Error("workspace_conflict");
-        }
-        if (destination.split("/").some(part => [".git", ".wrangler", "node_modules"].includes(part))) throw new Error("path_denied");
-      }
       await this.ensureRuntime(manifest);
       const epoch = (await this.deps.storage.get<number>(EPOCH) ?? 0) + 1;
       await this.deps.storage.put(EPOCH, epoch);
@@ -246,8 +270,10 @@ export class WorkspaceManager {
         executed = true;
         const retainedPaths = [...manifest.files.map(file => file.path), ...manifest.directories];
         const snapshot = await this.deps.runtime.snapshot(retainedPaths);
-        if (destination && !snapshot.files.some(file => file.path === destination && file.sha256 === digest)) throw new Error("persistence_failed");
         const committed = await this.commit(snapshot, manifest, epoch);
+        const previousArchive = await this.deps.storage.get<WorkspaceArchive>(ARCHIVE);
+        // 每次提交都保存差量，整目录备份限频；旧归档到 head 的差量在恢复时补齐。
+        const archive = await this.makeArchive(committed, previousArchive);
         const resultKey = `${await this.prefix()}/results/${await sha256(input.operationId)}`;
         const encodedResult = JSON.stringify(result);
         const storedResult: Extract<OperationRecord, { state: "committed" }>["result"] = new TextEncoder().encode(encodedResult).length <= 32768 ? { kind: "inline", value: result } : { kind: "r2", key: resultKey };
@@ -257,8 +283,9 @@ export class WorkspaceManager {
         const expiredKey = recent.length > 32 ? recent.shift() : undefined;
         await this.deps.storage.transaction(async tx => {
           if (await tx.get<number>(EPOCH) !== epoch) throw new Error("workspace_conflict");
-          await tx.put({ [HEAD]: committed.revision, [key]: { fingerprint, state: "committed", revision: committed.revision, result: storedResult } satisfies OperationRecord, "workspace:recent": recent });
+          await tx.put({ ...(archive ? { [ARCHIVE]: archive } : {}), [HEAD]: committed.revision, [key]: { fingerprint, state: "committed", revision: committed.revision, result: storedResult } satisfies OperationRecord, "workspace:recent": recent });
         });
+        if (archive) await this.discardArchive(previousArchive);
         if (expiredKey) {
           try {
             const expired = await this.deps.storage.get<OperationRecord>(expiredKey);

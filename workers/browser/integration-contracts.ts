@@ -62,3 +62,45 @@ export const McpDecisionSchema = Type.Object({ result: Type.Optional(McpToolResu
 export const McpManageResultSchema = Type.Object({ status: Type.Optional(Type.String()), url: Type.Optional(Type.String()), message: Type.Optional(Type.String()), code: Type.Optional(Type.String()) });
 export const McpRejectedToolsSchema = Type.Object({ error: Type.Literal("tools_rejected"), rejectedTools: Type.Array(Type.Object({ name: Type.String(), reason: Type.String() })) });
 export const McpThreadsSchema = Type.Object({ threads: Type.Array(Type.Object({ key: Type.String(), name: Type.Optional(Type.String()) })) });
+
+const SkillRuntimeStateFileSchema = Type.Object({ path: Type.String(), bytes: Type.Number(), mode: Type.Number() });
+const SkillRuntimeStateSchema = Type.Union([
+  Type.Object({
+    skill: Type.String(),
+    revision: Type.String(),
+    updatedAt: Type.Number(),
+    totalBytes: Type.Number(),
+    fileCount: Type.Number(),
+    files: Type.Array(SkillRuntimeStateFileSchema),
+  }),
+  Type.Object({ error: Type.Literal("unavailable") }),
+]);
+const SkillRuntimeGrantItemSchema = Type.Object({
+  group: Type.String(),
+  revision: Type.String(),
+  updatedAt: Type.Number(),
+});
+export const SkillRuntimeItemSchema = Type.Object({
+  skill: Type.String(),
+  description: Type.String(),
+  enabled: Type.Boolean(),
+  updatedAt: Type.Number(),
+  deps: Type.Union([Type.String(), Type.Null()]),
+  grants: Type.Array(SkillRuntimeGrantItemSchema),
+  state: SkillRuntimeStateSchema,
+});
+export const SkillRuntimeOverviewSchema = Type.Object({
+  skills: Type.Array(SkillRuntimeItemSchema),
+  groups: Type.Array(Type.Object({ key: Type.String(), name: Type.Optional(Type.String()) })),
+});
+export type SkillRuntimeOverview = Static<typeof SkillRuntimeOverviewSchema>;
+export const SkillRuntimeGrantSavedSchema = Type.Object({
+  skill: Type.String(),
+  group: Type.String(),
+  enabled: Type.Boolean(),
+  revision: Type.String(),
+});
+export const SkillRuntimeClearedSchema = Type.Object({
+  skill: Type.String(),
+  cleared: Type.Literal(true),
+});

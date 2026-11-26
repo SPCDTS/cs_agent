@@ -1,4 +1,6 @@
-import { SharedCredentials, SHARED_CREDENTIAL_SCHEMA, type WriteCredential } from "./credentials/store";
+import { SKILL_RUNTIME_GRANT_SCHEMA, SkillGrantStore, type SkillRuntimeSnapshot } from "./skill-runtime/grants";
+import { hasNpmLockFiles, SkillNameSchema } from "./skill-runtime/manifest";
+import { sha256Hex } from "./shared/hash";
 import { EDGE_SCHEMA, EdgeStore } from "./communication/edges";
 import { DurableObject } from "cloudflare:workers";
 import { Type } from "typebox";
@@ -44,7 +46,7 @@ export class RegistryDO extends DurableObject<Env> {
   private readonly alertStore = new AlertStore(this.ctx.storage);
   private alertDrain?: Promise<void>;
   private readonly vault = new TokenVault(this.env.OAUTH_STORE_KEY);
-  private readonly httpCredentials = new SharedCredentials(this.ctx.storage.sql, this.vault);
+  private readonly skillGrants = new SkillGrantStore(this.ctx.storage.sql);
   private readonly mcpServers = new McpServerStore(this.ctx.storage, this.vault, this.env.PUBLIC_ORIGIN);
   private readonly cuaGrants = new CuaGrants(this.ctx.storage);
   private readonly cloudflare = new CloudflareGrant(this.ctx.storage.sql, this.vault, this.env);
@@ -64,7 +66,7 @@ export class RegistryDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`
-      ${SHARED_CREDENTIAL_SCHEMA}
+      ${SKILL_RUNTIME_GRANT_SCHEMA}
       ${EDGE_SCHEMA}
       CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (
         server_id TEXT NOT NULL, account_id TEXT NOT NULL, revision TEXT NOT NULL, issuer TEXT NOT NULL,
@@ -93,28 +95,121 @@ export class RegistryDO extends DurableObject<Env> {
   cloudflareReview(id: string, approve: boolean) { return this.cloudManager.review(id, approve); }
   cloudflareStatus() { return this.cloudflare.status(); }
 
-  sharedCredentialList(scope: string) { return this.httpCredentials.list(scope); }
-  async sharedCredentialSave(change: WriteCredential, bytes: Uint8Array) {
-    const saved = await this.httpCredentials.save(change, bytes);
-    this.closeCredentialAlerts(saved.ref);
-    return saved;
+  private depsHashFor(files: Record<string, string>, installNpmDeps: boolean): string {
+    return installNpmDeps ? sha256Hex((files["package.json"] ?? "") + "\0" + (files["package-lock.json"] ?? "")) : "";
   }
-  sharedCredentialGrant(ref: string, group: string, allow: boolean) { return this.httpCredentials.share(ref, group, allow); }
-  sharedCredentialForget(ref: string, expectedRevision: string) {
-    return this.ctx.storage.transactionSync(() => {
-      const result = this.httpCredentials.forget(ref, expectedRevision);
-      this.closeCredentialAlerts(ref);
-      return result;
+
+  private materializeFilesFor(skill: Skill): Record<string, string> {
+    return { "SKILL.md": skill.body, ...skill.files };
+  }
+
+  skillRuntimeList(scope: string) {
+    if (scope === "owner") {
+      return this.skillsList().map(summary => {
+        const skill = this.skillGet(summary.name);
+        const files = skill?.files ?? {};
+        return {
+          skill: summary.name,
+          enabled: summary.enabled,
+          description: summary.description,
+          deps: hasNpmLockFiles(files) ? "npm" : null,
+          groups: this.skillGrants.list(summary.name).map(g => ({ group: g.scope, revision: g.revision })),
+        };
+      });
+    }
+    const items = [];
+    for (const grant of this.skillGrants.forScope(scope)) {
+      const skill = this.skillGet(grant.skill);
+      if (!skill?.enabled) continue;
+      items.push({ skill: skill.name, description: skill.description });
+    }
+    return items;
+  }
+
+  skillRuntimeSnapshot(scope: string): SkillRuntimeSnapshot {
+    if (scope === "owner") {
+      const grants: SkillRuntimeSnapshot["grants"] = [];
+      for (const summary of this.skillsList()) {
+        if (!summary.enabled) continue;
+        grants.push({ skill: summary.name, revision: this.skillRevision(summary.name) ?? "1" });
+      }
+      return { scope, grants };
+    }
+    const grants: SkillRuntimeSnapshot["grants"] = [];
+    for (const grant of this.skillGrants.forScope(scope)) {
+      const skill = this.skillGet(grant.skill);
+      if (!skill?.enabled) continue;
+      grants.push({ skill: skill.name, revision: grant.revision });
+    }
+    return { scope, grants };
+  }
+
+  skillRuntimeListForSnapshot(scope: string, snapshot: SkillRuntimeSnapshot) {
+    if (snapshot.scope !== scope) return [];
+    const bySkill = new Map(snapshot.grants.map(grant => [grant.skill, grant]));
+    const items = [];
+    for (const summary of this.skillsList()) {
+      if (!summary.enabled) continue;
+      const snapGrant = bySkill.get(summary.name);
+      if (!snapGrant) continue;
+      const liveRevision = scope === "owner"
+        ? (this.skillRevision(summary.name) ?? "1")
+        : this.skillGrants.forScope(scope).find(g => g.skill === summary.name)?.revision;
+      if (!liveRevision || snapGrant.revision !== liveRevision) continue;
+      items.push({ skill: summary.name, description: summary.description });
+    }
+    return items;
+  }
+
+  skillRuntimeResolve(scope: string, skillName: string, snapshot?: SkillRuntimeSnapshot) {
+    const skill = this.skillGet(skillName);
+    if (!skill) throw new Error("skill_not_found");
+    if ((scope !== "owner" || snapshot !== undefined) && !skill.enabled) throw new Error("skill_denied");
+    const grant = scope === "owner" ? undefined : this.skillGrants.forScope(scope).find(g => g.skill === skillName);
+    if (scope !== "owner" && !grant) throw new Error("skill_denied");
+    const skillRevision = this.skillRevision(skillName) ?? "1";
+    if (snapshot) {
+      if (snapshot.scope !== scope) throw new Error("skill_denied");
+      const snapGrant = snapshot.grants.find(g => g.skill === skillName);
+      const liveRevision = scope === "owner" ? skillRevision : grant!.revision;
+      if (!snapGrant || snapGrant.revision !== liveRevision) throw new Error("skill_denied");
+    }
+    const installNpmDeps = hasNpmLockFiles(skill.files);
+    return {
+      skill: skillName,
+      revision: skillRevision,
+      files: this.materializeFilesFor(skill),
+      installNpmDeps,
+      depsHash: this.depsHashFor(skill.files, installNpmDeps),
+    };
+  }
+
+  skillRuntimeGrant(skillName: string, group: string, enabled: boolean) {
+    if (!this.skillGet(skillName)) throw new Error("skill_not_found");
+    return this.skillGrants.set(skillName, group, enabled);
+  }
+
+  skillRuntimeAdminOverview() {
+    return this.skillsList().map(summary => {
+      const skill = this.skillGet(summary.name);
+      const files = skill?.files ?? {};
+      return {
+        skill: summary.name,
+        description: summary.description,
+        enabled: summary.enabled,
+        updatedAt: summary.updatedAt,
+        deps: hasNpmLockFiles(files) ? "npm" : null,
+        grants: this.skillGrants.list(summary.name).map(g => ({
+          group: g.scope,
+          revision: g.revision,
+          updatedAt: g.updatedAt,
+        })),
+      };
     });
   }
-  private closeCredentialAlerts(ref: string) {
-    for (const origin of ["qq", "web"] as const) this.resolveAlert("credential_login", "credential:" + ref, origin);
-  }
-  sharedCredentialRequest(scope: string, ref: string, url: string, origin: "qq" | "web") {
-    return this.httpCredentials.request(scope, ref, url, revision => {
-      this.recordAlert({ kind: "credential_login", scope: "credential:" + ref, origin, episode: revision,
-        message: `共享凭证 ${ref} 需要更新，请在主人会话重新登录并导入新的凭证文件。` });
-    });
+
+  skillRuntimeAuthResolved(skill: string) {
+    for (const origin of ["qq", "web"] as const) this.resolveAlert("credential_login", "skill:" + skill, origin);
   }
 
   mcpConfig(scope?: string): McpConfig {
@@ -180,9 +275,16 @@ export class RegistryDO extends DurableObject<Env> {
     return this.skillsList().find(summary => summary.name === skill.name)!;
   }
 
-  skillDelete(name: string): boolean {
+  async skillDelete(name: string): Promise<boolean> {
     const removed = this.ctx.storage.sql.exec("DELETE FROM skills WHERE name = ? RETURNING name", name).toArray().length > 0;
-    if (removed) this.bumpSkillRevision(name);
+    if (removed) {
+      this.bumpSkillRevision(name);
+      this.skillGrants.deleteSkill(name);
+      this.skillRuntimeAuthResolved(name);
+      if (Check(SkillNameSchema, name)) {
+        await this.env.SANDBOX.getByName("skill-state:" + name).skillStateClear(name);
+      }
+    }
     return removed;
   }
 
