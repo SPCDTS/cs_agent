@@ -60,7 +60,8 @@ export function sql<T>(query: string, ...args: unknown[]): Promise<T[]> {
 /** 模型脚本：每次请求先记录当前可用工具（重放 toolsAdded/toolsRemoved）和最后一条用户输入，再按步骤调用工具。 */
 export function scriptedModel(steps: { name: string; args: JsonObject }[]) {
   const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
-  const requests: { tools: string[]; user: string; sections: Record<string, string | null> }[] = [], outputs: string[] = [], captured = new Set<string>();
+  const requests: { tools: string[]; user: string; sections: Record<string, string | null> }[] = [], outputs: string[] = [];
+  const pendingCalls = new Set<string>();
   const respond: FauxResponseFactory = transcript => {
     faux.setResponses([respond]);
     if (transcript.messages.some(message => message.role === "user" && typeof message.content === "string" && message.content.startsWith(MEMORY_EXTRACT_PROMPT))) return fauxAssistantMessage("[]");
@@ -73,16 +74,20 @@ export function scriptedModel(steps: { name: string; args: JsonObject }[]) {
     }
     const user = transcript.messages.findLast(message => message.role === "user");
     requests.push({ tools: [...tools], sections, user: typeof user?.content === "string" ? user.content : user?.content.map(block => block.type === "text" ? block.text : "").join("") ?? "" });
-    const last = transcript.messages.findLast(message => message.role === "toolResult");
-    if (last?.role === "toolResult" && !captured.has(last.toolCallId)) {
-      captured.add(last.toolCallId);
-      outputs.push(last.content.filter(block => block.type === "text").map(block => block.text).join(""));
+    for (const message of transcript.messages) {
+      if (message.role === "toolResult" && pendingCalls.delete(message.toolCallId)) {
+        outputs.push(message.content.filter(block => block.type === "text").map(block => block.text).join(""));
+      }
     }
     const latest = transcript.messages.findLast(message => message.role !== "system");
     if (latest?.role === "user" || latest?.role === "toolResult") {
       const next = steps.shift();
       // 空名字表示本回合到此结束，后续步骤留给下一回合。
-      if (next?.name) return fauxAssistantMessage(fauxToolCall(next.name, next.args), { stopReason: "toolUse" });
+      if (next?.name) {
+        const call = fauxToolCall(next.name, next.args);
+        pendingCalls.add(call.id);
+        return fauxAssistantMessage(call, { stopReason: "toolUse" });
+      }
     }
     return fauxAssistantMessage("done");
   };
