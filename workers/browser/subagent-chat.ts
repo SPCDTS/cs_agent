@@ -5,6 +5,8 @@ import { readApi } from "./api";
 import { SubagentConversationSchema, type SubagentConversation } from "./history-contracts";
 import { scheduleConsolePoll } from "./trace";
 import { refreshChatChildren } from "./chat-navigation";
+import { chatProse } from "./chat-prose";
+import { rawMessage } from "./chat-cards";
 
 type Entry=SubagentConversation["entries"][number];
 const entries=new Map<number,Entry>();
@@ -60,9 +62,10 @@ function renderSubagentMessages(older:boolean){
         detail(key,message.toolName||"会话上下文",message.text,message.isError);return;
       }
       if(message.text){
+        const body = message.role === "user" ? el("div", { className: "chat-literal", text: message.text }) : chatProse(message.text);
         rows.push(el("article",{className:"chat-message "+(message.role==="user"?"user":"assistant")},[
-          el("div",{className:"message-meta",text:(message.role==="user"?"任务 / 跟进":"子 agent")+(message.at?" · "+bjTime(message.at):"")}),
-          el("div",{className:"message-text",text:message.text}),
+          el("header",{className:"message-meta"},[el("strong",{text:message.role==="user"?"任务 / 跟进":"子 agent"}),message.at?el("time",{text:bjTime(message.at)}):null]),
+          el("div",{className:"chat-body"},[body, body.textContent !== message.text ? rawMessage(key, message.text, open.has(key)) : null]),
         ]));
       }
       for(const tool of message.toolCalls??[])detail(key+":"+tool.id,tool.name+" · 调用参数",tool.arguments);

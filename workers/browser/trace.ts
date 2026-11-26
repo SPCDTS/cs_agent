@@ -1,7 +1,8 @@
 import { openExecutions } from "./executions";
+import { chatCard } from "./chat-cards";
 import { refreshContextMonitor } from "./context-monitor";
 import { cs, downloadAsset, loadUsage, statuses } from "./console";
-import { $, bjTime, bytes, el, fail, readToken, state, time } from "./app";
+import { $, el, fail, readToken, state, time } from "./app";
 import * as C from "./request-contracts";
 import { readApi } from "./api";
 import { loadTopology, refreshTopologyAfterTurn } from "./topology";
@@ -51,18 +52,21 @@ function turnActions(turnId: string) {
       onclick:()=>openExecutions({thread:cs.chat.thread,turn:turnId})}),
   ]);
 }
-const chatSources: Record<string,string> = {qq:"QQ",web:"网页",model:"模型回答（非投递回执）","agent-in":"Agent 收件","agent-out":"Agent 发件",subagent:"子任务报告",event:"外部事件",github:"GitHub 事件",gmail:"Gmail 事件"};
 const chatStatus: Record<string,string> = {...statuses,accepted:"对端已入箱（非已读）",duplicate:"对端已入箱（重复投递）",unconfirmed:"未确认入箱",waiting:"等待进入模型"};
 export function renderChatMessages(messages:C.ChatMessage[]){
   const list=$("chat-messages"),nearBottom=list.scrollHeight-list.scrollTop-list.clientHeight<100,first=!list.querySelector(".chat-message"),seen=new Set<string>();
+  const expanded = new Set([...list.querySelectorAll<HTMLDetailsElement>("details[data-entry][open]")].map(node => node.dataset.entry));
+  const focused = document.activeElement?.matches("#chat-messages details[data-entry] > summary")
+    ? document.activeElement.parentElement?.dataset.entry : undefined;
   const content: HTMLElement[]=[];
   for(const m of messages){
-    const message=el("article",{className:"chat-message "+m.role},[el("div",{className:"message-meta",text:(m.source!=="agent-out" && m.role==="assistant"?"助手":m.name||"用户")+" · "+(chatSources[m.source]||"未知来源")+" · "+bjTime(m.at)+(m.status?" · "+(chatStatus[m.status]||m.status):"")}),el("div",{className:"message-text",text:m.text}),...(m.assets||[]).map(ref=>el("button",{className:"btn",text:ref.name+" · "+bytes(ref.bytes),onclick:()=>downloadAsset(ref)}))]);
+    const message=chatCard(m, m.status ? chatStatus[m.status] || m.status : "", downloadAsset, expanded);
     if(m.turnId&&!seen.has(m.turnId)&&m.role==="assistant"){seen.add(m.turnId);content.push(turnActions(m.turnId));}
     content.push(message);
     if(m.turnId&&!seen.has(m.turnId)&&m.role==="user"){seen.add(m.turnId);content.push(turnActions(m.turnId));}
   }
   list.replaceChildren(...content);
+  if (focused) list.querySelector<HTMLElement>("details[data-entry=" + CSS.escape(focused) + "] > summary")?.focus({ preventScroll: true });
   if(!messages.length)list.append(el("div",{className:"empty-state"},[el("strong",{text:"从这里继续对话"}),"网页发言会进入当前会话，QQ 里的上下文仍然保留。"]));
   if(cs.locateTurn){const target=[...list.querySelectorAll<HTMLElement>("section[data-turn]")].find(n=>n.dataset.turn===cs.locateTurn);if(target){target.scrollIntoView({block:"nearest"});cs.locateTurn=null;}}
   else if(nearBottom||first)list.scrollTop=list.scrollHeight;

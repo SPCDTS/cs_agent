@@ -19,6 +19,12 @@ test("会话对话和刷新使用相同来源标签、待入模项原位更新�
     return Response.json([]);
   };
   initConsole();await click(document.querySelector('[data-view="chat"]'));
+  for (const id of ["chat-switcher", "chat-tools-toggle"]) {
+    const toggle = document.getElementById(id);
+    assert.ok(document.getElementById(toggle.getAttribute("aria-controls")));
+    await click(toggle); assert.equal(toggle.getAttribute("aria-expanded"), "true");
+    await click(toggle); assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  }
   const panel=document.getElementById("chat-messages"),labels=()=>[...panel.querySelectorAll(".message-meta")].map(el=>el.textContent);
   assert.ok(panel.textContent.includes("等待进入模型"));
   await loadChat();assert.match(paths[1],/revision=7/);assert.match(paths[1],/pending=internal%3A1/);
@@ -28,6 +34,59 @@ test("会话对话和刷新使用相同来源标签、待入模项原位更新�
   const before=panel.textContent;await click(document.getElementById("chat-reload"));
   assert.equal(paths.at(-1),"/admin/threads/owner/chat");assert.equal(panel.textContent,before);
   clearTimeout(cs.timer);
+});
+
+test("会话按宿主来源展示事件、消息和附件，刷新保留原文", async () => {
+  const { document } = mountDom(ADMIN_PAGE_HTML);
+  const { renderChatMessages } = await bundleModule("browser/trace.ts");
+  const { renderEventInput } = await bundleModule("src/events/model.ts");
+  const at = Date.UTC(2026, 10, 26, 2, 30);
+  const event = (source, ref, title, actor, summary) => ({ source, ref, title, actor, summary, occurredAt: at, kind: "notice", externalId: ref });
+  const batch = (source, items, extra = 0) => renderEventInput(source, items, extra, at).split("\n[说明]")[0];
+  const row = (id, source, text, role = "user") => ({ id, source, text, role, name: "示例", at, assets: [], status: null, turnId: null });
+  const mail = batch("gmail", [
+    event("gmail", "m1", "预览 <img src=x>", "设计组 · 通知", "请核对布局"),
+    event("gmail", "m2", "", "", ""),
+    event("gmail", "m3", "补充材料", "通知", "这是第三封"),
+  ], 3);
+  const github = batch("github", [event("github", "https://github.com/example/project/pull/42", "example/project: 会话排版", "reviewer", "opened")]);
+  const rows = [row("mail", "gmail", mail), row("gh", "github", github), row("user", "web", mail),
+    row("old", "github", "旧版事件摘要"), row("partial", "gmail", mail.slice(0, mail.indexOf("2. ref=") + 6)),
+    row("unsafe", "github", github.replace("https://github.com/example/project/pull/42", "https://github.com.example.test/story")),
+    row("qq", "qq", "看图[image]"), row("future", "future", "新类型的消息"),
+    { ...row("model", "model", "## 检查结果\n- **布局**正常\n```txt\n<sample>\n```", "assistant"),
+      assets: [{ scope: "owner", id: "asset-id", name: "布局.txt", bytes: 42 }] },
+    row("other", "event", batch("calendar", [event("calendar", "r1", "例会", "团队", "周五")])),
+    row("report", "subagent", "[子 agent 失败] id=abc 任务：生成预览\n任务已超时")];
+  renderChatMessages(rows);
+  const cards = () => [...document.querySelectorAll("#chat-messages article")];
+  const [inbox, repo, web, old, partial, unsafe, qq, future, model, other, report] = cards();
+  assert.deepEqual([...inbox.querySelectorAll("h4")].map(n => n.textContent), ["预览 <img src=x>", "（无主题）", "补充材料"]);
+  assert.equal(inbox.querySelector("img"), null);
+  assert.match(inbox.querySelector(".event-items").textContent, /设计组 · 通知/);
+  assert.match(inbox.textContent, /另有 3 件未展开/);
+  assert.equal(repo.querySelector("h4").textContent, "会话排版");
+  assert.equal(repo.querySelector(".event-action").textContent, "已打开");
+  assert.equal(repo.querySelector("a").getAttribute("href"), "https://github.com/example/project/pull/42");
+  assert.equal(unsafe.querySelector("a"), null);
+  assert.equal(web.querySelector(".event-items"), null);
+  assert.equal(web.querySelector(".chat-literal").textContent, mail);
+  assert.equal(old.querySelector(".chat-literal").textContent, "旧版事件摘要");
+  assert.equal(partial.querySelectorAll(".event-item").length, 1);
+  assert.match(partial.querySelector(".event-remainder").textContent, /2\. ref/);
+  assert.equal(qq.querySelector(".chat-media-label").textContent, "图片");
+  assert.equal(qq.querySelector("button"), null);
+  assert.match(future.textContent, /新类型的消息/);
+  assert.equal(model.querySelector("li strong").textContent, "布局");
+  assert.equal(model.querySelector("pre code").textContent, "<sample>");
+  assert.equal(model.querySelector("button").getAttribute("aria-label"), "下载 布局.txt");
+  assert.equal(other.querySelector("h4").textContent, "例会");
+  assert.equal(report.querySelector(".report-error").textContent, "任务失败");
+  assert.equal(inbox.querySelector(".chat-original pre").textContent, mail);
+  assert.equal(inbox.querySelector(".event-more[open]"), null);
+  for (const detail of inbox.querySelectorAll("details")) detail.setAttribute("open", "");
+  renderChatMessages(rows);
+  assert.equal(cards()[0].querySelectorAll("details[open]").length, 2);
 });
 
 test("回合执行区将多次 update_steps 收敛为单张实时步骤卡片，区分执行中、挂起等待与完成态",async()=>{

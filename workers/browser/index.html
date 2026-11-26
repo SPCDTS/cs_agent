@@ -118,11 +118,16 @@
 </section>
 <section id="view-chat" hidden>
   <div class="chat-layout">
-    <aside class="chat-threads"><h2>已有会话</h2><div id="chat-thread-list"></div></aside>
+    <aside class="chat-threads">
+      <h2>已有会话</h2>
+      <button id="chat-switcher" class="btn compact chat-mobile-toggle" type="button" aria-controls="chat-thread-list" aria-expanded="false">切换会话</button>
+      <div id="chat-thread-list"></div>
+    </aside>
     <section class="chat-main" aria-label="对话">
       <header class="chat-top">
         <div><strong id="chat-title">选择会话</strong><small id="chat-subtitle">共享上下文 · 网页发言只回复网页</small></div>
-        <div class="row">
+        <button id="chat-tools-toggle" class="btn compact chat-mobile-toggle" type="button" aria-controls="chat-tools" aria-expanded="false">会话工具</button>
+        <div id="chat-tools" class="row">
           <button id="chat-inspector-topo" class="btn compact" type="button" aria-pressed="false">拓扑</button>
           <button id="chat-inspector-ctx" class="btn compact" type="button" aria-pressed="false">上下文</button>
           <span class="v-sep" aria-hidden="true"></span>
