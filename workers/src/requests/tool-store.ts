@@ -1,7 +1,7 @@
 import type { ContextItem } from "./context-types";
 import type { ContextSnapshot } from "./snapshot";
 import type { RequestRecord } from "./types";
-import { executionReference, executionTools, type ToolExecution, type ToolSummary } from "./tool-types";
+import { executionReference, executionTools, type ToolSummary } from "./tool-types";
 
 type ToolRow = { record: string; available: number };
 const summary = (row: ToolRow): ToolSummary => ({ ...JSON.parse(row.record), detailAvailable: !!row.available });
@@ -21,17 +21,6 @@ export class ToolStore {
     for (const root of tools.filter(tool => !tool.parentCallId && calls.has(tool.callId)))
       for (const tool of executionTools(tools, root)) selected.set(tool.id, tool);
     return [...selected.values()];
-  }
-  execution(id: string): ToolExecution | undefined {
-    const row = this.sql.exec<ToolRow>("SELECT record,payload IS NOT NULL AS available FROM tool_traces WHERE id=?", id).toArray()[0];
-    if (!row) return;
-    const root = summary(row), actor = root.actor ?? "thread";
-    const tools = executionTools(this.turns(root.thread, actor, [root.binding.turnId]), root);
-    const source = this.sql.exec<{ id: string }>(`SELECT id FROM requests WHERE thread=? AND turn_id=?
-      AND json_extract(record,'$.actor')=? AND started<=?
-      AND EXISTS (SELECT 1 FROM json_each(json_extract(record,'$.toolCalls')) WHERE json_extract(value,'$.id')=?)
-      ORDER BY started DESC,seq DESC LIMIT 1`, root.thread, root.binding.turnId, actor, root.startedAt, root.callId).toArray()[0];
-    return { rootId: root.id, tools, ...(source ? { sourceRequestId: source.id } : {}) };
   }
   annotate(request: RequestRecord, context: ContextSnapshot): ContextItem[] {
     const items = context.analysis?.items ?? [];

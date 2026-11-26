@@ -20,6 +20,7 @@ import type { Static } from "typebox";
 import { InboxDoc, LiveDoc, type Harness, type Conversation, type SettledSubmissionRecord, type Submission } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { Env } from "./env";
+import { withTraceInput } from "./requests/pi-telemetry";
 import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target, type TurnKind } from "./policy";
 import { threadOpsSettings, effectiveSettings, type ModelSelection, type Settings } from "./settings";
 import { MESSAGE_SCHEMA, markMessageRecalled, recordMessage, recall, withReplyContext, type RecallOptions } from "./context";
@@ -335,7 +336,7 @@ export class ThreadDO extends DurableObject<Env> {
     }
     const content = row.kind === "message" && !isWeb(row)
       ? await withReplyContext(this.database, scopeOf(targetOf(row)), row.platform_message_id, row.text) : row.text;
-    const submitted = await root.submit({ type: "input", content, requestId: row.message_id, whenBusy }, context);
+    const submitted = await withTraceInput(row.message_id, () => root.submit({ type: "input", content, requestId: row.message_id, whenBusy }, context));
     await this.database.run("UPDATE inbound SET admitted_at = COALESCE(admitted_at, ?) WHERE message_id = ?", Date.now(), row.message_id);
     return submitted;
   }

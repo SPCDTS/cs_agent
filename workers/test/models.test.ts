@@ -479,7 +479,7 @@ describe("多账号目录恢复与共享生图", () => {
     });
     const requestStore = env.REQUESTS.getByName("main");
     const user = page.messages.find(message => message.role === "user")!;
-    await expect.poll(async () => (await requestStore.turnTrace("owner", [user.turnId!], 0)).tools.find(tool => tool.name === "generate_image")?.status).toBe("done");
+    await expect.poll(async () => (await requestStore.agentTraceDetail("owner", user.turnId!)).observations.find(row => row.kind==="tool" && row.label === "generate_image")?.status).toBe("done");
   });
 });
 
@@ -516,7 +516,7 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
       await owner.syncAdminView("owner");
       const [child] = await display.subagentList();
       expect(child).toBeDefined();
-      expect(await display.subagentTranscript(child!.id, 5)).toBeDefined();
+      expect(await display.subagentHistory(child!.id)).toBeDefined();
       if (step === 1) {
         gatedChildId = child!.id;
         await secondResponse.promise;
@@ -556,7 +556,7 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
   }
   await owner.syncAdminView("owner");
   expect(await display.subagentList()).toContainEqual(expect.objectContaining({ id: childId, status: "done" }));
-  expect((await display.subagentTranscript(childId, 10))?.entries.some(entry => entry.text === "完成")).toBe(true);
+  expect((await display.subagentHistory(childId))?.entries.some(entry => entry.messages.some(message=>message.text === "完成"))).toBe(true);
   const requests = env.REQUESTS.getByName("main");
   const page = await requests.list({ since: 0, until: Date.now() + 1000, limit: 20 });
   const withSearch = page.requests.filter(r => r.toolCalls?.some(call => call.name === "web_search"));

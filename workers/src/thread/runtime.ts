@@ -1,3 +1,4 @@
+import { agentTelemetry } from "../requests/pi-telemetry";
 import { agentSendTool, durableAgentTicket } from "../communication/tool";
 import type { AgentReceipt, AgentSend } from "../communication/model";
 import { BACKGROUND_CONTEXT, type Context } from '@earendil-works/chord/context';
@@ -468,7 +469,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
   }));
   // Codex 默认先走 WebSocket 并按会话缓存连接；DO 里的连接跨不了请求，固定用 SSE。其他 provider 忽略这一项。
   let runtimeRef: Runtime | undefined;
-  const harness = await Harness.open(storage, { models, registry,
+  const harness = await Harness.open(storage, { models, registry, telemetry: agentTelemetry(host.env, host.ctx, memory.ns, "thread"),
     settings: () => ({
       stream: { transport: "sse" },
       ...(runtimeRef?.switchCompacting ? { compaction: { keepRecentTokens: SWITCH_KEEP_RECENT_TOKENS }, retry: { enabled: false } } : {}),

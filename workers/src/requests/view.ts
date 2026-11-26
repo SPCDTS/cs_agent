@@ -6,7 +6,7 @@ import { MemoryStore, type Profile } from "../memory/store";
 import type { MemoryRow } from "../memory/types";
 import type { McpApproval, McpGrant } from "../mcp/policy";
 import type { SubagentView, SubagentOrigin } from "../subagent/parent";
-import { clip, type ParentSubagentStatus, type SubagentIdentity, type SubagentMeta, type SubagentEntry } from "../subagent/model";
+import { clip, type ParentSubagentStatus, type SubagentIdentity, type SubagentMeta } from "../subagent/model";
 import { shortSummary } from "../subagent/activity";
 import { historyEntry, historyCursor, readHistoryCursor } from "../sessions";
 import { ADMIN_PAGE_SIZE } from "../admin/pagination";
@@ -220,15 +220,7 @@ export class AgentReadView {
     const entries=rows.slice(0,ADMIN_PAGE_SIZE).map(row=>historyEntry(JSON.parse(row.record) as EntryRecord,format));
     return {entries,next:rows.length>ADMIN_PAGE_SIZE?historyCursor({after:entries.at(-1)!.id,order:"descending"}):undefined};
   }
-  async transcriptSummary(limit: number): Promise<{meta:SubagentMeta;entries:SubagentEntry[]}|undefined> {
-    await this.initialize();
-    const row=await this.database.get<{value:string}>("SELECT value FROM meta WHERE key='subagent'");if(!row)return;
-    const meta=JSON.parse(row.value) as SubagentMeta;
-    const hasEntries=await this.database.get("SELECT 1 FROM sqlite_master WHERE name='pi_entries'");
-    const rows=hasEntries?await this.database.all<{record:string}>("SELECT record FROM pi_entries WHERE conversation_id=? ORDER BY id DESC LIMIT ?",ROOT_CONVERSATION_ID,Math.min(50,Math.max(1,Math.trunc(limit)))):[];
-    return {meta,entries:rows.map(row=>{const entry=JSON.parse(row.record) as EntryRecord;
-      return {id:Number(entry.id),kind:entry.kind,...(entry.model?.[0]?{role:entry.model[0].role}:{}),text:(entry.model??[]).flatMap(message=>typeof message.content==="string"?[message.content]:message.content.flatMap(block=>block.type==="text"?[block.text]:block.type==="toolCall"?["["+block.name+"]"]:[])).join(" ").slice(0,200)};})};
-  }
+
   async workspaceChild(thread: string,id: string) {
     const row=await this.child(id);if(!row||thread!=="owner")throw new Error("workspace_denied");
     const origin=JSON.parse(row.origin_json) as SubagentOrigin,identity=JSON.parse(row.identity_json) as SubagentIdentity;

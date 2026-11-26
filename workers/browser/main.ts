@@ -1,3 +1,4 @@
+import { initExecutions } from "./executions";
 import { initContextMonitor } from "./context-monitor";
 import { initApp } from "./app";
 import { initConsole } from "./console";
@@ -14,6 +15,7 @@ import { completeCloudflareLogin, initCloudflare } from './cloudflare';
 import { initMcpServers } from "./mcp-servers";
 
 initConsole();
+initExecutions();
 initContextMonitor();
 initTrace();
 initTopology();

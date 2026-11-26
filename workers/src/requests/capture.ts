@@ -1,3 +1,4 @@
+import { withModelTrace } from "./pi-telemetry";
 import type { Api, Context, Model, AssistantMessageEventStream, StreamOptions } from "@earendil-works/pi-ai";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import type { Env } from "../env";
@@ -23,7 +24,8 @@ export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableOb
     const requestBinding = purpose === "conversation" || purpose === "subagent" ? binding?.() : undefined;
     let httpStatus: number | undefined;
     const onAlarmWait = (ms: number) => { alarmWaitMs = ms; };
-    const stream = withAlarmWaitObserver(onAlarmWait, () => start(event => {
+    const requestId = crypto.randomUUID();
+    const stream = withModelTrace(requestId, () => withAlarmWaitObserver(onAlarmWait, () => start(event => {
       if (!event || typeof event !== "object") return;
       firstEventAt ??= Date.now();
       const value = event as { usage?: unknown; response?: { usage?: unknown } };
@@ -33,12 +35,12 @@ export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableOb
       cacheWriteReported ||= hasCacheMetric(usage, ["cache_creation_input_tokens", "cacheWriteInputTokens", "cacheWrite"]);
     }, res => {
       httpStatus = res.status;
-    }));
+    })));
     const terminal = withAlarmWaitObserver(onAlarmWait, () => stream.result()).then(result => ({ result, endedAt: Date.now() }));
     let detail: RequestDetail;
     try {
       const captured = snapshot(context, purpose === "conversation" || purpose === "subagent" ? origin?.(context) : undefined);
-      detail = { request: { ...scope, purpose, ...(requestBinding ? { binding: requestBinding } : {}), id: crypto.randomUUID(), startedAt, endedAt: null, provider: model.provider, model: model.id,
+      detail = { request: { ...scope, purpose, ...(requestBinding ? { binding: requestBinding } : {}), id: requestId, startedAt, endedAt: null, provider: model.provider, model: model.id,
         status: "running", contextWindow: model.contextWindow, inputTokens: null, outputTokens: null, cacheRead: null, cacheWrite: null,
         reasoningTokens: null, durationMs: null, contextMetrics: captured.analysis?.metrics }, context: captured };
     } catch (error) { console.error({ event: "request_capture_failed", thread: scope.thread, actor: scope.actor, turnId: requestBinding?.turnId, ...classifyError(error) }); return stream; }

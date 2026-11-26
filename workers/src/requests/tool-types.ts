@@ -1,3 +1,4 @@
+import { Delegation } from "./execution-contracts";
 import { Type, type Static } from "typebox";
 
 export const StepStatus = Type.Union([
@@ -13,11 +14,14 @@ export const StepItem = Type.Object({
   status: StepStatus,
 }, { additionalProperties: false });
 export type StepItem = Static<typeof StepItem>;
+export const TurnProgress = Type.Object({ turnId: Type.String(), active: Type.Boolean(), steps: Type.Array(StepItem, {maxItems:12}) });
+export type TurnProgress = Static<typeof TurnProgress>;
 
 export const ToolSummary = Type.Object({
   id: Type.String(), thread: Type.String(), actor: Type.Optional(Type.String()),
   binding: Type.Object({ turnId: Type.String(), inputId: Type.String(), generation: Type.Number() }),
   callId: Type.String(), parentCallId: Type.Optional(Type.String()), name: Type.String(),
+  dispatch: Type.Optional(Delegation),
   argumentPreview: Type.Optional(Type.String()),
   steps: Type.Optional(Type.Array(StepItem, { maxItems: 12 })),
   startedAt: Type.Number(), endedAt: Type.Union([Type.Number(), Type.Null()]),
@@ -27,8 +31,6 @@ export const ToolSummary = Type.Object({
 export type ToolSummary = Static<typeof ToolSummary>;
 export const ExecutionReference = Type.Object({ id: Type.String(), label: Type.String(), calls: Type.Number(), failures: Type.Number() });
 export type ExecutionReference = Static<typeof ExecutionReference>;
-export const ToolExecution = Type.Object({ rootId: Type.String(), tools: Type.Array(ToolSummary), sourceRequestId: Type.Optional(Type.String()) });
-export type ToolExecution = Static<typeof ToolExecution>;
 
 /** 工具调用 ID 只在同一 actor / 回合内配对；相同名字的多次调用保留为独立节点。 */
 export function toolChildren(tools: readonly ToolSummary[], parent: ToolSummary): ToolSummary[] {

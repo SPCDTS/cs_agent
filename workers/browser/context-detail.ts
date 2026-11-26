@@ -4,7 +4,8 @@ import { compact, cs, nf } from "./console";
 import { ContextInspection, totalChars, type ContextCategory, type ContextItem, type ContextTotals } from "../src/requests/context-types";
 import * as C from "./request-contracts";
 import { messageContent, openRequest, percent, structuredPart } from "./request-detail";
-import { executionLink, renderToolForest } from "./tool-execution";
+import { openExecutions } from "./executions";
+import { $ } from "./dom";
 import { ADMIN_PAGE_SIZE } from "../src/admin/pagination";
 
 const categories: { id: ContextCategory; label: string }[] = [
@@ -15,6 +16,13 @@ const categoryLabel = (id: ContextCategory) => categories.find(category => categ
 const note = (text: string) => el("p", { className: "context-note", text });
 const button = (text: string, onclick: () => void, className = "btn compact") => el("button", { type: "button", className, text, onclick });
 
+function executionLink(record: string) {
+  return button("在链路中定位原工具调用", () => {
+    $("request-detail").close();
+    openExecutions({record});
+  }, "request-link");
+}
+
 export function deferredContextPart(requestId: string, item: Pick<ContextItem, "id" | "label" | "chars" | "truncated" | "bodyAvailable" | "execution">) {
   const content = el("div", { className: "message-block-content" });
   const box = el("details", { className: "message-block context-part", "data-context-part": item.id }, [
@@ -23,14 +31,14 @@ export function deferredContextPart(requestId: string, item: Pick<ContextItem, "
   let loaded = false;
   box.addEventListener("toggle", async () => {
     if (!box.open || loaded) return;
-    if (!item.bodyAvailable) { content.replaceChildren(note("这部分正文未保留；统计包含截断前的完整字符数。")); if(item.execution)content.append(executionLink(item.execution)); return; }
+    if (!item.bodyAvailable) { content.replaceChildren(note("这部分正文未保留；统计包含截断前的完整字符数。")); if(item.execution)content.append(executionLink(item.execution.id)); return; }
     loaded = true; const epoch = cs.epoch;
     content.replaceChildren(el("p", { className: "muted small", text: "正在读取正文…" }));
     try {
       const result = await readApi(C.ContextBody, "GET", "/admin/requests/" + encodeURIComponent(requestId) + "/context/" + item.id);
       if (!box.isConnected || epoch !== cs.epoch) return;
       content.replaceChildren(messageContent(result.part, new Map(result.paired.map(pair => [pair.id, pair.part]))));
-      if (item.execution) { content.prepend(note("本次输入中的工具结果")); content.append(executionLink(item.execution)); }
+      if (item.execution) { content.prepend(note("本次输入中的工具结果")); content.append(executionLink(item.execution.id)); }
       if (result.part.truncated) content.prepend(note("正文已截断；上方字符数为截断前的大小。"));
     } catch {
       loaded = false;
@@ -72,15 +80,15 @@ export function contextRects(totals: ContextTotals): Rect[] {
   return divide(values, 0, 0, 100, 100);
 }
 
-export function contextInspector(detail: C.RequestDetail, focusExecution?: string) {
+export function contextInspector(detail: C.RequestDetail) {
   const host = el("section", { className: "context-inspector" }, [note("正在读取上下文分析…")]), epoch = cs.epoch;
   void readApi(ContextInspection, "GET", "/admin/requests/" + encodeURIComponent(detail.request.id) + "/context").then(data => {
-    if (host.isConnected && epoch === cs.epoch) renderInspector(host, detail, data, focusExecution);
+    if (host.isConnected && epoch === cs.epoch) renderInspector(host, detail, data);
   }).catch(() => { if (host.isConnected && epoch === cs.epoch) host.replaceChildren(note("上下文分析读取失败，请重新打开请求。")); });
   return host;
 }
 
-function renderInspector(host: HTMLElement, detail: C.RequestDetail, data: ContextInspection, focusExecution?: string) {
+function renderInspector(host: HTMLElement, detail: C.RequestDetail, data: ContextInspection) {
   const r = data.current, analysis = data.analysis, previous = data.previous;
   const reset = r.metrics?.head?.kind === "reset" && r.metrics.head.id !== previous?.metrics?.head?.id;
   const comparable = !!previous && previous.model === r.model && previous.provider === r.provider && !reset;
@@ -92,7 +100,7 @@ function renderInspector(host: HTMLElement, detail: C.RequestDetail, data: Conte
   ]);
   const tabs = el("nav", { className: "context-tabs", "aria-label": "请求分析" }), content = el("div", { className: "context-tab-body" });
   type Tab = "composition" | "diff" | "compaction" | "output" | "raw";
-  let active: Tab = focusExecution ? "output" : "composition", category: ContextCategory | undefined;
+  let active: Tab = "composition", category: ContextCategory | undefined;
   const buttons = new Map<Tab, HTMLButtonElement>();
   const show = (tab: Tab) => {
     active = tab; for (const [key, node] of buttons) node.setAttribute("aria-pressed", String(tab === key));
@@ -101,8 +109,6 @@ function renderInspector(host: HTMLElement, detail: C.RequestDetail, data: Conte
     if (tab === "output") {
       if (detail.responseAvailable || detail.response) content.append(deferredContextPart(r.id, { id: "response", label: "本次模型输出", chars: detail.response?.chars ?? 0, truncated: false, bodyAvailable: true }));
       else content.append(note(detail.request.status === "running" ? "模型仍在生成。" : "本次模型输出未保留。"));
-      if (detail.tools.length) content.append(el("h3", { text: "调用后的工具执行" }), renderToolForest(detail.tools, "context-tools:" + r.id, focusExecution));
-      else if (detail.request.toolCalls?.length) content.append(note("这次模型返回了工具调用；执行明细尚未采集，输入里的工具结果可在上下文组成中查看。"));
       return;
     }
     if (!analysis) {
@@ -160,7 +166,7 @@ function renderInspector(host: HTMLElement, detail: C.RequestDetail, data: Conte
       category ? button("清除筛选", () => { category = undefined; show(active); }, "request-link") : null]));
     content.append(itemList(analysis.items.filter(item => !category || item.category === category), r.id, !category));
   };
-  for (const [id, label] of [["composition", "上下文组成"], ["diff", "前后变化"], ["compaction", "压缩过程"], ["output", "输出与工具"], ["raw", "原始快照"]] as const) {
+  for (const [id, label] of [["composition", "上下文组成"], ["diff", "前后变化"], ["compaction", "压缩过程"], ["output", "模型输出"], ["raw", "原始快照"]] as const) {
     const node = button(label, () => show(id), "context-tab"); buttons.set(id, node); tabs.append(node);
   }
   host.replaceChildren(overview, tabs, content); show(active);
