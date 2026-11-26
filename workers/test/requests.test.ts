@@ -37,6 +37,8 @@ describe("requests core", () => {
       await store.recordTool(tool);
       await store.recordTool({ ...tool, status: "done", result: { text: "完成", chars: 2, truncated: false } });
       await store.record(detail("expired"));
+      const stale = detail("stale", now - 2 * 3600_000);
+      await store.record({ ...stale, request: { ...stale.request, status: "running", endedAt: null } });
       await runInDurableObject(store, (_instance, state) => {
         state.storage.sql.exec("UPDATE requests SET started=? WHERE id='expired'", now - 31 * 86400_000);
         state.storage.sql.exec("UPDATE request_details SET started=? WHERE id='updated'", now - 8 * 86400_000);
@@ -50,12 +52,15 @@ describe("requests core", () => {
         expect(state.storage.sql.exec("SELECT request_count,detail_bytes FROM request_retention WHERE id=1").one()).toEqual(expected);
       });
       await consistent();
+      // 即使 Pi 写入曾误送到主账本，主账本的过期清理也必须照常运行。
+      await store.recordPiSpans([]);
       expect(await runDurableObjectAlarm(store)).toBe(true);
       await consistent();
       await runInDurableObject(store, async (_instance, state) => {
         expect(await state.storage.getAlarm()).not.toBeNull();
       });
       expect(await store.detail("expired")).toBeUndefined();
+      expect((await store.detail("stale"))?.request.status).toBe("interrupted");
       expect((await store.detail("updated"))?.detailAvailable).toBe(false);
       expect((await store.toolDetail(tool.id))?.result?.text).toBe("完成");
     });

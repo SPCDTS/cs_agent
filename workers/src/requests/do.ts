@@ -246,7 +246,6 @@ export class RequestsDO extends DurableObject<Env> {
     if (native.exists()) {
       native.trim();
       if (native.hasRows()) await this.ctx.storage.setAlarm(Date.now()+86400_000);
-      return;
     }
     if (this.projection.status()?.scope.startsWith("sub:")) {
       const row = await this.projection.db.get<{value:string}>("SELECT value FROM meta WHERE key='subagent'");
@@ -256,6 +255,8 @@ export class RequestsDO extends DurableObject<Env> {
       else await this.ctx.storage.deleteAlarm();
       return;
     }
+    // 主账本的保留策略由实例身份决定，即使同库意外出现 Pi 表也必须回收。
+    if (!this.ctx.id.equals(this.env.REQUESTS.idFromName("main"))) return;
     const more = this.prune();
     if (this.ctx.storage.sql.exec("SELECT 1 FROM requests UNION ALL SELECT 1 FROM tool_traces UNION ALL SELECT 1 FROM agent_activity UNION ALL SELECT 1 FROM ops_logs UNION ALL SELECT 1 FROM turn_timings LIMIT 1").toArray().length) await this.ctx.storage.setAlarm(Date.now() + (more ? 1000 : 3600_000));
   }
