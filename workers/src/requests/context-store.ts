@@ -1,5 +1,6 @@
 import { ToolStore } from "./tool-store";
-import type { ContextInspection, ContextItem, ContextRequestSummary, ContextTimeline } from "./context-types";
+import type { CodemodeCatalogView, ContextInspection, ContextItem, ContextRequestSummary, ContextTimeline } from "./context-types";
+import type { StoredCodemodeCatalog } from "./codemode-catalog";
 import type { ContextSnapshot, MessagePart } from "./snapshot";
 import type { RequestDetail, RequestRecord } from "./types";
 import { ADMIN_PAGE_SIZE, type AdminCursor } from "../admin/pagination";
@@ -57,6 +58,16 @@ export class ContextStore {
     const calls = new Set(selected.blocks?.flatMap(block => block.kind === "toolCall" && block.id ? [block.id] : []) ?? []);
     return { part: selected, paired: payload.context.messages.flatMap(message => message.toolCallId && calls.has(message.toolCallId)
       ? [{ id: message.toolCallId, part: message }] : []) };
+  }
+  codemode(id: string): CodemodeCatalogView | undefined {
+    const row = this.row(id); if (!row) return;
+    const current: RequestRecord = JSON.parse(row.record);
+    const summary = current.contextMetrics?.codemode ?? this.payload(id)?.context.analysis?.metrics.codemode ?? null;
+    if (!summary) return { summary: null, catalogAvailable: false, truncated: false, namespaces: [], tools: [] };
+    const storedRow = this.sql.exec<{ payload: string }>("SELECT payload FROM codemode_catalogs WHERE digest=?", summary.digest).toArray()[0];
+    if (!storedRow) return { summary, catalogAvailable: false, truncated: false, namespaces: [], tools: [] };
+    const stored: StoredCodemodeCatalog = JSON.parse(storedRow.payload);
+    return { summary, catalogAvailable: true, truncated: stored.truncated, namespaces: stored.namespaces, tools: stored.tools };
   }
 }
 

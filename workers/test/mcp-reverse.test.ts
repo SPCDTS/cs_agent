@@ -52,7 +52,14 @@ it("authenticates registration, probes a real SDK server and isolates replaced/d
   const probe = () => manageMcp(env, { action: "probe", id, expectedRevision: record.revision });
   expect(await probe()).toMatchObject({ status: "unavailable", code: "reverse_offline" });
   const original = await node("one");
-  expect(await probe()).toMatchObject({ status: "ready", discovered: [{ name: "hello" }] });
+  expect(await probe()).toMatchObject({
+    status: "ready",
+    discovered: [{
+      name: "hello",
+      declaration: expect.stringContaining("declare const tools: { hello("),
+      inputSchema: expect.stringContaining('"type": "object"'),
+    }],
+  });
   record = await registry.mcpServerGet(id);
   const open = () => McpConnection.open(record.server, env, limits, AbortSignal.timeout(3000), () => {});
   const call = (c: McpConnection) => c.callTool("hello", {}, { scope: "owner" }, AbortSignal.timeout(3000));

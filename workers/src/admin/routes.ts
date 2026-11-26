@@ -218,6 +218,11 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     if (!inspection) throw new HttpError(404, "not_found");
     return json(inspection);
   } },
+  { method: "GET", path: /^\/admin\/requests\/(?<id>[0-9a-f-]{36})\/codemode$/, handle: async ({ env, params }) => {
+    const catalog = await env.REQUESTS.getByName("main").codemodeTools(params.id!);
+    if (!catalog) throw new HttpError(404, "not_found");
+    return json(catalog);
+  } },
   { method: "GET", path: /^\/admin\/requests\/(?<id>[0-9a-f-]{36})\/context\/(?<part>system|response|message:\d+|tool:\d+)$/, handle: async ({ env, params }) => {
     const part = await env.REQUESTS.getByName("main").contextPart(params.id!, params.part!);
     if (!part) throw new HttpError(404, "not_found");

@@ -92,9 +92,11 @@ export function snapshot(input: Context, origin?: ContextOrigin): ContextSnapsho
       ...(message.role === "toolResult" ? { toolCallId: message.toolCallId, at: message.timestamp } : {}),
       images, bodyAvailable: !!body, truncated: !body || body.truncated, ...(tag?.phase ? { phase: tag.phase } : {}) });
   });
+  const codemode = origin?.codemode && tools.some(tool => tool.name === "codemode") ? origin.codemode.summary : undefined;
   const analysis: ContextAnalysis = { items, metrics: { version: 1, chars: totals, messageCount: nonSystem.length, toolCount: tools.length, imageCount,
     ...(origin?.head ? { head: origin.head } : {}),
-    ...(origin?.head?.kind === "compaction" && origin.head.plan ? { retainedChars, addedChars } : {}) } };
+    ...(origin?.head?.kind === "compaction" && origin.head.plan ? { retainedChars, addedChars } : {}),
+    ...(codemode ? { codemode } : {}) } };
   return { analysis, system: systemPart, messages: messageParts, tools: toolParts, messageCount: nonSystem.length, toolCount: tools.length,
     omittedMessages: nonSystem.length - captured.length,
     chars: { system: system.length, messages: nonSystem.reduce((n, m) => n + textOf(m).length, 0),

@@ -1,9 +1,9 @@
 import { bjTime, duration, el } from "./app";
 import { readApi } from "./api";
 import { compact, cs, nf } from "./console";
-import { ContextInspection, totalChars, type ContextCategory, type ContextItem, type ContextTotals } from "../src/requests/context-types";
+import { CodemodeCatalogView, ContextInspection, totalChars, type CodemodeCatalogSummary, type CodemodeToolItem, type ContextCategory, type ContextItem, type ContextTotals } from "../src/requests/context-types";
 import * as C from "./request-contracts";
-import { messageContent, openRequest, percent, structuredPart } from "./request-detail";
+import { lazyBlock, messageContent, openRequest, percent, structuredPart } from "./request-detail";
 import { openExecutions } from "./executions";
 import { $ } from "./dom";
 import { ADMIN_PAGE_SIZE } from "../src/admin/pagination";
@@ -99,13 +99,18 @@ function renderInspector(host: HTMLElement, detail: C.RequestDetail, data: Conte
     previous ? button("前一次请求", () => { void openRequest(previous.id); }, "request-link") : null,
   ]);
   const tabs = el("nav", { className: "context-tabs", "aria-label": "请求分析" }), content = el("div", { className: "context-tab-body" });
-  type Tab = "composition" | "diff" | "compaction" | "output" | "raw";
-  let active: Tab = "composition", category: ContextCategory | undefined;
+  type Tab = "composition" | "codemode" | "diff" | "compaction" | "output" | "raw";
+  let active: Tab = "composition", category: ContextCategory | undefined, codemodeCache: CodemodeCatalogView | undefined;
+  const cmSummary = r.metrics?.codemode ?? analysis?.metrics.codemode;
   const buttons = new Map<Tab, HTMLButtonElement>();
   const show = (tab: Tab) => {
     active = tab; for (const [key, node] of buttons) node.setAttribute("aria-pressed", String(tab === key));
     content.replaceChildren();
     if (tab === "raw") { renderRaw(content, detail.request.id); return; }
+    if (tab === "codemode") {
+      renderCodemode(content, detail, analysis, cmSummary, () => codemodeCache, value => { codemodeCache = value; });
+      return;
+    }
     if (tab === "output") {
       if (detail.responseAvailable || detail.response) content.append(deferredContextPart(r.id, { id: "response", label: "本次模型输出", chars: detail.response?.chars ?? 0, truncated: false, bodyAvailable: true }));
       else content.append(note(detail.request.status === "running" ? "模型仍在生成。" : "本次模型输出未保留。"));
@@ -162,14 +167,184 @@ function renderInspector(host: HTMLElement, detail: C.RequestDetail, data: Conte
     content.append(el("div", { className: "panel-title" }, [el("h3", { text: "什么占了上下文" }), el("span", { className: "muted small", text: nf(total) + " 字符 · 点击筛选" })]), map,
       el("div", { className: "context-legend" }, categories.map(item => button(item.label + " " + compact(metrics.chars[item.id]), () => choose(item.id), "context-category category-" + item.id))),
       el("p", { className: "muted small", text: "字符数统计归一化文本，不等同于 token；图片和推理正文只保留占位。图片 " + metrics.imageCount + " 张。" }));
+    if (cmSummary && cmSummary.hidden > 0) {
+      content.append(el("div", { className: "context-note codemode-callout" }, [
+        el("span", { text: "另有 " + nf(cmSummary.hidden) + " 个脚本工具因超出 <codemode> 内联预算未进入上下文（仅可通过 searchTools / describeTool 检索）。" }),
+        button("查看脚本工具定义", () => show("codemode"), "request-link"),
+      ]));
+    }
     content.append(el("div", { className: "panel-title" }, [el("h3", { text: category ? categoryLabel(category) : "占用最大的内容" }),
       category ? button("清除筛选", () => { category = undefined; show(active); }, "request-link") : null]));
     content.append(itemList(analysis.items.filter(item => !category || item.category === category), r.id, !category));
   };
-  for (const [id, label] of [["composition", "上下文组成"], ["diff", "前后变化"], ["compaction", "压缩过程"], ["output", "模型输出"], ["raw", "原始快照"]] as const) {
+  const codemodeTabLabel = cmSummary ? (cmSummary.hidden > 0 ? `脚本工具 (${cmSummary.hidden} 未内联)` : `脚本工具 (${cmSummary.total})`) : "脚本工具";
+  for (const [id, label] of [["composition", "上下文组成"], ["codemode", codemodeTabLabel], ["diff", "前后变化"], ["compaction", "压缩过程"], ["output", "模型输出"], ["raw", "原始快照"]] as const) {
     const node = button(label, () => show(id), "context-tab"); buttons.set(id, node); tabs.append(node);
   }
   host.replaceChildren(overview, tabs, content); show(active);
+}
+
+function codemodeToolRow(tool: CodemodeToolItem) {
+  const body = el("div", { className: "message-block-content codemode-tool-body" });
+  const titleParts: (Node | string | null)[] = [
+    el("code", { className: "codemode-tool-name", text: "tools." + tool.jsName }),
+    tool.jsName !== tool.name ? el("span", { className: "muted small", text: "(" + tool.name + ")" }) : null,
+    tool.namespace ? el("span", { className: "pill neutral", text: tool.namespace }) : null,
+    el("span", { className: "pill " + (tool.inlined ? "ok" : "warn"), text: tool.inlined ? "已内联" : "仅 searchTools" }),
+    tool.deferred ? el("span", { className: "pill neutral", text: "延迟加载" }) : null,
+  ];
+  const box = el("details", { className: "message-block context-part codemode-tool", "data-codemode-tool": tool.name }, [
+    el("summary", {}, [
+      el("span", { className: "codemode-tool-head" }, titleParts),
+      el("small", { text: nf(tool.chars) + " 字符" + (tool.truncated ? " · 已截断" : "") }),
+    ]),
+    body,
+  ]);
+  let built = false;
+  box.addEventListener("toggle", () => {
+    if (!box.open || built) return;
+    built = true;
+    const parts: HTMLElement[] = [];
+    if (tool.description) parts.push(el("p", { className: "codemode-tool-desc", text: tool.description }));
+    parts.push(
+      el("h4", { className: "codemode-subhead", text: "TypeScript 调用声明（describeTool 返回）" }),
+      el("pre", { className: "tool-source", text: tool.declaration }),
+      lazyBlock("参数 JSON Schema (inputSchema)", () => structuredPart({ text: tool.inputSchema, truncated: tool.truncated })),
+    );
+    if (tool.outputSchema) {
+      const out = tool.outputSchema;
+      parts.push(lazyBlock("返回结构 JSON Schema (outputSchema)", () => structuredPart({ text: out, truncated: tool.truncated })));
+    }
+    body.replaceChildren(...parts);
+  });
+  return box;
+}
+
+function renderCodemodeCatalog(host: HTMLElement, detail: C.RequestDetail, analysis: ContextInspection["analysis"], data: CodemodeCatalogView) {
+  host.replaceChildren();
+  if (!data.summary) {
+    if (detail.request.purpose === "compaction" || detail.request.purpose === "background") {
+      host.append(note("本次请求属于" + (detail.request.purpose === "compaction" ? "上下文压缩" : "后台辅助") + "调用，未挂载 CodeMode 脚本工具。"));
+    } else if (analysis && !analysis.items.some(item => item.category === "tools" && item.label === "codemode")) {
+      host.append(note("本次请求未向模型开放 codemode 工具。"));
+    } else {
+      host.append(note("这条历史请求记录于脚本工具目录采集上线前；新发起的对话或子任务请求将在此展示完整脚本工具定义（含仅 searchTools 可见的未内联工具）。"));
+    }
+    return;
+  }
+  const { total, inlined, hidden } = data.summary;
+  host.append(el("div", { className: "context-diff-stats" }, [
+    el("div", {}, ["脚本工具总数", el("strong", { text: nf(total) })]),
+    el("div", {}, ["仅 searchTools 可见（未进上下文）", el("strong", { text: nf(hidden) })]),
+    el("div", {}, ["已内联进 <codemode>", el("strong", { text: nf(inlined) })]),
+  ]));
+  if (!data.catalogAvailable) {
+    host.append(note("脚本工具定义详情已过 7 天保留期或被容量清理，上方保留了请求发生时的数量统计。"));
+    return;
+  }
+  host.append(note(hidden > 0
+    ? "超出系统提示 <codemode> 内联预算（约 3000 tokens）或标记为延迟加载的工具不会写入请求上下文，模型需在脚本中调用 searchTools(query) / describeTool(name) 按需查看。"
+    : "本次请求的全部脚本工具均已内联在系统提示的 <codemode> 段中。"));
+  if (data.truncated) host.append(note("部分超大工具定义或超出目录上限的条目已截断保存。"));
+
+  type VisibilityFilter = "all" | "hidden" | "inlined";
+  let visibility: VisibilityFilter = hidden > 0 ? "hidden" : "all";
+  let namespaceFilter = "";
+  let query = "";
+  let page = 0;
+
+  const filterButtons = new Map<VisibilityFilter, HTMLButtonElement>();
+  const toolbar = el("div", { className: "codemode-toolbar" });
+  const pills = el("div", { className: "codemode-filter-pills" });
+  for (const [id, label] of [
+    ["hidden", `仅 searchTools (${nf(hidden)})`],
+    ["all", `全部 (${nf(total)})`],
+    ["inlined", `已内联 (${nf(inlined)})`],
+  ] as const) {
+    const btn = button(label, () => { visibility = id; page = 0; update(); }, "btn compact codemode-filter-btn");
+    filterButtons.set(id, btn);
+    pills.append(btn);
+  }
+  toolbar.append(pills);
+
+  if (data.namespaces.length > 0) {
+    const nsSelect = el("select", { className: "codemode-ns-select", "aria-label": "按命名空间筛选" }, [
+      el("option", { value: "", text: "全部命名空间" }),
+      el("option", { value: "__ungrouped__", text: "默认（无命名空间）" }),
+      ...data.namespaces.map(ns => el("option", {
+        value: ns.name,
+        text: `${ns.name} (${ns.total - ns.inlined > 0 ? `${ns.total - ns.inlined} 未内联 / ` : ""}共 ${ns.total})`,
+      })),
+    ]) as HTMLSelectElement;
+    nsSelect.addEventListener("change", () => { namespaceFilter = nsSelect.value; page = 0; update(); });
+    toolbar.append(nsSelect);
+  }
+
+  const searchInput = el("input", {
+    type: "search",
+    className: "codemode-search",
+    placeholder: "搜索工具名、命名空间或描述…",
+    "aria-label": "搜索脚本工具",
+  }) as HTMLInputElement;
+  searchInput.addEventListener("input", () => { query = searchInput.value.trim().toLowerCase(); page = 0; update(); });
+  toolbar.append(searchInput);
+
+  const listHost = el("div", { className: "context-items codemode-items" });
+  host.append(toolbar, listHost);
+
+  const update = () => {
+    for (const [id, btn] of filterButtons) btn.setAttribute("aria-pressed", String(visibility === id));
+    const filtered = data.tools.filter(tool => {
+      if (visibility === "hidden" && tool.inlined) return false;
+      if (visibility === "inlined" && !tool.inlined) return false;
+      if (namespaceFilter === "__ungrouped__" && tool.namespace) return false;
+      if (namespaceFilter && namespaceFilter !== "__ungrouped__" && tool.namespace !== namespaceFilter) return false;
+      if (query) {
+        const hay = `${tool.jsName}\n${tool.name}\n${tool.namespace ?? ""}\n${tool.description}`.toLowerCase();
+        if (!hay.includes(query)) return false;
+      }
+      return true;
+    });
+    const shown = filtered.slice(page * ADMIN_PAGE_SIZE, (page + 1) * ADMIN_PAGE_SIZE);
+    listHost.replaceChildren(...shown.map(codemodeToolRow));
+    if (!filtered.length) {
+      listHost.append(el("p", { className: "muted small codemode-empty", text: "没有匹配的脚本工具" }));
+    } else if (filtered.length > ADMIN_PAGE_SIZE) {
+      const prev = button("上一页", () => { page--; update(); }), next = button("下一页", () => { page++; update(); });
+      prev.disabled = page === 0;
+      next.disabled = (page + 1) * ADMIN_PAGE_SIZE >= filtered.length;
+      listHost.append(el("div", { className: "pager" }, [
+        el("span", { className: "muted small", text: `共 ${nf(filtered.length)} 项 · 第 ${page + 1} 页 · 每页 ${ADMIN_PAGE_SIZE} 项` }),
+        el("div", { className: "row" }, [prev, next]),
+      ]));
+    }
+  };
+  update();
+}
+
+function renderCodemode(
+  host: HTMLElement,
+  detail: C.RequestDetail,
+  analysis: ContextInspection["analysis"],
+  summaryHint: CodemodeCatalogSummary | undefined,
+  getCache: () => CodemodeCatalogView | undefined,
+  setCache: (value: CodemodeCatalogView) => void,
+) {
+  const cached = getCache();
+  if (cached) { renderCodemodeCatalog(host, detail, analysis, cached); return; }
+  if (!summaryHint && analysis) {
+    renderCodemodeCatalog(host, detail, analysis, { summary: null, catalogAvailable: false, truncated: false, namespaces: [], tools: [] });
+    return;
+  }
+  const epoch = cs.epoch;
+  host.replaceChildren(note("正在读取脚本工具目录…"));
+  void readApi(CodemodeCatalogView, "GET", "/admin/requests/" + encodeURIComponent(detail.request.id) + "/codemode").then(value => {
+    if (!host.isConnected || epoch !== cs.epoch) return;
+    setCache(value);
+    renderCodemodeCatalog(host, detail, analysis, value);
+  }).catch(() => {
+    if (host.isConnected && epoch === cs.epoch) host.replaceChildren(note("脚本工具目录读取失败，请重新切换标签重试。"));
+  });
 }
 
 function renderRaw(host: HTMLElement, id: string) {

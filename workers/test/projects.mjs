@@ -1,6 +1,7 @@
 // 不依赖 cloudflare:test / workerd 运行时的纯逻辑单测划入轻量 node 项目，加快反馈。
 export const NODE_TESTS = [
   "test/chat-navigation-layout.test.ts",
+  "test/codemode-catalog.test.ts",
   "test/events-model.test.ts",
   "test/execution-env.test.ts",
   "test/github-app.test.ts",

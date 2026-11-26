@@ -1,10 +1,12 @@
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
+import { renderToolSignature } from "@earendil-works/pi-codemode/declarations";
 import { ListToolsResultSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { MCP_CONFIG, parseMcpConfig, publicOrigin, type McpServerConfig } from "./config";
 import { cuaTools, isCuaReadOnlyTool, isCuaTool } from "../cua/discovery";
 import { CuaBridgeToken } from "../cua/contracts";
 import { secretsEqual } from "../auth";
+import { safeText } from "../requests/snapshot";
 import { TokenVault } from "./crypto";
 import { makeCatalog } from "./catalog";
 import { serverDigest, connectionDigest, jsonBytes } from "./names";
@@ -53,12 +55,62 @@ export class McpServerStore {
   }
   private parse(row: Pick<Row, "config">): McpServerConfig { return parseMcpConfig({ version: 1, enabled: true, servers: [JSON.parse(row.config)] }).servers[0]!; }
   config() { return { ...MCP_CONFIG, servers: this.sql.exec<Pick<Row, "config">>("SELECT config FROM mcp_servers ORDER BY rowid").toArray().map(row => this.parse(row)) }; }
-  get(id: string) {
+  private discoveredTools(raw: string, schemaBudget: { remaining: number }) {
+    const tools = ListToolsResultSchema.parse(JSON.parse(raw)).tools;
+    return tools.map(tool => {
+      const base = {
+        name: safeText(tool.name).slice(0, 256),
+        description: safeText(tool.description ?? tool.name).slice(0, 2_000),
+        readOnlyHint: tool.annotations?.readOnlyHint === true,
+      };
+      if (schemaBudget.remaining <= 0) return { ...base, schemaTruncated: true };
+      let declaration: string | undefined;
+      try {
+        type SchemaInput = NonNullable<Parameters<typeof renderToolSignature>[0]["inputSchema"]>;
+        const sig = renderToolSignature({
+          name: tool.name,
+          inputSchema: tool.inputSchema as SchemaInput,
+          outputSchema: (tool.outputSchema ?? { type: "unknown" }) as SchemaInput,
+        });
+        declaration = `declare const tools: { ${sig} };`;
+      } catch { /* 非标准远端 schema 退回原始 JSON 展示 */ }
+      const rawInput = JSON.stringify(tool.inputSchema ?? {}, null, 2);
+      const rawOutput = tool.outputSchema ? JSON.stringify(tool.outputSchema, null, 2) : undefined;
+      const cleanDecl = declaration ? safeText(declaration) : undefined;
+      const cleanInput = safeText(rawInput);
+      const cleanOutput = rawOutput !== undefined ? safeText(rawOutput) : undefined;
+      const declCap = Math.min(4_000, schemaBudget.remaining);
+      const declText = cleanDecl?.slice(0, declCap);
+      schemaBudget.remaining -= declText?.length ?? 0;
+      const inputCap = Math.min(6_000, Math.max(0, schemaBudget.remaining));
+      const inputText = cleanInput.slice(0, inputCap);
+      schemaBudget.remaining -= inputText.length;
+      const outputCap = cleanOutput !== undefined ? Math.min(4_000, Math.max(0, schemaBudget.remaining)) : 0;
+      const outputText = cleanOutput?.slice(0, outputCap);
+      schemaBudget.remaining -= outputText?.length ?? 0;
+      const schemaTruncated = Boolean(
+        (cleanDecl && declText !== undefined && cleanDecl.length > declText.length)
+        || cleanInput.length > inputText.length
+        || (cleanOutput && (outputText === undefined || cleanOutput.length > outputText.length)),
+      );
+      return {
+        ...base,
+        ...(declText ? { declaration: declText } : {}),
+        ...(inputText ? { inputSchema: inputText } : {}),
+        ...(outputText ? { outputSchema: outputText } : {}),
+        ...(schemaTruncated ? { schemaTruncated: true } : {}),
+      };
+    });
+  }
+  get(id: string, schemaBudget = { remaining: 96_000 }) {
     const row = this.row(id), server = this.parse(row);
     return { server, revision: row.revision, credentialSet: !!row.secret,
-      discovered: row.discovered ? ListToolsResultSchema.parse(JSON.parse(row.discovered)).tools.map(tool => ({ name: tool.name, description: tool.description ?? tool.name, readOnlyHint: tool.annotations?.readOnlyHint === true })) : null };
+      discovered: row.discovered ? this.discoveredTools(row.discovered, schemaBudget) : null };
   }
-  list() { return this.config().servers.map(server => this.get(server.id)); }
+  list() {
+    const schemaBudget = { remaining: 384_000 };
+    return this.config().servers.map(server => this.get(server.id, schemaBudget));
+  }
   current(id: string, digest: string) {
     const row = this.sql.exec<Pick<Row, "config">>("SELECT config FROM mcp_servers WHERE id=?", id).toArray()[0];
     if (!row || !MCP_CONFIG.enabled) return false;

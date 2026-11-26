@@ -4,8 +4,10 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createAssistantMessageEventStream, type AssistantMessage, type StreamOptions } from "@earendil-works/pi-ai";
 import { fauxProvider, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { createRegistry, Harness } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, defineTool, Harness } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
+import { Type } from "typebox";
+import { installCodemode } from "../src/codemode";
 import { captureModels } from "../src/requests/capture";
 import { snapshot, errorSummary } from "../src/requests/snapshot";
 import { compareContext } from "../src/requests/context-store";
@@ -194,7 +196,7 @@ describe("requests core", () => {
       await runInDurableObject(store, (_instance, state) => { expect(state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM request_details").one().n).toBe(2); });
     });
     it("guards every new route and validates queries", async () => {
-      for (const path of ["/admin/agent-topology", "/admin/agent-traces", "/admin/usage", "/admin/requests/"+crypto.randomUUID(), "/admin/threads/owner/chat", "/admin/threads/owner/progress", "/admin/tools/"+crypto.randomUUID()]) {
+      for (const path of ["/admin/agent-topology", "/admin/agent-traces", "/admin/usage", "/admin/requests/"+crypto.randomUUID(), "/admin/requests/"+crypto.randomUUID()+"/codemode", "/admin/threads/owner/chat", "/admin/threads/owner/progress", "/admin/tools/"+crypto.randomUUID()]) {
         expect((await worker.fetch(new Request("https://test"+path), { ...env, ADMIN_TOKEN:"test" })).status).toBe(401);
       }
       const call = (path: string) => worker.fetch(new Request("https://test"+path, { headers:{Authorization:"Bearer test"} }), { ...env, ADMIN_TOKEN:"test" });
@@ -207,6 +209,7 @@ describe("requests core", () => {
         expect(await response.text(), path).toBe("not found");
       }
       expect((await call("/admin/threads/owner/progress?turn=wrong")).status).toBe(400);
+      expect((await call("/admin/requests/" + id + "/codemode")).status).toBe(404);
     });
     it("limits chat progress to the latest valid main-agent checklist and links usage filters to the same model call", async () => {
       const store=env.REQUESTS.getByName("main"), now=Date.now(), req=detail(crypto.randomUUID(),now);
@@ -421,6 +424,91 @@ describe("requests context monitor", () => {
       expect(last.metrics?.retainedChars).toBeGreaterThan(0);
       expect(last.metrics?.addedChars).toBe("压缩后继续".length);
       expect((await store.contextInspection(last.id))?.comparison?.compactionApplied).toBe(true);
+    });
+
+    it("采集真实 CodeMode 全量脚本工具目录（含超预算 searchTools 工具），按摘要去重并在超期后保留统计", async () => {
+      const store = env.REQUESTS.getByName("main"), context = BACKGROUND_CONTEXT, pending: Promise<unknown>[] = [];
+      let closeCodemode: (() => Promise<void>) | undefined;
+      await runInDurableObject(env.THREAD.getByName("codemode-catalog-test"), async (_instance, state) => {
+        const base = createModels(), faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
+        faux.setResponses([fauxAssistantMessage("第一次完成"), fauxAssistantMessage("第二次完成")]);
+        base.setProvider(faux.provider);
+        const storage = await openDurableObjectSqliteStorage(state.storage, { prefix: "cm_" });
+        const source = contextSource(state.storage, () => harness), registry = createRegistry();
+        registry.install(source.extension);
+        // 放入一个短工具和多个大工具，触发 pi-durable 3000 token 内联预算截断，产生仅 searchTools 可见的工具。
+        registry.install(defineExtension({
+          name: "test.mcp.demo",
+          namespace: { name: "demo", description: "示例 MCP 命名空间" },
+          tools: [
+            defineTool({
+              name: "demo_fast_ping",
+              description: "快速探测",
+              parameters: Type.Object({ host: Type.String() }, { additionalProperties: false }),
+              callers: ["tools"],
+              execute: async () => ({ output: [{ type: "text", text: "pong" }] }),
+            }),
+            ...Array.from({ length: 8 }, (_, idx) => defineTool({
+              name: `demo_heavy_tool_${idx}`,
+              description: `重型脚本工具 ${idx}：` + "详细参数说明与示例 ".repeat(180),
+              parameters: Type.Object({
+                filter: Type.String({ description: "过滤条件 ".repeat(80) }),
+                limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+              }, { additionalProperties: false }),
+              structuredOutputSchema: Type.Object({ items: Type.Array(Type.String()) }),
+              callers: ["tools"],
+              execute: async () => ({ output: [{ type: "text", text: "[]" }], structuredOutput: { items: [] } }),
+            })),
+          ],
+        }));
+        const cm = installCodemode(registry, { allowed: async () => true });
+        closeCodemode = cm.close;
+        const models = captureModels(base, env, { waitUntil: p => { pending.push(p); } },
+          { thread: "owner", actor: "thread", purpose: "conversation" }, undefined, source.origin);
+        const harness = await Harness.open(storage, { models, registry }, context);
+        try {
+          const root = await harness.root(context, { agent: { model: { provider: faux.provider.id, modelId: "test" } } });
+          await (await root.submit({ type: "input", content: "第一轮" }, context)).wait(context);
+          await (await root.submit({ type: "input", content: "第二轮" }, context)).wait(context);
+        } finally {
+          await harness.close(context);
+          await closeCodemode?.();
+        }
+      });
+      await Promise.all(pending);
+
+      const timeline = await store.contextTimeline("owner", "thread");
+      expect(timeline.points).toHaveLength(2);
+      const firstId = timeline.points[0]!.id, secondId = timeline.points[1]!.id;
+      expect(timeline.points[0]!.metrics?.codemode).toMatchObject({ total: 9 });
+      expect(timeline.points[0]!.metrics!.codemode!.inlined).toBeGreaterThan(0);
+      expect(timeline.points[0]!.metrics!.codemode!.hidden).toBeGreaterThan(0);
+      expect(timeline.points[1]!.metrics?.codemode?.digest).toBe(timeline.points[0]!.metrics?.codemode?.digest);
+
+      const res = await worker.fetch(new Request(`https://test/admin/requests/${secondId}/codemode`, {
+        headers: { Authorization: "Bearer test" },
+      }), { ...env, ADMIN_TOKEN: "test" });
+      expect(res.status).toBe(200);
+      const catalog = await res.json<import("../src/requests/context-types").CodemodeCatalogView>();
+      expect(catalog.catalogAvailable).toBe(true);
+      expect(catalog.summary).toEqual(timeline.points[1]!.metrics?.codemode);
+      expect(catalog.namespaces).toEqual([{ name: "demo", description: "示例 MCP 命名空间", total: 9, inlined: catalog.summary!.inlined }]);
+      const hiddenTools = catalog.tools.filter(t => !t.inlined);
+      expect(hiddenTools.length).toBe(catalog.summary!.hidden);
+      expect(hiddenTools[0]!.declaration).toContain("declare const tools: { demo_heavy_tool_");
+      expect(hiddenTools[0]!.outputSchema).toContain('"items"');
+
+      // 连续两轮相同工具集在 SQLite 中只保留 1 行去重快照，且不污染 request_retention.detail_bytes。
+      await runInDurableObject(store, (_instance, state) => {
+        expect(state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM codemode_catalogs").one().n).toBe(1);
+        const expected = state.storage.sql.exec(`SELECT (SELECT COUNT(*) FROM requests) AS request_count,
+          (SELECT COALESCE(SUM(bytes),0) FROM request_details)+(SELECT COALESCE(SUM(bytes),0) FROM tool_traces) AS detail_bytes`).one();
+        expect(state.storage.sql.exec("SELECT request_count,detail_bytes FROM request_retention WHERE id=1").one()).toEqual(expected);
+        state.storage.sql.exec("UPDATE codemode_catalogs SET updated=?", Date.now() - 8 * 86400_000);
+      });
+      await runDurableObjectAlarm(store);
+      const expired = await store.codemodeTools(firstId);
+      expect(expired).toMatchObject({ catalogAvailable: false, summary: { total: 9 } });
     });
   });
 });
