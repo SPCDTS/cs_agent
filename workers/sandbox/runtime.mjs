@@ -5,7 +5,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { pathToFileURL } from "node:url";
-import { relativePath, workspaceControl } from "./workspace.mjs";
+import { relativePath, setTreeOwner, workspaceControl } from "./workspace.mjs";
 
 export const OUTPUT_CAP = 64 * 1024;
 const MAX_TIMEOUT_MS = 120000;
@@ -100,20 +100,19 @@ export function createSandboxRuntime({ root, shell = "/bin/bash", user, env = {}
     const target = path.join(parent, "work");
     try {
       await fs.mkdir(target);
-      await own(target);
       for (const dir of snapshot.directories) {
         const item = path.join(target, relativePath(dir));
         await fs.mkdir(item, { recursive: true });
-        await own(item);
       }
       for (const file of snapshot.files) {
         const bytes = await fs.readFile(await resolveInside(root, file.path));
         if (createHash("sha256").update(bytes).digest("hex") !== file.sha256) fail("workspace_conflict");
         const item = path.join(target, relativePath(file.path));
+        await fs.mkdir(path.dirname(item), { recursive: true });
         await fs.writeFile(item, bytes, { flag: "wx", mode: file.mode });
         await fs.chmod(item, file.mode);
-        await own(item);
       }
+      await setTreeOwner(target, own);
       return target;
     } catch (error) { await fs.rm(parent, { recursive: true, force: true }); throw error; }
   }

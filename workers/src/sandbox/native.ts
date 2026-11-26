@@ -2,12 +2,13 @@ import { type DirectoryBackup, type DirectoryBackupRecord, Files, SandboxFileErr
 import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
 import { FILE_MAX_BYTES } from "../media/model";
+import { classifyError } from "../shared/diagnostics";
 import { decodeFileRead } from "./read";
 import { EXEC_MAX_TIMEOUT_MS, WORK_ROOT, SandboxError, sandboxFailure, workPath, type RuntimeSnapshot, type SandboxClient } from "./client";
 
 export type NativeContainer = Pick<Container, "exec">;
 export type NativeFiles = Pick<Files, "readFile" | "writeFile" | "stat" | "readDirectory" | "mkdir" | "remove">;
-type Dependencies = { container(): Promise<NativeContainer>; backup?(): Promise<DirectoryBackup>; files?(container: NativeContainer): NativeFiles };
+type Dependencies = { container(): Promise<NativeContainer>; backup?(): Promise<Pick<DirectoryBackup, "backup" | "restore">>; files?(container: NativeContainer): NativeFiles };
 const user = "1000:1000", strict = { additionalProperties: false };
 const File = Type.Object({ path: Type.String(), sha256: Type.String({ pattern: "^[a-f0-9]{64}$" }), bytes: Type.Integer({ minimum: 0, maximum: FILE_MAX_BYTES }), mime: Type.String(), mode: Type.Integer({ minimum: 0, maximum: 511 }) }, strict);
 const Snapshot = Type.Object({ files: Type.Array(File), directories: Type.Array(Type.String()), totalBytes: Type.Integer({ minimum: 0 }) }, strict);
@@ -79,7 +80,10 @@ export function nativeSandboxClient(deps: Dependencies): SandboxClient {
         const backup = await deps.backup!();
         const stage = await helper("stageBackup", { snapshot }, Type.String({ pattern: "^/tmp/cs-backup-[A-Za-z0-9]+/work$" }));
         try { return await backup.backup({ dir: stage }); }
-        finally { await helper("discardBackup", { stage }, Restored); }
+        finally {
+          try { await helper("discardBackup", { stage }, Restored); }
+          catch (error) { console.warn({ event: "workspace_archive_stage_cleanup_failed", ...classifyError(error) }); }
+        }
       },
       restoreDirectory: async (record: DirectoryBackupRecord) => (await deps.backup!()).restore(record, { dir: WORK_ROOT }),
     } : {}),

@@ -1,7 +1,7 @@
 import { test, before, after } from "node:test";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, realpathSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, realpathSync, existsSync, statSync, promises as fs } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { createSandboxRuntime, resolveInside, tailCollector, OUTPUT_CAP } from "../sandbox/runtime.mjs";
@@ -52,20 +52,30 @@ test("native CLI 输出超过 64 KiB 只保留尾部", async () => {
   assert.equal(result.truncated, true); assert.match(result.stdout, /^\[前 \d+ 字节已省略\]\n/);
   assert.ok(result.stdout.endsWith("aEND\n")); assert.ok(Buffer.byteLength(result.stdout.slice(result.stdout.indexOf("\n") + 1)) <= OUTPUT_CAP);
 });
-test("目录备份只暂存追踪文件，保留空目录，文件变更时拒绝生成旧版本备份", async () => {
+test("目录备份只暂存追踪文件，保留空目录，文件变更时拒绝生成旧版本备份", async t => {
   const work = mkdtempSync(path.join(base, "backup-source-"));
-  const host = createSandboxRuntime({ root: work });
-  mkdirSync(path.join(work, "empty"));
+  const user = { uid: 1000, gid: 1000 }, privileged = process.getuid?.() === 0;
+  const chown = privileged ? t.mock.method(fs, "chown") : t.mock.method(fs, "chown", async () => {});
+  const host = createSandboxRuntime({ root: work, user });
+  mkdirSync(path.join(work, "empty", "child"), { recursive: true });
+  mkdirSync(path.join(work, "a", "b"), { recursive: true });
   mkdirSync(path.join(work, "node_modules"));
   writeFileSync(path.join(work, "node_modules", "untracked"), "cache");
-  writeFileSync(path.join(work, "report"), Buffer.from([0, 255, 1]));
+  writeFileSync(path.join(work, "a", "b", "report"), Buffer.from([0, 255, 1]));
   const snapshot = await host.snapshot();
+  snapshot.directories = ["empty/child"];
   const stage = await host.stageBackup(snapshot);
   try {
-    assert.deepEqual(readFileSync(path.join(stage, "report")), Buffer.from([0, 255, 1]));
-    assert.equal(existsSync(path.join(stage, "empty")), true);
+    assert.deepEqual(readFileSync(path.join(stage, "a", "b", "report")), Buffer.from([0, 255, 1]));
+    assert.equal(existsSync(path.join(stage, "empty", "child")), true);
+    const owned = new Set(chown.mock.calls.filter(({ arguments: [, uid, gid] }) => uid === user.uid && gid === user.gid).map(({ arguments: [file] }) => file));
+    for (const item of ["", "empty", "empty/child", "a", "a/b", "a/b/report"]) {
+      const file = path.join(stage, item);
+      assert.ok(owned.has(file), item);
+      if (privileged) assert.deepEqual([statSync(file).uid, statSync(file).gid], [user.uid, user.gid]);
+    }
     assert.equal(existsSync(path.join(stage, "node_modules")), false);
-    writeFileSync(path.join(work, "report"), "changed");
+    writeFileSync(path.join(work, "a", "b", "report"), "changed");
     await assert.rejects(host.stageBackup(snapshot), /workspace_conflict/);
   } finally { await host.discardBackup(stage); }
   assert.equal(existsSync(stage), false);

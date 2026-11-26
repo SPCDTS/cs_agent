@@ -90,7 +90,10 @@ describe("workspace persistence and gc", () => {
         await env.ASSETS.put(`${prefix}/blobs/${hash}`, bytes);
         await env.ASSETS.put(`${prefix}/blobs/${lateHash}`, lateBytes);
         const future = Date.now() + 31 * 86_400_000;
-        await state.storage.put({ "workspace:head": "0000", "workspace:pins": { "0001": future + 3600_000 } });
+        const record = { id: crypto.randomUUID(), dir: "/work", size: 3, sha256: hash, format: "tar+zstd/1" };
+        const active = `${prefix}/archives/${record.id}.tar.zst`, orphan = `${prefix}/archives/${crypto.randomUUID()}.tar.zst`;
+        await Promise.all([env.ASSETS.put(active, "active"), env.ASSETS.put(orphan, "old")]);
+        await state.storage.put({ "workspace:archive": { revision: "0003", record, savedAt: Date.now() }, "workspace:head": "0000", "workspace:pins": { "0001": future + 3600_000 } });
         vi.spyOn(Date, "now").mockReturnValue(future);
         const list = vi.spyOn(env.ASSETS, "list");
         const step = async (options: GcOptions) => {
@@ -110,6 +113,7 @@ describe("workspace persistence and gc", () => {
         };
         const dry = await finish({ keepManifests: 1, batchSize });
         expect(dry.deleted).toBe(0);
+        expect(await env.ASSETS.head(orphan)).not.toBeNull();
         expect(list.mock.calls.some(([options]) => options?.cursor)).toBe(true);
         expect(dry.candidates).toBeGreaterThan(versions * 2);
         const options = { dryRun: false, keepManifests: 1, batchSize };
@@ -125,6 +129,9 @@ describe("workspace persistence and gc", () => {
         manager = new WorkspaceManager(deps);
         const complete = await finish(options);
         expect(complete.deleted).toBeGreaterThan(versions * 2);
+        expect(await env.ASSETS.head(active)).not.toBeNull();
+        expect(await env.ASSETS.head(`${prefix}/manifests/0003`)).not.toBeNull();
+        expect(await env.ASSETS.head(orphan)).toBeNull();
         expect(state.storage.sql.exec("SELECT * FROM workspace_gc_refs").toArray()).toEqual([]);
         expect(state.storage.sql.exec("SELECT * FROM workspace_gc_manifests").toArray()).toEqual([]);
         expect(await manager.resumeGc()).toBeUndefined();

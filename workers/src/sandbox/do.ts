@@ -30,10 +30,9 @@ export class SandboxDO extends DurableObject<Env> {
   private ready = false;
   private runtimeGeneration = 0;
   private readonly objects = new ObjectFiles(this.env.ASSETS, `cs-agent/v1/object-files/${this.ctx.id}/`);
-  private backup?: DirectoryBackup;
   private readonly client = nativeSandboxClient({ container: () => this.startRuntime(), backup: async () => {
     const container = await this.startRuntime();
-    return this.backup ??= new DirectoryBackup(container, this.ctx.exports.DirectoryBackupGateway, {
+    return new DirectoryBackup(container, this.ctx.exports.DirectoryBackupGateway, {
       binding: "ASSETS", prefix: `${await scopePrefix("workspace:" + this.ctx.id)}/workspace/archives/`,
     });
   } });

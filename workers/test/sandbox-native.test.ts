@@ -70,6 +70,16 @@ describe("sandbox native files and container", () => {
       await expect(f.client.remove("/work")).rejects.toThrow("path_denied");
       await expect(f.client.mkdir("escape/out")).rejects.toThrow("path_denied");
     });
+    it("备份暂存清理失败时保留归档结果或原始错误", async () => {
+      const f = fixture(), record = { id: crypto.randomUUID(), size: 10, dir: "/work", sha256: "a".repeat(64), format: "tar+zstd/1" as const };
+      f.result("/tmp/cs-backup-test/work"); // discardBackup 返回无效回执，模拟容器退出。
+      const backup = vi.fn().mockResolvedValueOnce(record).mockRejectedValueOnce(new Error("provider_failed"));
+      const client = nativeSandboxClient({ container: async () => f.container, backup: async () => ({ backup, restore: vi.fn() }) });
+      const snapshot = { files: [], directories: [], totalBytes: 0 };
+      await expect(client.backupDirectory!(snapshot)).resolves.toEqual(record);
+      await expect(client.backupDirectory!(snapshot)).rejects.toThrow("provider_failed");
+      expect(f.calls.map(call => call.command.at(-1))).toEqual(["stageBackup", "discardBackup", "stageBackup", "discardBackup"]);
+    });
     it("原生 stdin 传递参数，文件读写使用 uid/gid 1000，返回 UTF-8 字节数", async () => {
       const f = fixture();
       expect(await f.client.writeFile("out/report.md", "中文\r\n第二行")).toEqual({ bytes: 17 });
