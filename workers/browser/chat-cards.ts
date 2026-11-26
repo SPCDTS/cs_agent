@@ -10,8 +10,6 @@ const sources = {
 } as const;
 
 const paths = {
-  gmail: "M3 6h18v13H3z M3 7l9 7 9-7",
-  github: "M6 8v8 M9 18h4a5 5 0 005-5V8 M6 3a2.5 2.5 0 100 5 2.5 2.5 0 000-5 M6 16a2.5 2.5 0 100 5 2.5 2.5 0 000-5 M18 3a2.5 2.5 0 100 5 2.5 2.5 0 000-5",
   event: "M4 5h16v14H4z M7 10h3l2-3 2 7 2-4h2",
   chat: "M4 4h16v13H9l-5 4z M8 9h8 M8 12h5",
   agent: "M3 7h15m-4-4 4 4-4 4 M21 17H6m4-4-4 4 4 4",
@@ -20,11 +18,18 @@ const paths = {
   download: "M12 3v12m-5-5 5 5 5-5 M4 16v4h16v-4",
 } as const;
 
-function icon(key: keyof typeof paths) {
+function icon(key: keyof typeof paths | "gmail" | "github" | "qq") {
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("aria-hidden", "true");
+  if (key === "gmail" || key === "github" || key === "qq") {
+    svg.setAttribute("class", "source-logo");
+    const use = document.createElementNS(ns, "use");
+    use.setAttribute("href", "#chat-logo-" + key);
+    svg.append(use);
+    return svg;
+  }
   const path = document.createElementNS(ns, "path");
   path.setAttribute("d", paths[key]);
   svg.append(path);
@@ -68,7 +73,7 @@ export function chatCard(m: ChatMessage, status: string, download: (asset: Asset
   const system = external || source === "agent-in" || source === "agent-out" || source === "subagent";
   const label = source ? sources[source] : "未知来源";
   const author = m.role === "assistant" ? "助手" : m.name || "用户";
-  const mark = external ? source : source === "subagent" ? "subagent" : system ? "agent" : "chat";
+  const mark = external || source === "qq" || source === "subagent" ? source : system ? "agent" : "chat";
   const statusTone = m.status === "failed" || m.status === "error" ? " bad" :
     m.status === "waiting" || m.status === "queued" || m.status === "unconfirmed" ? " warn" : "";
   const name = !system ? author : source === "agent-in" || source === "agent-out" ? m.name : "";

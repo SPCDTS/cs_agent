@@ -64,6 +64,12 @@ test("会话卡片直接呈现消息内容，合批展开状态随刷新保留",
   const [inbox, repo, web, old, partial, unsafe, qq, future, model, other, report, empty] = cards();
   assert.deepEqual([...inbox.querySelectorAll("h4")].map(n => n.textContent), ["预览 <img src=x>", "（无主题）", "补充材料"]);
   assert.equal(inbox.querySelector("img"), null);
+  for (const [card, source] of [[inbox, "gmail"], [repo, "github"], [qq, "qq"]]) {
+    const ref = card.querySelector(".message-source use").getAttribute("href");
+    assert.equal(ref, "#chat-logo-" + source);
+    assert.ok(document.querySelector(ref + " path"));
+  }
+  assert.equal(web.querySelector(".source-logo"), null);
   assert.match(inbox.querySelector(".event-items").textContent, /设计组 · 通知/);
   assert.match(inbox.textContent, /另有 3 件未展开/);
   assert.equal(inbox.textContent.match(/请核对布局/g)?.length, 1);

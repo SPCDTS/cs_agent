@@ -46,19 +46,22 @@ function githubRef(ref: string) {
 }
 
 function eventItem(source: string, item: EventItem) {
+  const time = el("time", { title: "事件时间（北京时间）", text: item.time });
+  if (source === "gmail") return el("li", { className: "event-item mail-item" }, [
+    el("h4", { text: item.title || "（无主题）" }),
+    el("div", { className: "event-byline" }, [el("span", { text: item.actor }), time]),
+    item.summary ? el("p", { text: item.summary }) : null,
+    item.ref ? el("small", { text: "邮件 ID " + item.ref }) : null,
+  ]);
   const target = source === "github" ? githubRef(item.ref) : undefined;
   const title = target && item.title.startsWith(target.repo + ": ") ? item.title.slice(target.repo.length + 2) : item.title;
-  const context = source === "gmail" ? item.actor : target?.link ?? item.ref;
   const action = source === "github" ? githubAction(item.summary) : undefined;
   const excerpt = action ? action.excerpt : item.summary;
   return el("li", { className: "event-item" }, [
-    el("div", { className: "event-byline" }, [
-      el("span", {}, [context, source === "gmail" && item.ref ? el("small", { text: (context ? " · " : "") + "邮件 ID " + item.ref }) : null]),
-      el("time", { title: "事件时间（北京时间）", text: item.time }),
-    ]),
-    el("h4", { text: title || (source === "gmail" ? "（无主题）" : "（无标题）") }),
+    el("div", { className: "event-byline" }, [el("span", {}, [target?.link ?? item.ref]), time]),
+    el("h4", { text: title || "（无标题）" }),
     excerpt ? el("p", { text: excerpt }) : null,
-    action || source !== "gmail" && item.actor ? el("div", { className: "event-activity" }, [
+    action || item.actor ? el("div", { className: "event-activity" }, [
       action ? el("span", { className: "event-action " + action.tone, text: action.label }) : null,
       item.actor ? el("small", { text: item.actor }) : null,
     ]) : null,

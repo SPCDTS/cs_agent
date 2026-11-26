@@ -215,8 +215,15 @@ tr:last-child td{border-bottom:0}
 .chat-body{min-width:0;border:1px solid var(--border);border-radius:4px 12px 12px;background:var(--surface);box-shadow:var(--shadow-sm);padding:10px 14px}
 .chat-message.user>.chat-body{border-radius:12px 4px 12px 12px;background:var(--wash);border-color:#d5e1e3}
 .chat-message.system{width:min(100%,44rem);max-width:100%;background:white;border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:var(--shadow-sm);--accent:#315a90;--wash:#f0f5fc}
-.chat-message[data-source="gmail"]{--accent:#88501b;--wash:#fcf5e9}
-.chat-message[data-source="github"]{--accent:#594685;--wash:#f4f1f9}
+.chat-source-logos{position:absolute;overflow:hidden;pointer-events:none}
+.chat-message .source-logo{width:18px;height:18px;fill:currentColor;stroke:none}
+.chat-message[data-source="gmail"]{--accent:#3c4043;--wash:#f0f4f9;--border:#d9dfe7;border-radius:16px;box-shadow:none}
+.chat-message[data-source="github"]{--accent:#1f2328;--wash:#f6f8fa;--border:#d1d9e0;--muted:#59636e;--ok-bg:#dafbe1;--ok-fg:#116329;--bad-bg:#ffebe9;--bad-fg:#a40e26;border-radius:6px;box-shadow:none}
+.chat-message[data-source="qq"]{--accent:#086ca7;--wash:#d7efff}
+.chat-message[data-source="qq"]>.chat-body{border-color:#acdbf4;border-radius:12px;box-shadow:none}
+.chat-message.user[data-source="qq"]>.chat-body{border-top-right-radius:4px}
+.chat-message[data-source="qq"] .chat-media-label{border-color:#a2d3ef;color:#155981;background:#f1faff}
+.chat-message[data-source="event"]{--accent:#49535e;--wash:#f3f5f6}
 .chat-message[data-source="subagent"]{--accent:#146766;--wash:#edf7f5}
 .chat-message.system>.message-meta{padding:8px 14px;margin:0;background:var(--wash);border-bottom:1px solid var(--border)}
 .chat-message.system>.message-meta time{margin-left:auto}
@@ -245,6 +252,12 @@ tr:last-child td{border-bottom:0}
 .event-action{padding:1px 6px;background:var(--wash);color:var(--accent);border-radius:4px;font-size:11.5px}
 .event-action.ok{background:var(--ok-bg);color:var(--ok-fg)}
 .event-action.bad{background:var(--bad-bg);color:var(--bad-fg)}
+.mail-item h4{margin:0 0 4px;font-size:18px;font-weight:500;color:#1f1f1f}
+.mail-item .event-byline>span{font-weight:600}
+.mail-item p{margin:8px 0 0;color:#303134}
+.mail-item>small{display:block;margin-top:6px;color:#5f6368}
+.chat-message[data-source="github"] .event-byline a{color:#0969da}
+.chat-message[data-source="github"] .event-action{border:1px solid currentColor;border-radius:2em;padding:0 7px}
 .event-more{margin-top:10px;border-top:1px solid var(--border)}
 .event-more>summary{padding:6px 0;cursor:pointer;color:var(--accent);font-size:12px}
 .event-count{display:block;margin:4px 0}
