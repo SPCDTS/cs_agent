@@ -13,7 +13,7 @@
 
 ## 验证与部署
 
-- Node.js 24+；`npm run check` 包含类型检查、测试卫生门禁（`npm run test:ci`，含 `workers` 池 `36` 文件上限）、`node` 池纯逻辑单测与按文件隔离的 `workers` 池并行测试（`isolate: true` + `reset()`，本机 2 并发、CI 4 并发）、独立 Node 测试、runner 检查/guest 构建和 Worker 打包检查，CI 另附 Vitest 耗时预算校验。真实 WSB smoke 通过 `npm --prefix runner run test:wsb` 单独运行，不放入 Linux CI。
+- Node.js 24+；`npm run check` 包含类型检查、测试卫生门禁（`npm run test:ci`，含 `workers` 池 `36` 文件上限与 `afterEach` 清理顺序校验）、`node` 池纯逻辑单测与按文件隔离的 `workers` 池并行测试（`isolate: true` + `setup-workers.ts` 兜底清理已驱逐 DO 存储及 `reset() -> vi.restoreAllMocks()`，本机 2 并发、CI 3 并发）、独立 Node 测试、runner 检查/guest 构建和 Worker 打包检查，CI 另附 Vitest 耗时预算校验。真实 WSB smoke 通过 `npm --prefix runner run test:wsb` 单独运行，不放入 Linux CI。
 - 只在用户明确要求时部署，只部署用户同意上线的提交。PR 合入 main 后会触发 CI 自动部署，因此合并 PR 属于发布操作，仍需相应授权。
 - 部署入口为 `.github/workflows/ci.yml` 或 Workers 的 `npm run deploy`；配置、密钥与验证见 [docs/DEPLOY.md](docs/DEPLOY.md)。
 - `workers/sandbox/Dockerfile` 属于线上 coding 沙箱，必须保留。`scripts/workshop-local.*` 仅连接另一个项目的 CS2 Workshop，云端仍使用该连接。

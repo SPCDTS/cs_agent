@@ -10,7 +10,7 @@ import { runtime } from "./sandbox-runtime-fixture";
 import { scriptedModel } from "./events-helpers";
 import { input } from "./helpers";
 
-afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+afterEach(async () => { await reset(); vi.restoreAllMocks(); });
 const group = "group:200000001";
 const FIXED_CID = "11111111-1111-4111-8111-111111111111";
 

@@ -10,7 +10,7 @@ import { input, connect, action, reply, syncedView } from "./helpers";
 
 describe("web chat suite", () => {
   const sockets: WebSocket[] = [];
-  afterEach(async () => { vi.restoreAllMocks(); sockets.splice(0).forEach(s=>s.close()); await reset(); await abortAllDurableObjects(); });
+  afterEach(async () => { sockets.splice(0).forEach(s=>s.close()); await reset(); await abortAllDurableObjects(); vi.restoreAllMocks(); });
   const owner = () => env.THREAD.getByName("owner");
   function admin(method: string, body?: unknown) {
     return worker.fetch(new Request("https://test/admin/threads/owner/chat", { method, headers: { Authorization:"Bearer test", "Content-Type":"application/json" }, body: body===undefined?undefined:JSON.stringify(body) }), { ...env, ADMIN_TOKEN:"test" });
@@ -263,7 +263,7 @@ describe("web chat suite", () => {
 });
 
 describe("sessions suite", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); await abortAllDurableObjects(); });
+  afterEach(async () => { await reset(); await abortAllDurableObjects(); vi.restoreAllMocks(); });
   const owner = () => env.THREAD.getByName("owner");
   function fake(handler: FauxResponseFactory) {
     const provider = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });

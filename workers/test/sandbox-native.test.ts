@@ -16,7 +16,7 @@ import { adminEnv } from "./mcp-helpers";
 
 describe("sandbox native files and container", () => {
   const encoder = new TextEncoder();
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   function fixture() {
     const contents = new Map<string, Uint8Array>(), directories = new Set(["/work"]);
     const calls: { command: string[]; input: unknown; options: ContainerExecOptions | undefined }[] = [];

@@ -14,7 +14,7 @@
 
 - 在各 worktree 独立安装依赖：`npm run install:workers`。不要共享或清理其他 worktree 的 node_modules。
 - 单模块改动提交前运行相关测试和类型检查；可用 `npm run test:related -- src/<文件>.ts`（路径相对 workers/）。共享入口、DO 生命周期、构建/测试配置或跨模块改动运行 `npm run check`。CI 对代码变更执行完整检查，不要求每次小改动在本地重复全套。测试针对真实行为，保持精简。
-- 纯逻辑单测须登记到 `workers/test/projects.mjs` 的 `NODE_TESTS`；`workers` 池测试文件数受预算上限（`36`）约束，修 bug、补 review 回归或扩展同域测试须追加到对应业务域现有文件，禁止新建 `*-fixes` / `*-review` / `*-regressions` 文件；容量与超时边界使用批量预置或可注入小超时，不写长等待或数百次串行 DO RPC；`npm run test:ci` 自动执行上述测试卫生门禁。
+- 纯逻辑单测须登记到 `workers/test/projects.mjs` 的 `NODE_TESTS`；`workers` 池测试文件数受预算上限（`36`）约束，修 bug、补 review 回归或扩展同域测试须追加到对应业务域现有文件，禁止新建 `*-fixes` / `*-review` / `*-regressions` 文件；`workers` 池全局通过 `workers/test/setup-workers.ts` 兜底清理已驱逐 DO 存储并执行 `reset() -> vi.restoreAllMocks()`，各文件自定义 `afterEach` 必须保持「关闭客户端连接 -> `reset()` ->（可选 `abortAllDurableObjects()`）-> `vi.restoreAllMocks()`」顺序，禁止在 `reset()` 前调用 `abortAllDurableObjects()`（会绕过 `deleteAllDurableObjects()` 清理）或提前还原 mock；容量与超时边界使用批量预置或可注入小超时，不写长等待或数百次串行 DO RPC；`npm run test:ci` 自动执行上述测试卫生门禁。
 - 中文说明采用中文正文；编辑已有文本前检查编码、BOM 和换行，并原样保留。
 - 不提交 `.env`、`secrets/`、`data/`、`workspace/`、`napcat/` 或真实执行环境数据。
 - 不修改已上线 DO 的迁移历史；主/子 agent 的 `alarm()` 必须先派发已经准备好的模型请求。

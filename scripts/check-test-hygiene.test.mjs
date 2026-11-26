@@ -74,6 +74,56 @@ it("exempt", async () => {}, 20_000); // ci-timeout-exempt: reason`,
   assert.deepEqual(errors, []);
 });
 
+test("禁止在 afterEach 中先 restoreAllMocks 或在 reset 前调用 abortAllDurableObjects", () => {
+  const errors = checkTestHygiene({
+    workerTests: [
+      {
+        name: "bad-restore-order.test.ts",
+        content: `import { reset } from "cloudflare:test";
+import { afterEach, vi } from "vitest";
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await reset();
+});`,
+      },
+      {
+        name: "bad-abort-order.test.ts",
+        content: `import { abortAllDurableObjects, reset } from "cloudflare:test";
+import { afterEach, vi } from "vitest";
+afterEach(async () => {
+  await abortAllDurableObjects();
+  await reset();
+  vi.restoreAllMocks();
+});`,
+      },
+      {
+        name: "good-reset-only.test.ts",
+        content: `import { reset } from "cloudflare:test";
+import { afterEach, vi } from "vitest";
+afterEach(async () => {
+  await reset();
+  vi.restoreAllMocks();
+});`,
+      },
+      {
+        name: "good-reset-then-abort.test.ts",
+        content: `import { abortAllDurableObjects, reset } from "cloudflare:test";
+import { afterEach, vi } from "vitest";
+afterEach(async () => {
+  await reset();
+  await abortAllDurableObjects();
+  vi.restoreAllMocks();
+});`,
+      },
+    ],
+    nodeTests: [],
+    workersRuntimeOnly: [],
+  });
+  assert.equal(errors.length, 2);
+  assert.ok(errors.some(e => e.includes("bad-restore-order.test.ts") && e.includes("restoreAllMocks")));
+  assert.ok(errors.some(e => e.includes("bad-abort-order.test.ts") && e.includes("abortAllDurableObjects")));
+});
+
 test("超出 workers 池文件数预算时拒绝", () => {
   const errors = checkTestHygiene({
     workerTests: [

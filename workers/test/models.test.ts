@@ -82,7 +82,7 @@ async function login(clientId = CODEX_CLIENT_ID, subject = "subject-a") {
   expect((await complete(attempt, clientId, subject)).status).toBe(200);
   return attempt;
 }
-afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+afterEach(async () => { await reset(); vi.restoreAllMocks(); });
 
 describe("Codex native authorization", () => {
   it("uses native PKCE and one-use pairing, verifies identity, encrypts tokens and lists the account catalog", async () => {

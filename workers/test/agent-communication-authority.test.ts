@@ -17,8 +17,8 @@ const group = "group:200000001";
 const FIXED_CID = "11111111-1111-4111-8111-111111111111";
 
 afterEach(async () => {
-  vi.restoreAllMocks();
   await reset();
+  vi.restoreAllMocks();
 });
 
 async function seed(scope: string, user = 10000001, n = 1) {

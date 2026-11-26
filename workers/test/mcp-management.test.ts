@@ -26,7 +26,7 @@ import { ACCESS, REFRESH, TEST_STORE_KEY, issuer, callback, fakeRemote, adminEnv
 import { adminHealth, input } from "./helpers";
 
 describe("mcp management onboarding", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   const endpoint = "https://mcp.integration.test/mcp", id = "fixture-project";
   const registry = () => env.REGISTRY.getByName("main");
   function remoteFixture() {
@@ -218,7 +218,7 @@ describe("mcp management onboarding", () => {
 });
 
 describe("mcp approvals", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   const group = "group:200000001";
   const actor: McpAuthority = { kind: "message", scope: group, actor: "10000003", owner: false, generation: 2, replyChannel: "web" };
   const reviewer: McpAuthority = { kind: "message", scope: "owner", actor: "10000001", owner: true, generation: 1, replyChannel: "web" };
@@ -282,7 +282,7 @@ describe("mcp approvals", () => {
 });
 
 describe("mcp agent approvals", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   const group = "group:200000001";
   const actor: McpAuthority = { kind: "agent", scope: group, actor: "agent:" + group, owner: false, generation: 2, replyChannel: "qq" };
   const reviewer: McpAuthority = { kind: "message", scope: "owner", actor: "admin:web", owner: true, generation: 1, replyChannel: "web" };
@@ -400,7 +400,7 @@ describe("mcp agent approvals", () => {
 });
 
 describe("mcp environments", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   const group = 'group:200000001';
   const actor: McpAuthority = { kind: 'message', scope: group, actor: '10000003', owner: false, generation: 1, replyChannel: 'web' };
   const owner: McpAuthority = { ...actor, scope: 'owner', actor: '10000001', owner: true };
@@ -481,7 +481,7 @@ describe("mcp environments", () => {
 });
 
 describe("mcp oauth", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   const registry = () => env.REGISTRY.getByName("main");
   async function expire() {
     await runInDurableObject(registry(), (_instance, state) => { state.storage.sql.exec("UPDATE mcp_oauth_tokens SET expires_at=?", Date.now() - 1); });

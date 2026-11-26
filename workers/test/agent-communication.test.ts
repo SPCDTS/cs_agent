@@ -16,7 +16,7 @@ import { scriptedModel } from "./events-helpers";
 
 describe("agent communication core", () => {
   const sockets: WebSocket[] = [];
-  afterEach(async () => { for (const socket of sockets.splice(0)) socket.close(); vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { for (const socket of sockets.splice(0)) socket.close(); await reset(); vi.restoreAllMocks(); });
   const group = "group:200000001";
   type Internal = {
     queueInput(input: InboundInput): Promise<string>;

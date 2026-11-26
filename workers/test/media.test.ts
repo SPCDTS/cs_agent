@@ -21,7 +21,7 @@ import { action, connect, event, input } from "./helpers";
 import { scriptedModel } from "./events-helpers";
 
 describe("media core and downloads", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   const png = new Uint8Array([137,80,78,71,13,10,26,10,1,2,3]);
   
   describe("私有媒体资产", () => {
@@ -159,7 +159,7 @@ describe("media context", () => {
 
 describe("media host lookup and attachments", () => {
   const sockets: WebSocket[] = [];
-  afterEach(async()=>{for (const socket of sockets.splice(0)) socket.close(); vi.restoreAllMocks(); await reset();});
+  afterEach(async()=>{for (const socket of sockets.splice(0)) socket.close();await reset(); vi.restoreAllMocks();});
   const png = new Uint8Array([137,80,78,71,13,10,26,10]);
   function bridge() { return {getMessage:vi.fn(async()=>({})),getFileAttachment:vi.fn(async()=>({bytes:png,name:"报告.pdf"})),getImage:vi.fn(async()=>({bytes:png,name:"image"})),getRecord:vi.fn(async()=>"https://cdn.example.com/audio"),getFile:vi.fn(async()=>"https://cdn.example.com/video")}; }
   it("按已核验来源解析fileId与图片引用，选择后才发RPC",async()=>{
@@ -223,7 +223,7 @@ describe("media host lookup and attachments", () => {
 
 describe("media observability and diagnostics", () => {
   const sockets: WebSocket[] = [];
-  afterEach(async () => { for (const socket of sockets.splice(0)) socket.close(); vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { for (const socket of sockets.splice(0)) socket.close();await reset(); vi.restoreAllMocks(); });
   const secret = "synthetic_private_cookie_and_token";
   const url = "https://1.1.1.1/private?token=" + secret;
   const privateSource = { scope: "private:10000003", namespace: "private:10000003", target: { kind: "private" as const, userId: "10000003" } };
@@ -482,7 +482,7 @@ describe("media observability and diagnostics", () => {
 });
 
 describe("imagegen", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/mQAAAAASUVORK5CYII=";
   const models = { getAuth: async () => ({ auth: { apiKey: "synthetic-codex", baseUrl: CODEX_BASE_URL, headers: { "chatgpt-account-id": "synthetic-account" } } }) };
   it("编辑读取会话图片后直传 Codex，结果入库；跨会话引用在发请求前被拒绝", async () => {

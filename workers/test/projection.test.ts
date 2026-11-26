@@ -11,7 +11,7 @@ import { fauxProvider, fauxToolCall, fauxAssistantMessage } from "@earendil-work
 import { seedChatTranscript } from "./fixtures/chat-transcript";
 
 describe("admin projection sync", () => {
-  afterEach(async()=>{vi.restoreAllMocks();await reset();await abortAllDurableObjects();});
+  afterEach(async()=>{await reset();await abortAllDurableObjects();vi.restoreAllMocks();});
   const admin=(path:string)=>worker.fetch(new Request("https://test"+path,{headers:{Authorization:"Bearer test"}}),{...env,ADMIN_TOKEN:"test"});
   it("未同步的查询返回待同步，不唤醒执行 DO",async()=>{
     const sync=vi.spyOn(ThreadDO.prototype,"syncAdminView");const alarm=vi.spyOn(ThreadDO.prototype,"alarm");
@@ -125,7 +125,7 @@ describe("admin projection sync", () => {
 });
 
 describe("chat transcript projection", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); await abortAllDurableObjects(); });
+  afterEach(async () => { await reset(); await abortAllDurableObjects(); vi.restoreAllMocks(); });
   it("会话对话以本 root 已放置的 transcript 为准，并区分收件、发送回执和真实平台消息",async()=>{
     const owner=env.THREAD.getByName("owner");
     await owner.syncAdminView("owner");

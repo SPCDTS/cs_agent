@@ -14,7 +14,7 @@ import { scriptedModel } from "./events-helpers";
 import { input, syncedView } from "./helpers";
 
 describe("workspace persistence and gc", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   describe("持久工作区", () => {
     it("Agent 附件经过真实 manifest/CAS 提交后可重建并通过 read 消费（容器客户端为本地夹具）", async () => {
       await runInDurableObject(env.SANDBOX.getByName("agent-import"), async (_instance, state) => {
@@ -211,7 +211,7 @@ describe("workspace admin skill publish", () => {
 });
 
 describe("cloudflare workspace resources", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   const resources = () => env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner");
   const resourceId = (seed: string) => "sbx:" + createHash("sha256").update(seed).digest("hex");
   const legacyResource = (seed: string, name: string) => ({
@@ -280,7 +280,7 @@ describe("cloudflare workspace resources", () => {
 });
 
 describe("owner workspace read", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   const groupA = "group:200000001", groupB = "group:200000002";
   const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 255]);
   async function seed(workspace: string, label: string) {

@@ -13,8 +13,8 @@ import { input } from "./helpers";
 
 const TOKEN = "test-admin-only";
 afterEach(async () => {
-  vi.restoreAllMocks();
   await reset();
+  vi.restoreAllMocks();
 });
 
 type Step =
