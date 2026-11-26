@@ -8,7 +8,7 @@ import type { DirEntry, ExecResult, FileEdit, ReadResult } from "./client";
 import { nativeSandboxClient } from "./native";
 import { ObjectFiles } from "./object-files";
 import { TokenVault } from "../mcp/crypto";
-import { SkillStateManager, type SkillOwnerBashInput, type SkillRunInput, type SkillRunOutcome, type SkillStateSummary } from "../skill-runtime/state";
+import { SkillStateManager, type SkillBashInput, type SkillRunOutcome, type SkillStateSummary } from "../skill-runtime/state";
 import { classifyError, logDiag } from "../shared/diagnostics";
 import { WorkspaceManager, type WorkspaceManifest, type WorkspaceOperation, type WorkspaceRunResult, type WorkspaceCompareResult } from "./workspace";
 export type { WorkspaceManifest, WorkspaceOperation, WorkspaceRunResult, WorkspaceCompareResult } from "./workspace";
@@ -217,8 +217,7 @@ export class SandboxDO extends DurableObject<Env> {
     return report;
   }
   resetRuntime(): Promise<{ reset: boolean }> { return this.workspace.resetRuntime(); }
-  skillRun(input: SkillRunInput): Promise<SkillRunOutcome> { return this.skillState.runAction(input); }
-  skillOwnerBash(input: SkillOwnerBashInput): Promise<SkillRunOutcome> { return this.skillState.runOwnerBash(input); }
+  skillBash(input: SkillBashInput): Promise<SkillRunOutcome> { return this.skillState.runBash(input); }
   skillStateList(skill: string): Promise<SkillStateSummary> { return this.skillState.list(skill); }
   skillStateImport(input: { skill: string; files: Array<{ path: string; bytes: Uint8Array }> }): Promise<SkillStateSummary> { return this.skillState.importFiles(input); }
   skillStateClear(skill: string): Promise<{ cleared: true }> { return this.skillState.clear(skill); }

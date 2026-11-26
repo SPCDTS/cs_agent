@@ -1,6 +1,5 @@
 import { Type } from "typebox";
 import { defineTool } from "@earendil-works/pi-durable";
-import { parseSkillRunner, SKILL_RUNNER_FILE } from "./skill-runtime/manifest";
 
 export const SKILLS_SCHEMA = `CREATE TABLE IF NOT EXISTS skills (name TEXT PRIMARY KEY, description TEXT NOT NULL, body TEXT NOT NULL,
   files_json TEXT NOT NULL, updated_at INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1)`;
@@ -12,7 +11,7 @@ export type SkillSummary = { name: string; description: string; enabled: boolean
 
 export const SKILL_LIMITS = { markdownBytes: 256 * 1024, fileBytes: 64 * 1024, filesBytes: 512 * 1024, description: 500, readChars: 20_000 };
 export type SkillErrorCode = "invalid_name" | "missing_frontmatter" | "name_mismatch" | "missing_description" | "description_too_long"
-  | "skill_too_large" | "invalid_path" | "invalid_file" | "file_too_large" | "files_too_large" | "invalid_runner";
+  | "skill_too_large" | "invalid_path" | "invalid_file" | "file_too_large" | "files_too_large";
 export class SkillError extends Error {
   constructor(readonly code: SkillErrorCode) { super(code); }
 }
@@ -56,10 +55,6 @@ export function parseSkill(name: string, markdown: string, files?: Record<string
       const size = bytes(text);
       if (size > SKILL_LIMITS.fileBytes) throw new SkillError("file_too_large");
       if ((total += size) > SKILL_LIMITS.filesBytes) throw new SkillError("files_too_large");
-    }
-    if (Object.hasOwn(files, SKILL_RUNNER_FILE)) {
-      try { parseSkillRunner(files); }
-      catch { throw new SkillError("invalid_runner"); }
     }
   }
   return { name, description, body: markdown, ...(files ? { files } : {}) };

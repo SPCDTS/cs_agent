@@ -53,7 +53,6 @@ export interface SandboxClient {
   editFile(path: string, edits: FileEdit[]): Promise<{ replaced: number }>;
   list(path: string): Promise<DirEntry[]>;
   materializeSkill?(input: { files: Record<string, string>; revision: string; installNpmDeps?: boolean; depsHash?: string }): Promise<void>;
-  execSkill?(input: { argv: string[]; stdin: string; timeoutMs: number }): Promise<SkillExecResult>;
   execSkillBash?(input: { command: string; timeoutMs: number }): Promise<SkillExecResult>;
   skillStateSnapshot?(): Promise<RuntimeSnapshot>;
   skillStateRestore?(snapshot: RuntimeSnapshot, readBlob: (file: RuntimeFile) => Promise<Uint8Array>): Promise<void>;

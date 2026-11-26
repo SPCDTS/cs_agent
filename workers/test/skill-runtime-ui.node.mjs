@@ -13,13 +13,7 @@ test("管理台 Skill 群授权与状态支持渲染、授权保存、撤销与�
         description: "商城查询技能",
         enabled: true,
         updatedAt: 1790000000000,
-        authExitCode: 41,
         deps: "npm",
-        actions: [
-          { name: "login", description: "主人登录", ownerOnly: true, timeoutSec: 90 },
-          { name: "query", description: "查询商品", ownerOnly: false, timeoutSec: 30 },
-          { name: "detail", description: "商品详情", ownerOnly: false, timeoutSec: 30 },
-        ],
         grants: [],
         state: {
           skill: "shop",
@@ -41,10 +35,10 @@ test("管理台 Skill 群授权与状态支持渲染、授权保存、撤销与�
     }
     if (url === "/admin/skill-runtime/shop/grants" && method === "PUT") {
       const body = JSON.parse(init.body);
-      state.skills[0].grants = body.actions.length
-        ? [{ group: body.group, actions: body.actions, revision: "g-1", updatedAt: 1790000001000 }]
+      state.skills[0].grants = body.enabled
+        ? [{ group: body.group, revision: "g-1", updatedAt: 1790000001000 }]
         : [];
-      return Response.json({ skill: "shop", group: body.group, actions: body.actions, revision: body.actions.length ? "g-1" : "" });
+      return Response.json({ skill: "shop", group: body.group, enabled: body.enabled, revision: body.enabled ? "g-1" : "" });
     }
     if (url === "/admin/skill-runtime/shop/state/clear" && method === "POST") {
       state.skills[0].state = { skill: "shop", revision: "0", updatedAt: 0, totalBytes: 0, fileCount: 0, files: [] };
@@ -57,17 +51,14 @@ test("管理台 Skill 群授权与状态支持渲染、授权保存、撤销与�
   await ui.loadSkillRuntime();
   const root = page.document.getElementById("skill-runtime-list");
   assert.match(root.textContent, /shop/);
-  assert.match(root.textContent, /仅主人/);
+  assert.match(root.textContent, /deps=npm/);
   assert.match(root.textContent, /session\.json/);
 
-  const checkboxes = [...root.querySelectorAll('input[type="checkbox"]')];
-  assert.deepEqual(checkboxes.map(c => c.value), ["query", "detail"]);
-  checkboxes[0].checked = true;
   const form = root.querySelector("form");
   form.dispatchEvent(new page.window.Event("submit", { cancelable: true }));
   await page.settle();
   assert.match(root.textContent, /测试群 \(group:200000001\)/);
-  assert.match(root.textContent, /动作：query/);
+  assert.match(root.textContent, /已授权共享状态/);
 
   const revokeBtn = [...root.querySelectorAll("button")].find(b => b.textContent === "撤销");
   assert.ok(revokeBtn);

@@ -23,16 +23,7 @@ function renderSkillCard(
     el("strong", { text: item.skill }),
     pill(item.enabled ? "已启用" : "已停用", item.enabled ? "ok" : "neutral"),
     item.deps ? el("span", { className: "pill neutral", text: `deps=${item.deps}` }) : null,
-    el("span", { className: "muted small", text: `登录失效退出码 ${item.authExitCode}` }),
   ]);
-
-  const actionNodes = item.actions.map(action =>
-    el("div", { className: "row", style: "gap:6px" }, [
-      el("span", { className: "mono", text: action.name }),
-      action.ownerOnly ? el("span", { className: "pill warn", text: "仅主人" }) : el("span", { className: "pill neutral", text: "可授权群" }),
-      el("span", { className: "muted small", text: `${action.timeoutSec}s · ${action.description}` }),
-    ]),
-  );
 
   let stateBox: HTMLElement;
   if ("error" in item.state) {
@@ -90,7 +81,7 @@ function renderSkillCard(
               SkillRuntimeGrantSavedSchema,
               "PUT",
               `/admin/skill-runtime/${encodeURIComponent(item.skill)}/grants`,
-              { group: grant.group, actions: [] },
+              { group: grant.group, enabled: false },
             );
             show(`已撤销 ${grant.group} 对 ${item.skill} 的授权`, "info");
             await loadSkillRuntime();
@@ -101,14 +92,13 @@ function renderSkillCard(
         });
         return el("div", { className: "row" }, [
           el("span", { className: "mono", text: groupLabel ? `${groupLabel} (${grant.group})` : grant.group }),
-          el("span", { className: "muted small", text: `动作：${grant.actions.join("、")}` }),
+          pill("已授权共享状态", "ok"),
           el("div", { className: "grow" }),
           revokeBtn,
         ]);
       })
     : [el("div", { className: "muted small", text: "尚未授权任何群。" })];
 
-  const shareableActions = item.actions.filter(a => !a.ownerOnly);
   const groupSelect = el("select", { "aria-label": `${item.skill} 目标群` }, [
     ...groups.map(g => el("option", { value: g.key, text: g.name ? `${g.name} · ${g.key}` : g.key })),
     el("option", { value: "__custom__", text: "手动输入 group:群号…" }),
@@ -118,38 +108,24 @@ function renderSkillCard(
     placeholder: "group:群号",
     hidden: groups.length > 0,
   });
+  const saveBtn = el("button", { type: "submit", className: "btn primary compact", text: "授权给该群" });
+  const grantHint = el("span", { className: "muted small", text: "仅限完全信任群：授权后群可通过 skill_bash 共享该技能登录态" });
+
+  const syncTargetState = () => {
+    const target = (groupSelect.value === "__custom__" ? customInput.value : groupSelect.value).trim();
+    const granted = item.grants.some(g => g.group === target);
+    saveBtn.textContent = granted ? "刷新群授权" : "授权给该群";
+  };
   groupSelect.addEventListener("change", () => {
     customInput.hidden = groupSelect.value !== "__custom__";
+    syncTargetState();
   });
+  customInput.addEventListener("input", syncTargetState);
+  syncTargetState();
 
-  const actionChecks = shareableActions.map(action => {
-    const checkbox = el("input", { type: "checkbox", value: action.name });
-    return {
-      name: action.name,
-      checkbox,
-      label: el("label", { className: "row", style: "gap:4px" }, [checkbox, el("span", { className: "mono", text: action.name })]),
-    };
-  });
-
-  const syncSelectedActions = () => {
-    const target = groupSelect.value === "__custom__" ? customInput.value.trim() : groupSelect.value;
-    const existing = item.grants.find(g => g.group === target);
-    for (const check of actionChecks) {
-      check.checkbox.checked = Boolean(existing?.actions.includes(check.name));
-    }
-  };
-  groupSelect.addEventListener("change", syncSelectedActions);
-  customInput.addEventListener("input", syncSelectedActions);
-  syncSelectedActions();
-
-  const saveBtn = el("button", { type: "submit", className: "btn primary compact", text: "保存群授权" });
-  saveBtn.disabled = shareableActions.length === 0;
   const grantForm = el("form", { className: "stack flat-stack" }, [
-    el("div", { className: "row" }, [groupSelect, customInput]),
-    shareableActions.length
-      ? el("div", { className: "row" }, actionChecks.map(c => c.label))
-      : el("div", { className: "muted small", text: "该技能所有动作均标记为仅主人，不可授权给群。" }),
-    el("div", { className: "row" }, [saveBtn]),
+    el("div", { className: "row" }, [groupSelect, customInput, saveBtn]),
+    grantHint,
   ]);
   grantForm.addEventListener("submit", async event => {
     event.preventDefault();
@@ -158,16 +134,15 @@ function renderSkillCard(
       show("请选择群或输入有效的 group:群号", "error");
       return;
     }
-    const actions = actionChecks.filter(c => c.checkbox.checked).map(c => c.name);
     saveBtn.disabled = true;
     try {
       await readApi(
         SkillRuntimeGrantSavedSchema,
         "PUT",
         `/admin/skill-runtime/${encodeURIComponent(item.skill)}/grants`,
-        { group, actions },
+        { group, enabled: true },
       );
-      show(actions.length ? `已保存 ${group} 对 ${item.skill} 的授权` : `已撤销 ${group} 对 ${item.skill} 的授权`, "info");
+      show(`已授权 ${group} 使用 ${item.skill} 共享登录态`, "info");
       await loadSkillRuntime();
     } catch (error) {
       saveBtn.disabled = false;
@@ -178,7 +153,6 @@ function renderSkillCard(
   return el("article", { className: "source stack" }, [
     header,
     el("div", { className: "muted small", text: item.description }),
-    el("div", { className: "stack flat-stack" }, actionNodes),
     stateBox,
     el("div", { className: "stack flat-stack" }, [
       el("h3", { className: "sub-h3", text: "已授权群" }),
@@ -197,7 +171,7 @@ export async function loadSkillRuntime(): Promise<void> {
     const container = $("skill-runtime-list");
     container.replaceChildren();
     if (!data.skills.length) {
-      container.append(el("div", { className: "muted", text: "暂无配置了 runner.json 的受控技能。请在技能附件中添加 runner.json 后刷新。" }));
+      container.append(el("div", { className: "muted", text: "暂无已创建的技能。请先在「会话与记忆 → 技能目录」添加技能后刷新。" }));
       return;
     }
     for (const item of data.skills) {

@@ -1,5 +1,5 @@
 import { SKILL_RUNTIME_GRANT_SCHEMA, SkillGrantStore, type SkillRuntimeSnapshot } from "./skill-runtime/grants";
-import { DEFAULT_AUTH_EXIT_CODE, parseSkillRunner, SkillNameSchema } from "./skill-runtime/manifest";
+import { hasNpmLockFiles, SkillNameSchema } from "./skill-runtime/manifest";
 import { sha256Hex } from "./shared/hash";
 import { EDGE_SCHEMA, EdgeStore } from "./communication/edges";
 import { DurableObject } from "cloudflare:workers";
@@ -99,55 +99,29 @@ export class RegistryDO extends DurableObject<Env> {
     return installNpmDeps ? sha256Hex((files["package.json"] ?? "") + "\0" + (files["package-lock.json"] ?? "")) : "";
   }
 
+  private materializeFilesFor(skill: Skill): Record<string, string> {
+    return { "SKILL.md": skill.body, ...skill.files };
+  }
+
   skillRuntimeList(scope: string) {
     if (scope === "owner") {
-      const items = [];
-      for (const summary of this.skillsList()) {
+      return this.skillsList().map(summary => {
         const skill = this.skillGet(summary.name);
-        if (!skill) continue;
-        let runner;
-        try { runner = parseSkillRunner(skill.files); } catch { continue; }
-        if (!runner) continue;
-        items.push({
-          skill: skill.name,
-          enabled: skill.enabled,
-          description: skill.description,
-          authExitCode: runner.authExitCode ?? DEFAULT_AUTH_EXIT_CODE,
-          deps: runner.deps?.kind ?? null,
-          actions: Object.entries(runner.actions).map(([name, spec]) => ({
-            name,
-            description: spec.description,
-            ownerOnly: !!spec.ownerOnly,
-            timeoutSec: spec.timeoutSec ?? 30,
-            ...(spec.argsSchema ? { argsSchemaJson: JSON.stringify(spec.argsSchema) } : {}),
-          })),
-          groups: this.skillGrants.list(skill.name).map(g => ({ group: g.scope, actions: g.actions, revision: g.revision })),
-        });
-      }
-      return items;
+        const files = skill?.files ?? {};
+        return {
+          skill: summary.name,
+          enabled: summary.enabled,
+          description: summary.description,
+          deps: hasNpmLockFiles(files) ? "npm" : null,
+          groups: this.skillGrants.list(summary.name).map(g => ({ group: g.scope, revision: g.revision })),
+        };
+      });
     }
     const items = [];
     for (const grant of this.skillGrants.forScope(scope)) {
       const skill = this.skillGet(grant.skill);
       if (!skill?.enabled) continue;
-      let runner;
-      try { runner = parseSkillRunner(skill.files); } catch { continue; }
-      if (!runner) continue;
-      const actions = grant.actions
-        .filter(name => {
-          const spec = runner.actions[name];
-          return spec && !spec.ownerOnly;
-        })
-        .map(name => {
-          const spec = runner.actions[name]!;
-          return {
-            name,
-            description: spec.description,
-            timeoutSec: spec.timeoutSec ?? 30,
-            ...(spec.argsSchema ? { argsSchemaJson: JSON.stringify(spec.argsSchema) } : {}),
-          };
-        });
-      if (actions.length) items.push({ skill: skill.name, description: skill.description, actions });
+      items.push({ skill: skill.name, description: skill.description });
     }
     return items;
   }
@@ -157,13 +131,7 @@ export class RegistryDO extends DurableObject<Env> {
       const grants: SkillRuntimeSnapshot["grants"] = [];
       for (const summary of this.skillsList()) {
         if (!summary.enabled) continue;
-        const skill = this.skillGet(summary.name);
-        if (!skill?.enabled) continue;
-        let runner;
-        try { runner = parseSkillRunner(skill.files); } catch { continue; }
-        if (!runner) continue;
-        const actions = Object.entries(runner.actions).filter(([, spec]) => !spec.ownerOnly).map(([name]) => name).sort();
-        if (actions.length) grants.push({ skill: skill.name, actions, revision: this.skillRevision(skill.name) ?? "1" });
+        grants.push({ skill: summary.name, revision: this.skillRevision(summary.name) ?? "1" });
       }
       return { scope, grants };
     }
@@ -171,14 +139,7 @@ export class RegistryDO extends DurableObject<Env> {
     for (const grant of this.skillGrants.forScope(scope)) {
       const skill = this.skillGet(grant.skill);
       if (!skill?.enabled) continue;
-      let runner;
-      try { runner = parseSkillRunner(skill.files); } catch { continue; }
-      if (!runner) continue;
-      const actions = grant.actions.filter(name => {
-        const spec = runner.actions[name];
-        return spec && !spec.ownerOnly;
-      });
-      if (actions.length) grants.push({ skill: skill.name, actions, revision: grant.revision });
+      grants.push({ skill: skill.name, revision: grant.revision });
     }
     return { scope, grants };
   }
@@ -191,143 +152,59 @@ export class RegistryDO extends DurableObject<Env> {
       if (!summary.enabled) continue;
       const snapGrant = bySkill.get(summary.name);
       if (!snapGrant) continue;
-      const skill = this.skillGet(summary.name);
-      if (!skill?.enabled) continue;
-      let runner;
-      try { runner = parseSkillRunner(skill.files); } catch { continue; }
-      if (!runner) continue;
-      let liveActions: string[];
-      if (scope === "owner") {
-        if (snapGrant.revision !== (this.skillRevision(skill.name) ?? "1")) continue;
-        liveActions = Object.entries(runner.actions).filter(([, spec]) => !spec.ownerOnly).map(([name]) => name);
-      } else {
-        const grant = this.skillGrants.forScope(scope).find(g => g.skill === skill.name);
-        if (!grant || grant.revision !== snapGrant.revision) continue;
-        liveActions = grant.actions.filter(name => {
-          const spec = runner.actions[name];
-          return spec && !spec.ownerOnly;
-        });
-      }
-      const allowed = new Set(snapGrant.actions);
-      const actions = liveActions
-        .filter(name => allowed.has(name))
-        .map(name => {
-          const spec = runner.actions[name]!;
-          return {
-            name,
-            description: spec.description,
-            timeoutSec: spec.timeoutSec ?? 30,
-            ...(spec.argsSchema ? { argsSchemaJson: JSON.stringify(spec.argsSchema) } : {}),
-          };
-        });
-      if (actions.length) items.push({ skill: skill.name, description: skill.description, actions });
+      const liveRevision = scope === "owner"
+        ? (this.skillRevision(summary.name) ?? "1")
+        : this.skillGrants.forScope(scope).find(g => g.skill === summary.name)?.revision;
+      if (!liveRevision || snapGrant.revision !== liveRevision) continue;
+      items.push({ skill: summary.name, description: summary.description });
     }
     return items;
   }
 
-  skillRuntimeResolve(scope: string, skillName: string, actionName: string, snapshot?: SkillRuntimeSnapshot) {
+  skillRuntimeResolve(scope: string, skillName: string, snapshot?: SkillRuntimeSnapshot) {
     const skill = this.skillGet(skillName);
     if (!skill) throw new Error("skill_not_found");
-    if (!skill.enabled) throw new Error("skill_denied");
-    const runner = parseSkillRunner(skill.files);
-    if (!runner) throw new Error("skill_not_found");
-    const actionSpec = runner.actions[actionName];
-    if (!actionSpec) throw new Error("skill_not_found");
+    if ((scope !== "owner" || snapshot !== undefined) && !skill.enabled) throw new Error("skill_denied");
     const grant = scope === "owner" ? undefined : this.skillGrants.forScope(scope).find(g => g.skill === skillName);
-    if (scope !== "owner") {
-      if (actionSpec.ownerOnly || !grant || !grant.actions.includes(actionName)) throw new Error("skill_denied");
-    }
+    if (scope !== "owner" && !grant) throw new Error("skill_denied");
     const skillRevision = this.skillRevision(skillName) ?? "1";
     if (snapshot) {
-      if (snapshot.scope !== scope || actionSpec.ownerOnly) throw new Error("skill_denied");
+      if (snapshot.scope !== scope) throw new Error("skill_denied");
       const snapGrant = snapshot.grants.find(g => g.skill === skillName);
       const liveRevision = scope === "owner" ? skillRevision : grant!.revision;
-      if (!snapGrant || !snapGrant.actions.includes(actionName) || snapGrant.revision !== liveRevision) throw new Error("skill_denied");
+      if (!snapGrant || snapGrant.revision !== liveRevision) throw new Error("skill_denied");
     }
-    const installNpmDeps = runner.deps?.kind === "npm";
+    const installNpmDeps = hasNpmLockFiles(skill.files);
     return {
       skill: skillName,
       revision: skillRevision,
-      files: skill.files,
-      authExitCode: runner.authExitCode ?? DEFAULT_AUTH_EXIT_CODE,
-      action: {
-        command: actionSpec.command,
-        description: actionSpec.description,
-        ownerOnly: !!actionSpec.ownerOnly,
-        timeoutSec: actionSpec.timeoutSec ?? 30,
-        ...(actionSpec.argsSchema ? { argsSchemaJson: JSON.stringify(actionSpec.argsSchema) } : {}),
-      },
+      files: this.materializeFilesFor(skill),
       installNpmDeps,
       depsHash: this.depsHashFor(skill.files, installNpmDeps),
     };
   }
 
-  skillRuntimeResolveOwnerSkill(skillName: string) {
-    const skill = this.skillGet(skillName);
-    if (!skill) throw new Error("skill_not_found");
-    const runner = parseSkillRunner(skill.files);
-    const installNpmDeps = runner?.deps?.kind === "npm";
-    return {
-      skill: skillName,
-      revision: this.skillRevision(skillName) ?? "1",
-      files: skill.files,
-      installNpmDeps,
-      depsHash: this.depsHashFor(skill.files, installNpmDeps),
-    };
-  }
-
-  skillRuntimeGrant(skillName: string, group: string, actions: string[]) {
-    const skill = this.skillGet(skillName);
-    if (!skill) throw new Error("skill_not_found");
-    const runner = parseSkillRunner(skill.files);
-    if (!runner) throw new Error("invalid_runner");
-    for (const action of actions) {
-      const spec = runner.actions[action];
-      if (!spec) throw new Error("skill_not_found");
-      if (spec.ownerOnly) throw new Error("skill_action_owner_only");
-    }
-    return this.skillGrants.set(skillName, group, actions);
+  skillRuntimeGrant(skillName: string, group: string, enabled: boolean) {
+    if (!this.skillGet(skillName)) throw new Error("skill_not_found");
+    return this.skillGrants.set(skillName, group, enabled);
   }
 
   skillRuntimeAdminOverview() {
-    const items = [];
-    for (const summary of this.skillsList()) {
+    return this.skillsList().map(summary => {
       const skill = this.skillGet(summary.name);
-      if (!skill) continue;
-      let runner;
-      try { runner = parseSkillRunner(skill.files); } catch { continue; }
-      if (!runner) continue;
-      items.push({
-        skill: skill.name,
-        description: skill.description,
-        enabled: skill.enabled,
-        updatedAt: skill.updatedAt,
-        authExitCode: runner.authExitCode ?? DEFAULT_AUTH_EXIT_CODE,
-        deps: runner.deps?.kind ?? null,
-        actions: Object.entries(runner.actions).map(([name, spec]) => ({
-          name,
-          description: spec.description,
-          ownerOnly: !!spec.ownerOnly,
-          timeoutSec: spec.timeoutSec ?? 30,
-        })),
-        grants: this.skillGrants.list(skill.name).map(g => ({
+      const files = skill?.files ?? {};
+      return {
+        skill: summary.name,
+        description: summary.description,
+        enabled: summary.enabled,
+        updatedAt: summary.updatedAt,
+        deps: hasNpmLockFiles(files) ? "npm" : null,
+        grants: this.skillGrants.list(summary.name).map(g => ({
           group: g.scope,
-          actions: g.actions,
           revision: g.revision,
           updatedAt: g.updatedAt,
         })),
-      });
-    }
-    return items;
-  }
-
-  skillRuntimeAuthAlert(skill: string, origin: "qq" | "web", episode: string) {
-    this.recordAlert({
-      kind: "credential_login",
-      scope: "skill:" + skill,
-      origin,
-      episode,
-      message: `技能 ${skill} 登录态已失效，请在主人会话使用 skill_owner_bash 或登录动作重新登录。`,
+      };
     });
   }
 

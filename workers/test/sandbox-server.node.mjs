@@ -126,7 +126,7 @@ await writeFile("out/jersey.png", new Uint8Array(await image.arrayBuffer()));`;
   }
 });
 
-test("受控 Skill 运行时：只读物化代码、shell:false 防注入、状态写回与 /work/out 软链拦截", async () => {
+test("Skill 状态沙箱：只读物化 SKILL.md 与附件、状态写回、/work/out 软链拦截与 ESM npm 依赖", async () => {
   const skillBase = path.join(base, "skill-env");
   const skillRoot = path.join(skillBase, "work");
   const skillCodeRoot = path.join(skillBase, "opt-skill");
@@ -146,14 +146,12 @@ test("受控 Skill 运行时：只读物化代码、shell:false 防注入、状�
   const script = [
     "const fs = require('node:fs');",
     "const path = require('node:path');",
-    "const input = JSON.parse(fs.readFileSync(0, 'utf8'));",
     "const stateFile = path.join(process.env.SKILL_STATE_DIR, 'session.json');",
     "const prev = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : { count: 0 };",
     "prev.count += 1;",
-    "prev.lastArg = input.q;",
+    "prev.skillDoc = fs.readFileSync(path.join(process.env.SKILL_DIR, 'SKILL.md'), 'utf8').trim();",
     "fs.writeFileSync(stateFile, JSON.stringify(prev));",
-    "fs.writeFileSync(path.join(process.env.SKILL_OUT_DIR, 'result.json'), JSON.stringify({ count: prev.count, q: input.q }));",
-    "if (input.symlink) fs.symlinkSync(stateFile, path.join(process.env.SKILL_OUT_DIR, 'leak.txt'));",
+    "fs.writeFileSync(path.join(process.env.SKILL_OUT_DIR, 'result.json'), JSON.stringify({ count: prev.count }));",
     "console.log('COUNT=' + prev.count);",
   ].join("\n");
 
@@ -173,13 +171,12 @@ test("受控 Skill 运行时：只读物化代码、shell:false 防注入、状�
     await skillRuntime.materializeSkill({
       revision: "rev-1",
       files: {
+        "SKILL.md": "demo-skill-doc",
         "scripts/run.js": script,
-        "runner.json": "{}",
       },
     });
-    const first = await skillRuntime.execSkill({
-      argv: ["node", "scripts/run.js"],
-      stdin: JSON.stringify({ q: "$(echo INJECTED); touch /tmp/bad" }),
+    const first = await skillRuntime.execSkillBash({
+      command: "node scripts/run.js",
       timeoutMs: 10_000,
     });
     assert.equal(first.code, 0, first.stderr);
@@ -195,12 +192,11 @@ test("受控 Skill 运行时：只读物化代码、shell:false 防注入、状�
       timeoutMs: 10_000,
     });
     assert.equal(bashRes.code, 0);
-    assert.equal(JSON.parse(bashRes.stdout).lastArg, "$(echo INJECTED); touch /tmp/bad");
+    assert.equal(JSON.parse(bashRes.stdout).skillDoc, "demo-skill-doc");
 
     await assert.rejects(
-      skillRuntime.execSkill({
-        argv: ["node", "scripts/run.js"],
-        stdin: JSON.stringify({ q: "leak", symlink: true }),
+      skillRuntime.execSkillBash({
+        command: "ln -s \"$SKILL_STATE_DIR/session.json\" \"$SKILL_OUT_DIR/leak.txt\"",
         timeoutMs: 10_000,
       }),
       /path_denied/,
@@ -236,15 +232,14 @@ test("受控 Skill 运行时：只读物化代码、shell:false 防注入、状�
       installNpmDeps: true,
       depsHash: "deps-h1",
       files: {
-        "runner.json": "{}",
+        "SKILL.md": "esm-skill",
         "package.json": "{\"name\":\"demo\",\"type\":\"module\"}",
         "package-lock.json": "{\"lockfileVersion\":3}",
         "scripts/esm-run.mjs": "import { msg } from 'esm-demo'; console.log(msg);\n",
       },
     });
-    const esmRes = await depsRuntime.execSkill({
-      argv: ["node", "scripts/esm-run.mjs"],
-      stdin: "{}",
+    const esmRes = await depsRuntime.execSkillBash({
+      command: "node scripts/esm-run.mjs",
       timeoutMs: 10_000,
     });
     assert.equal(esmRes.code, 0, esmRes.stderr);

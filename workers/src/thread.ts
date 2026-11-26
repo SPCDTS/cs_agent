@@ -42,7 +42,7 @@ import type { ScheduleAccess } from "./schedule/tools";
 import { parseScheduleInputKey } from "./schedule/run";
 import type { EventRunStatus } from "./events/model";
 import { SkillCatalog } from "./skills";
-import { executeResolvedSkillRun, formatSkillRuntimeList, jsonToolResult, skillRuntimeErrorCode } from "./skill-runtime/tools";
+import { executeResolvedSkillBash, jsonToolResult, skillRuntimeErrorCode } from "./skill-runtime/tools";
 import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentOrigin } from "./subagent/parent";
 import { subagentName, RETENTION_MS, type SubagentIdentity, type ParentSubagentStatus, type SubagentReport } from "./subagent/model";
 import { SandboxTasks, SANDBOX_TASK_SCHEMA, type SandboxTask, type SandboxSubject } from "./sandbox/task-access";
@@ -893,18 +893,16 @@ export class ThreadDO extends DurableObject<Env> {
     if (!await this.validateSubagentAccess(id)) return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
     return { output: [{ type: "text", text: await this.skills.read(input.name, input.path) }] };
   }
-  async subagentSkillActions(id: string): ReturnType<SubagentCapabilityHost["subagentSkillActions"]> {
+  async subagentSkillList(id: string): ReturnType<SubagentCapabilityHost["subagentSkillList"]> {
     const access = await this.validateSubagentAccess(id);
     const snapshot = access?.capabilities.skillRuntime;
     if (!access || !snapshot || snapshot.scope !== access.authority.scope) {
       return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
     }
-    const skills = formatSkillRuntimeList(
-      await this.env.REGISTRY.getByName("main").skillRuntimeListForSnapshot(access.authority.scope, snapshot),
-    );
+    const skills = await this.env.REGISTRY.getByName("main").skillRuntimeListForSnapshot(access.authority.scope, snapshot);
     return jsonToolResult({ skills });
   }
-  async subagentSkillRun(id: string, call: { skill: string; action: string; args?: unknown; timeoutSec?: number; operationId: string }): ReturnType<SubagentCapabilityHost["subagentSkillRun"]> {
+  async subagentSkillBash(id: string, call: { skill: string; command: string; timeoutSec?: number; operationId: string }): ReturnType<SubagentCapabilityHost["subagentSkillBash"]> {
     const started = Date.now();
     const access = await this.validateSubagentAccess(id);
     const snapshot = access?.capabilities.skillRuntime;
@@ -914,12 +912,10 @@ export class ThreadDO extends DurableObject<Env> {
     let outcome = "error";
     let code: number | null | undefined;
     try {
-      const result = await executeResolvedSkillRun({
+      const result = await executeResolvedSkillBash({
         scope: access.authority.scope,
-        origin: access.authority.replyChannel,
         skill: call.skill,
-        action: call.action,
-        args: call.args,
+        command: call.command,
         timeoutSec: call.timeoutSec,
         snapshot,
         registry: this.env.REGISTRY.getByName("main"),
@@ -940,10 +936,9 @@ export class ThreadDO extends DurableObject<Env> {
       return { isError: true, output: [{ type: "text", text: outcome }] };
     } finally {
       await this.audit("skill_runtime", {
-        op: "subagent_run",
+        op: "subagent_bash",
         subagentId: id,
         skill: call.skill,
-        action: call.action,
         scope: access.authority.scope,
         result: outcome,
         ...(code !== undefined ? { code } : {}),

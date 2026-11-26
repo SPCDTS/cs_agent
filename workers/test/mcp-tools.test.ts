@@ -282,8 +282,8 @@ describe("mcp resources and delegation", () => {
           subagentCoding: coding,
           subagentMcp: async () => { throw new Error("unexpected_mcp"); },
           subagentSkill: async () => ({ output: [] }),
-          subagentSkillActions: async () => ({ output: [] }),
-          subagentSkillRun: async () => ({ output: [] }),
+          subagentSkillList: async () => ({ output: [] }),
+          subagentSkillBash: async () => ({ output: [] }),
         };
         const registry = createRegistry(), delegated = installDelegatedCapabilities(registry, host, "coding-child", { coding: true });
         const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
@@ -337,8 +337,8 @@ describe("mcp resources and delegation", () => {
           validateSubagentAccess: async () => ({ authority, capabilities: { mcp: snapshot, coding: true } }),
           subagentMcp: async () => ({ output: [{ type: "text", text: "proxy" }] }),
           subagentSkill: async () => ({ output: [{ type: "text", text: "skill" }] }),
-          subagentSkillActions: async () => ({ output: [] }),
-          subagentSkillRun: async () => ({ output: [] }),
+          subagentSkillList: async () => ({ output: [] }),
+          subagentSkillBash: async () => ({ output: [] }),
           subagentCoding: async () => ({ output: [{ type: "text", text: "sandbox" }] }),
         };
         const registry = createRegistry(), delegated = installDelegatedCapabilities(registry, host, "synthetic-child", { mcp: snapshot, coding: true });

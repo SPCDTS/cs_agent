@@ -75,15 +75,8 @@ const SkillRuntimeStateSchema = Type.Union([
   }),
   Type.Object({ error: Type.Literal("unavailable") }),
 ]);
-const SkillRuntimeActionSchema = Type.Object({
-  name: Type.String(),
-  description: Type.String(),
-  ownerOnly: Type.Boolean(),
-  timeoutSec: Type.Number(),
-});
 const SkillRuntimeGrantItemSchema = Type.Object({
   group: Type.String(),
-  actions: strings(),
   revision: Type.String(),
   updatedAt: Type.Number(),
 });
@@ -92,9 +85,7 @@ export const SkillRuntimeItemSchema = Type.Object({
   description: Type.String(),
   enabled: Type.Boolean(),
   updatedAt: Type.Number(),
-  authExitCode: Type.Number(),
   deps: Type.Union([Type.String(), Type.Null()]),
-  actions: Type.Array(SkillRuntimeActionSchema),
   grants: Type.Array(SkillRuntimeGrantItemSchema),
   state: SkillRuntimeStateSchema,
 });
@@ -106,7 +97,7 @@ export type SkillRuntimeOverview = Static<typeof SkillRuntimeOverviewSchema>;
 export const SkillRuntimeGrantSavedSchema = Type.Object({
   skill: Type.String(),
   group: Type.String(),
-  actions: strings(),
+  enabled: Type.Boolean(),
   revision: Type.String(),
 });
 export const SkillRuntimeClearedSchema = Type.Object({
