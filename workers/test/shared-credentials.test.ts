@@ -5,7 +5,7 @@ import { input } from "./helpers";
 import { scriptedModel } from "./events-helpers";
 import { boundMaterial, FILE_LIMIT, outbound } from "../src/credentials/material";
 
-afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+afterEach(async () => { await reset(); vi.restoreAllMocks(); });
 const group = "group:200000001", endpoint = "https://api.example.test/items";
 const registry = () => env.REGISTRY.getByName("main");
 const bytes = (s: string) => new TextEncoder().encode(s);

@@ -20,8 +20,8 @@ describe("events polling and delivery", () => {
   const sockets: WebSocket[] = [];
   afterEach(async () => {
     for (const socket of sockets.splice(0)) socket.close();
-    vi.restoreAllMocks();
     await reset();
+    vi.restoreAllMocks();
   });
   const events = () => env.EVENTS.getByName("main");
   const settings = (patch: Partial<SourceSettings>) => events().putSettings("gmail", { ...DEFAULT_SETTINGS, ...patch });
@@ -192,7 +192,7 @@ describe("events polling and delivery", () => {
 });
 
 describe("events push cron and admin endpoints", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   // 测试内生成的 RSA 密钥对冒充 Google 的签名密钥，不访问真实 JWKS。
   const ACCOUNT = "gmail-push@proj-test.iam.gserviceaccount.com", audience = `${env.PUBLIC_ORIGIN}/gmail/pubsub`;
   let signing: CryptoKeyPair, impostor: CryptoKeyPair, jwks: unknown;
@@ -295,8 +295,8 @@ describe("events owner turns and gmail tools", () => {
   const sockets: WebSocket[] = [];
   afterEach(async () => {
     for (const socket of sockets.splice(0)) socket.close();
-    vi.restoreAllMocks();
     await reset();
+    vi.restoreAllMocks();
   });
   const events = () => env.EVENTS.getByName("main");
   const status = async () => (await sql<{ status: string }>("SELECT status FROM event_run"))[0]?.status;
@@ -394,7 +394,7 @@ describe("events owner turns and gmail tools", () => {
 });
 
 describe("events mcp allow", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   const text = (result: { output?: readonly unknown[] }) => JSON.stringify(result.output);
   
   describe("MCP eventAllow", () => {

@@ -10,7 +10,7 @@ import { TokenVault } from "../src/mcp/crypto";
 
 let pem:string;
 beforeAll(async()=>{pem=await exportPKCS8((await generateKeyPair("RS256",{extractable:true})).privateKey);});
-afterEach(async()=>{vi.unstubAllGlobals();vi.restoreAllMocks();await reset();});
+afterEach(async()=>{await reset();vi.unstubAllGlobals();vi.restoreAllMocks();});
 const browser="a".repeat(64),secret="synthetic-app-webhook",storeKey="03".repeat(32);
 const appEnv=()=>({...env,ADMIN_TOKEN:"synthetic-admin",GITHUB_APP_ID:"123",GITHUB_APP_SLUG:"test-events",GITHUB_APP_PRIVATE_KEY:pem,
  GITHUB_APP_WEBHOOK_SECRET:secret,GITHUB_APP_CLIENT_ID:"test-client",GITHUB_APP_CLIENT_SECRET:"synthetic-client-secret",

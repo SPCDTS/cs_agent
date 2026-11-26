@@ -406,7 +406,7 @@ describe("memory routes", () => {
 });
 
 describe("memory tools", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   function script(steps: { name: string; args: JsonObject }[]) {
     const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
     const outputs: string[] = [], offers: string[][] = [], sections: (string | null)[] = [];
@@ -546,7 +546,7 @@ describe("memory tools", () => {
 
 describe("memory extractor", () => {
   const sockets: WebSocket[] = [];
-  afterEach(async () => { vi.restoreAllMocks(); for (const socket of sockets.splice(0)) socket.close(); await reset(); });
+  afterEach(async () => { for (const socket of sockets.splice(0)) socket.close();await reset(); vi.restoreAllMocks(); });
   async function useStore<T>(fn: (store: MemoryStore) => Promise<T>) {
     const thread = env.THREAD.getByName("owner");
     await thread.syncAdminView("owner");

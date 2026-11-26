@@ -17,7 +17,7 @@ import { input } from "./helpers";
 
 describe("diagnostics core", () => {
   const TOKEN = "test-admin-only";
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   
   describe("诊断分类与环形日志缓冲", () => {
     it("提取安全错误分类并排除自由文本与潜在凭据", () => {
@@ -344,7 +344,7 @@ describe("diagnostics core", () => {
 });
 
 describe("ops observability tools", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
 
   describe("cs-agent 自观测能力（ops_health 与 runtime-ops Code Mode 命名空间）", () => {
     it("向主人会话暴露顶层 ops_health 与 Code Mode runtime-ops，并默认过滤当前回合自身请求", async () => {

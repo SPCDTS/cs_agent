@@ -23,7 +23,7 @@ import { fakeRemote, login, sampleTools, ACCESS } from "./mcp-helpers";
 import { input } from "./helpers";
 
 describe("mcp tools core", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   function scriptedModel(steps: { name: string; args: JsonObject; beforeResponse?: () => Promise<void> }[]) {
     const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
     const offers: string[] = [], sections: string[] = [], outputs: string[] = [], captured = new Set<string>();
@@ -149,7 +149,7 @@ describe("mcp tools core", () => {
 
 describe("mcp images", () => {
   const modelRegistry = models;
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   const image = { type: "image" as const, data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII=", mimeType: "image/png" };
   const metadata = { frameId: "synthetic-frame", width: 1024, height: 768 };
   const schema = { type: "object", $defs: { dimension: { type: "integer", minimum: 1 } }, properties: {
@@ -264,7 +264,7 @@ describe("mcp images", () => {
 });
 
 describe("mcp resources and delegation", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   const authority: McpAuthority = { kind: "message", scope: "owner", actor: "10000001", owner: true, generation: 1, replyChannel: "web" };
   describe("MCP resources and delegated capabilities", () => {
     it("preserves structured image results across the delegated RPC boundary", async () => {
