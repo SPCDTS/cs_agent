@@ -10,7 +10,13 @@ case "$(uname -m)" in
   x86_64) arch=x86_64 ;;
   *) echo '暂不支持此 Mac 架构。' >&2; exit 2 ;;
 esac
-base="$HOME/Library/Application Support/joule/cua/$(printf %s "$origin" | shasum -a 256 | cut -c1-16)"
+prefix="$(printf %s "$origin" | shasum -a 256 | cut -c1-16)"
+base="$HOME/Library/Application Support/joule/cua/$prefix"
+legacy_base="$HOME/Library/Application Support/cs-agent/cua/$prefix"
+if [[ ! -d "$base" && -d "$legacy_base" ]]; then
+  mkdir -p "$(dirname "$base")"
+  mv "$legacy_base" "$base" 2>/dev/null || base="$legacy_base"
+fi
 mkdir -p "$base"
 exec 9>>"$base/join.lock"
 /usr/bin/lockf -s -t 0 9 || { echo '这台设备已有连接进程。' >&2; exit 1; }

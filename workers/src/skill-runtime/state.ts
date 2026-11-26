@@ -2,7 +2,7 @@ import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { sha256 } from "../media/model";
 import { TokenVault } from "../mcp/crypto";
-import { scopePrefix } from "../media/repository";
+import { legacyScopePrefix, scopePrefix } from "../media/repository";
 import type { RuntimeSnapshot, SandboxClient } from "../sandbox/client";
 import { relativeWorkPath } from "../sandbox/workspace";
 import {
@@ -127,6 +127,10 @@ export class SkillStateManager {
     return `${await scopePrefix("skill-state:" + this.deps.workspaceId)}/skill-state`;
   }
 
+  private async legacyPrefix(): Promise<string> {
+    return `${await legacyScopePrefix("skill-state:" + this.deps.workspaceId)}/skill-state`;
+  }
+
   private emptyManifest(skill: string): SkillStateManifest {
     return { schemaVersion: 1, skill, revision: "0", updatedAt: 0, files: [], directories: [], totalBytes: 0 };
   }
@@ -136,14 +140,16 @@ export class SkillStateManager {
     const head = revision ?? (await this.deps.storage.get<string>(SKILL_STATE_HEAD)) ?? "0";
     if (head === "0") return this.emptyManifest(skill);
     if (!/^[a-f0-9-]{1,64}$/.test(head)) throw new Error("skill_state_corrupt");
-    const object = await this.deps.bucket.get(`${await this.prefix()}/manifests/${head}`);
+    const object = await this.deps.bucket.get(`${await this.prefix()}/manifests/${head}`)
+      ?? await this.deps.bucket.get(`${await this.legacyPrefix()}/manifests/${head}`);
     if (!object) throw new Error("skill_state_corrupt");
     const decrypted = await this.deps.vault.decrypt(await object.text(), manifestIdentity(skill, head));
     return parseStateManifest(JSON.parse(decrypted), skill, head);
   }
 
   private async readDecryptedBlob(skill: string, file: SkillStateManifest["files"][number]): Promise<Uint8Array> {
-    const object = await this.deps.bucket.get(`${await this.prefix()}/blobs/${file.sha256}`);
+    const object = await this.deps.bucket.get(`${await this.prefix()}/blobs/${file.sha256}`)
+      ?? await this.deps.bucket.get(`${await this.legacyPrefix()}/blobs/${file.sha256}`);
     if (!object) throw new Error("skill_state_corrupt");
     const plain = await this.deps.vault.decryptBytes(new Uint8Array(await object.arrayBuffer()), blobIdentity(skill, file.sha256));
     if (plain.byteLength !== file.bytes || await sha256(plain) !== file.sha256) throw new Error("skill_state_corrupt");
@@ -198,16 +204,18 @@ export class SkillStateManager {
           break;
         }
       }
+      const legacy = await this.legacyPrefix();
       if (liveLoaded) {
         for (const hash of evictedHashes) {
           if (!liveHashes.has(hash)) {
-            await this.deps.bucket.delete(`${prefix}/blobs/${hash}`).catch(() => {});
+            await this.deps.bucket.delete([`${prefix}/blobs/${hash}`, `${legacy}/blobs/${hash}`]).catch(() => {});
           }
         }
       }
     }
+    const legacy = await this.legacyPrefix();
     for (const old of evicted) {
-      await this.deps.bucket.delete(`${prefix}/manifests/${old}`).catch(() => {});
+      await this.deps.bucket.delete([`${prefix}/manifests/${old}`, `${legacy}/manifests/${old}`]).catch(() => {});
     }
   }
 
@@ -377,13 +385,14 @@ export class SkillStateManager {
   clear(skill: string): Promise<{ cleared: true }> {
     return this.serial(async () => {
       if (!Check(SkillNameSchema, skill)) throw new Error("invalid_skill");
-      const prefix = `${await this.prefix()}/`;
-      let cursor: string | undefined;
-      do {
-        const page = await this.deps.bucket.list({ prefix, cursor, limit: 500 });
-        if (page.objects.length) await this.deps.bucket.delete(page.objects.map(object => object.key));
-        cursor = page.truncated ? page.cursor : undefined;
-      } while (cursor);
+      for (const prefix of [`${await this.prefix()}/`, `${await this.legacyPrefix()}/`]) {
+        let cursor: string | undefined;
+        do {
+          const page = await this.deps.bucket.list({ prefix, cursor, limit: 500 });
+          if (page.objects.length) await this.deps.bucket.delete(page.objects.map(object => object.key));
+          cursor = page.truncated ? page.cursor : undefined;
+        } while (cursor);
+      }
       await this.deps.storage.delete([SKILL_STATE_HEAD, SKILL_STATE_RECENT]);
       this.hydrated = false;
       if (this.deps.runtimeReady()) await this.deps.resetRuntime().catch(() => {});

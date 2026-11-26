@@ -70,7 +70,7 @@ export class WorkspaceManager {
   private nextBackupAttempt = 0;
   private readonly collector: WorkspaceGc;
   constructor(private readonly deps: { workspace: string; bucket: R2Bucket; storage: WorkspaceStorage; runtime: SandboxClient; resetRuntime(): Promise<unknown>; runtimeReady(): boolean }) {
-    this.collector = new WorkspaceGc({ ...deps, prefix: () => this.prefix(), parse: parseManifest });
+    this.collector = new WorkspaceGc({ ...deps, prefix: () => this.prefix(), legacyPrefix: () => this.legacyPrefix(), parse: parseManifest });
   }
   serial<T>(work: () => Promise<T>): Promise<T> {
     const pending = this.queue.then(work, work);
@@ -194,8 +194,12 @@ export class WorkspaceManager {
   }
   private async discardArchive(old?: WorkspaceArchive): Promise<void> {
     if (!old) return;
-    try { await this.deps.bucket.delete(`${await this.prefix()}/archives/${old.record.id}.tar.zst`); }
-    catch { console.warn({ event: "workspace_archive_cleanup_failed" }); }
+    try {
+      await this.deps.bucket.delete([
+        `${await this.prefix()}/archives/${old.record.id}.tar.zst`,
+        `${await this.legacyPrefix()}/archives/${old.record.id}.tar.zst`,
+      ]);
+    } catch { console.warn({ event: "workspace_archive_cleanup_failed" }); }
   }
   private async commit(snapshot: RuntimeSnapshot, previous: WorkspaceManifest, epoch: number): Promise<WorkspaceManifest> {
     const manifest = parseManifest({ ...snapshot, schemaVersion: 1, workspace: this.deps.workspace, revision: crypto.randomUUID(), parentRevision: previous.revision });

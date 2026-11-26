@@ -431,7 +431,14 @@ describe("mcp resources and delegation", () => {
         const calls = remote.requests.flatMap(request => request.body.includes('"method":"tools/call"') ? [JSON.parse(request.body).params] : []);
         expect(calls).toHaveLength(6);
         for (const params of calls) {
-          expect(params).toMatchObject({ arguments: args, _meta: { "joule/caller": { scope: expect.stringMatching(/^[a-f0-9]{64}$/) } } });
+          expect(params).toMatchObject({
+            arguments: args,
+            _meta: {
+              "joule/caller": { scope: expect.stringMatching(/^[a-f0-9]{64}$/) },
+              "cs-agent/caller": { scope: expect.stringMatching(/^[a-f0-9]{64}$/) },
+            },
+          });
+          expect(params._meta["cs-agent/caller"]).toEqual(params._meta["joule/caller"]);
         }
         const scopes = calls.map(params => params._meta["joule/caller"].scope);
         expect(scopes[0]).toBe(scopes[1]);

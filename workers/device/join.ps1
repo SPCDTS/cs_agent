@@ -12,6 +12,11 @@ function FileDigest([string]$Path) {
 }
 $prefix = (Hex ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Origin)))).Substring(0,16)
 $base = Join-Path $env:LOCALAPPDATA "joule\cua\$prefix"
+$legacyBase = Join-Path $env:LOCALAPPDATA "cs-agent\cua\$prefix"
+if (!(Test-Path -LiteralPath $base) -and (Test-Path -LiteralPath $legacyBase)) {
+  [void][IO.Directory]::CreateDirectory((Split-Path -Parent $base))
+  try { Move-Item -LiteralPath $legacyBase -Destination $base -ErrorAction Stop } catch { $base = $legacyBase }
+}
 [void][IO.Directory]::CreateDirectory($base)
 $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
 $acl = [Security.AccessControl.DirectorySecurity]::new()

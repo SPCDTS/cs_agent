@@ -7,7 +7,7 @@ import type { GcOptions } from "../src/sandbox/workspace-gc";
 import { SandboxDO } from "../src/sandbox/do";
 import { runtime } from "./sandbox-runtime-fixture";
 import { sha256 } from "../src/media/model";
-import { scopePrefix, MediaRepository } from "../src/media/repository";
+import { legacyScopePrefix, scopePrefix, MediaRepository } from "../src/media/repository";
 import { importFiles } from "../src/communication/service";
 import { messageId } from "../src/communication/model";
 import { inspectWorkspaceSkill, publishWorkspaceSkill, type WorkspaceReadApi } from "../src/tools/workspace-admin";
@@ -398,5 +398,39 @@ describe("owner workspace read", () => {
     expect(read).toHaveBeenCalledTimes(1);
     expect(seen.outputs.join("\n")).toContain("授权期间可读");
     expect(seen.outputs.join("\n")).toContain("本回合无权使用沙箱工具");
+  });
+
+  it("WorkspaceGc 可保护 cs-agent/v1 旧前缀的 head 清单并清理过期遗留孤儿对象", async () => {
+    await runInDurableObject(env.SANDBOX.getByName("gc-legacy-prefix"), async (_instance, state) => {
+      const host = runtime(), workspace = "workspace:gc-legacy-prefix";
+      const manager = new WorkspaceManager({ workspace, bucket: env.ASSETS, storage: state.storage, runtime: host.client, resetRuntime: host.reset, runtimeReady: host.ready });
+      const legacyRoot = `${await legacyScopePrefix(workspace)}/workspace`;
+      const keepBytes = new TextEncoder().encode("legacy-keep"), keepHash = await sha256(keepBytes);
+      const dropHash = "f".repeat(64);
+      await env.ASSETS.put(`${legacyRoot}/manifests/0000`, JSON.stringify({
+        schemaVersion: 1, workspace, revision: "0000", parentRevision: null,
+        files: [{ path: "keep.txt", sha256: keepHash, bytes: keepBytes.byteLength, mime: "text/plain", mode: 420 }],
+        directories: [], totalBytes: keepBytes.byteLength,
+      }));
+      await env.ASSETS.put(`${legacyRoot}/blobs/${keepHash}`, keepBytes);
+      await env.ASSETS.put(`${legacyRoot}/blobs/${dropHash}`, "orphan");
+      await env.ASSETS.put(`${legacyRoot}/results/expired-op`, "old-result");
+      const orphanArchive = `${legacyRoot}/archives/${crypto.randomUUID()}.tar.zst`;
+      await env.ASSETS.put(orphanArchive, "old-archive");
+      await state.storage.put({ "workspace:head": "0000" });
+
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 31 * 86_400_000);
+      for (let turn = 0; turn < 40; turn++) {
+        const report = await manager.gc({ dryRun: false, keepManifests: 1, batchSize: 10 });
+        if (report.phase === "done") break;
+        if (turn === 39) throw new Error("legacy GC did not finish");
+      }
+      expect(await env.ASSETS.get(`${legacyRoot}/manifests/0000`)).not.toBeNull();
+      expect(await env.ASSETS.get(`${legacyRoot}/blobs/${keepHash}`)).not.toBeNull();
+      expect(await env.ASSETS.get(`${legacyRoot}/blobs/${dropHash}`)).toBeNull();
+      expect(await env.ASSETS.get(`${legacyRoot}/results/expired-op`)).toBeNull();
+      expect(await env.ASSETS.get(orphanArchive)).toBeNull();
+      expect(new TextDecoder().decode((await manager.readBlob("keep.txt")).bytes)).toBe("legacy-keep");
+    });
   });
 });

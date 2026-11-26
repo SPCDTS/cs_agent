@@ -37,15 +37,17 @@ async function current(env: Env) {
   return server;
 }
 /** 管理子协议独占短连接，无 MCP 会话，也不经过工具发现、对话或工具结果存储。 */
-async function control(env: Env, digest: string, params: Record<string,string>) {
+async function controlOnce(env: Env, digest: string, method: string, params: Record<string,string>): Promise<{ kind: 'ok'; result: Record<string,unknown> } | { kind: 'rpc_error'; error: unknown }> {
   const signal = AbortSignal.timeout(5000);
   const transport = new ReverseTransport(env,digest,4096,signal);
   const id = randomUUID();
-  const reply = Promise.withResolvers<Record<string,unknown>>();
+  const reply = Promise.withResolvers<{ kind: 'ok'; result: Record<string,unknown> } | { kind: 'rpc_error'; error: unknown }>();
   const unavailable = () => reply.reject(new HttpError(503,'pairing_unavailable'));
   transport.onmessage = msg => {
-    if (!('id' in msg) || msg.id !== id || !('result' in msg)) return unavailable();
-    reply.resolve(msg.result);
+    if (!('id' in msg) || msg.id !== id) return unavailable();
+    if ('result' in msg) return reply.resolve({ kind: 'ok', result: msg.result });
+    if ('error' in msg) return reply.resolve({ kind: 'rpc_error', error: msg.error });
+    unavailable();
   };
   transport.onerror = unavailable;
   transport.onclose = unavailable;
@@ -54,12 +56,10 @@ async function control(env: Env, digest: string, params: Record<string,string>) 
     const send = async () => {
       await transport.start();
       if (signal.aborted) { await transport.close(); signal.throwIfAborted(); }
-      await transport.send({jsonrpc:'2.0',id,method:'joule/cua/pair',params});
+      await transport.send({jsonrpc:'2.0',id,method,params});
     };
-    const [,result] = await Promise.all([send(),reply.promise]);
-    if (result.status === 'full') throw new HttpError(409,'pairing_full');
-    if (result.status === 'used') throw new HttpError(409,'pairing_used');
-    return result;
+    const [,outcome] = await Promise.all([send(),reply.promise]);
+    return outcome;
   } catch (error) {
     if (error instanceof HttpError) throw error;
     throw new HttpError(503,'pairing_unavailable');
@@ -67,6 +67,18 @@ async function control(env: Env, digest: string, params: Record<string,string>) 
     signal.removeEventListener('abort',unavailable);
     await transport.close();
   }
+}
+
+async function control(env: Env, digest: string, params: Record<string,string>) {
+  let outcome = await controlOnce(env, digest, 'joule/cua/pair', params);
+  if (outcome.kind === 'rpc_error') {
+    outcome = await controlOnce(env, digest, 'cs-agent/cua/pair', params);
+  }
+  if (outcome.kind !== 'ok') throw new HttpError(503,'pairing_unavailable');
+  const { result } = outcome;
+  if (result.status === 'full') throw new HttpError(409,'pairing_full');
+  if (result.status === 'used') throw new HttpError(409,'pairing_used');
+  return result;
 }
 
 export async function issuePairing(env: Env) {

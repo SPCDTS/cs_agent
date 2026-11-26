@@ -109,7 +109,7 @@ export class McpConnection {
   async callTool(name: string, args: Record<string, unknown>, caller: { scope: string; environments?: EnvironmentAccess }, signal: AbortSignal) {
     if (this.closing || this.failure) throw this.failure ?? new McpConnectionError("closed", "closed");
     // 直接 request 避免 SDK 的逐页 outputSchema 缓存影响早期页面的工具；校验由完整目录负责。
-    try { return await this.client.request({ method: "tools/call", params: { name, arguments: args, _meta: { "joule/caller": caller } } }, CallToolResultSchema,
+    try { return await this.client.request({ method: "tools/call", params: { name, arguments: args, _meta: { "joule/caller": caller, "cs-agent/caller": caller } } }, CallToolResultSchema,
       { signal, timeout: this.limits.callMs, maxTotalTimeout: this.limits.callMs, resetTimeoutOnProgress: false }); }
     catch (error) { throw this.failure ?? safeError(error); }
   }

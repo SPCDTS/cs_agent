@@ -4,7 +4,7 @@ export type GcOptions = { keepManifests?: number; retentionMs?: number; graceMs?
 type Phase = "inventory" | "manifests" | "blobs" | "results" | "archives" | "cleanup";
 type Policy = { keep: number; retention: number; grace: number; batch: number };
 type State = {
-  phase: Phase; cursor?: string; startedAt: number; policy: Policy;
+  phase: Phase; legacyChecked?: boolean; hasLegacy?: boolean; legacy?: boolean; cursor?: string; startedAt: number; policy: Policy;
   latest: { key: string; uploaded: number }[]; protected: string;
   scanned: number; candidates: number; deleted: number;
 };
@@ -17,7 +17,7 @@ type Storage = Pick<DurableObjectStorage, "get" | "put" | "delete" | "sql">;
 /** 每次只处理一页或一个保留版本；可达性保存在 SQLite，不把整个工作区历史装入内存。 */
 export class WorkspaceGc {
   constructor(private readonly deps: {
-    workspace: string; storage: Storage; bucket: R2Bucket; prefix(): Promise<string>;
+    workspace: string; storage: Storage; bucket: R2Bucket; prefix(): Promise<string>; legacyPrefix?(): Promise<string>;
     parse(value: unknown): WorkspaceManifest;
   }) {}
 
@@ -51,6 +51,8 @@ export class WorkspaceGc {
   private async step(state: State, dryRun: boolean): Promise<GcReport> {
     this.tables();
     const { storage, bucket } = this.deps, sql = storage.sql, mode = Number(dryRun), prefix = await this.deps.prefix();
+    const rawLegacy = this.deps.legacyPrefix ? await this.deps.legacyPrefix() : undefined;
+    const legacyPrefix = rawLegacy && rawLegacy !== prefix ? rawLegacy : undefined;
     const before = state.scanned;
     const save = async (phase: GcReport["phase"] = state.phase): Promise<GcReport> => {
       const report = { phase, startedAt: state.startedAt, dryRun, scanned: state.scanned, stepScanned: state.scanned - before,
@@ -67,20 +69,35 @@ export class WorkspaceGc {
       return save(pending ? "cleanup" : "done");
     }
 
+    if (!state.legacyChecked) {
+      state.legacyChecked = true;
+      if (legacyPrefix) {
+        const probe = await bucket.list({ prefix: `${legacyPrefix}/`, limit: 1 });
+        state.scanned += probe.objects.length;
+        state.hasLegacy = probe.objects.length > 0;
+        return save();
+      }
+      state.hasLegacy = false;
+    }
+
     // 每批删除前重新保护 head 和有效租约。新增保护先完成标记，原有标记只增不减。
     // 因此两批之间可以正常写入、导入或申请租约，不需要重新扫描历史，也不会误删新引用。
     const head = await storage.get<string>("workspace:head") ?? "0";
     const pins = await storage.get<Record<string, number>>("workspace:pins") ?? {};
     const archive = await storage.get<WorkspaceArchive>("workspace:archive");
     const revisions = [...new Set([...(head === "0" ? [] : [head]), ...(archive && archive.revision !== "0" ? [archive.revision] : []), ...Object.keys(pins).filter(id => id !== "0" && pins[id] > Date.now())])].sort();
+    const activeLegacy = state.hasLegacy ? legacyPrefix : undefined;
     const protectedKey = JSON.stringify(revisions);
     if (protectedKey !== state.protected) {
-      this.protect(mode, revisions.map(revision => `${prefix}/manifests/${revision}`));
+      this.protect(mode, revisions.flatMap(revision => activeLegacy ? [`${prefix}/manifests/${revision}`, `${activeLegacy}/manifests/${revision}`] : [`${prefix}/manifests/${revision}`]));
       state.protected = protectedKey;
     }
     const pending = sql.exec<{ key: string }>("SELECT key FROM workspace_gc_manifests WHERE mode=? AND marked=0 LIMIT 1", mode).toArray()[0];
     if (pending) {
-      const stored = await bucket.get(pending.key);
+      const alternateKey = activeLegacy
+        ? (pending.key.startsWith(`${prefix}/`) ? activeLegacy + pending.key.slice(prefix.length) : pending.key.startsWith(`${activeLegacy}/`) ? prefix + pending.key.slice(activeLegacy.length) : undefined)
+        : undefined;
+      const stored = await bucket.get(pending.key) ?? (alternateKey ? await bucket.get(alternateKey) : null);
       if (!stored) throw new Error("workspace_manifest_missing");
       const manifest = this.deps.parse(await stored.json());
       if (manifest.workspace !== this.deps.workspace || !pending.key.endsWith("/" + manifest.revision)) throw new Error("workspace_manifest_corrupt");
@@ -90,14 +107,24 @@ export class WorkspaceGc {
     }
 
     const segment = state.phase === "inventory" ? "manifests" : state.phase;
-    const page = await bucket.list({ prefix: `${prefix}/${segment}/`, cursor: state.cursor, limit: state.policy.batch });
+    const activePrefix = state.legacy && activeLegacy ? activeLegacy : prefix;
+    const page = await bucket.list({ prefix: `${activePrefix}/${segment}/`, cursor: state.cursor, limit: state.policy.batch });
     state.scanned += page.objects.length;
     state.cursor = page.truncated ? page.cursor : undefined;
+    const advancePrefix = () => {
+      if (page.truncated) return false;
+      if (!state.legacy && activeLegacy) {
+        state.legacy = true;
+        return false;
+      }
+      state.legacy = false;
+      return true;
+    };
     if (state.phase === "inventory") {
       state.latest = [...state.latest, ...page.objects.map(object => ({ key: object.key, uploaded: object.uploaded.getTime() }))]
         .sort((a, b) => b.uploaded - a.uploaded || a.key.localeCompare(b.key)).slice(0, state.policy.keep);
       this.protect(mode, page.objects.filter(object => object.uploaded.getTime() > state.startedAt - state.policy.retention).map(object => object.key));
-      if (!page.truncated) { this.protect(mode, state.latest.map(object => object.key)); state.phase = "manifests"; }
+      if (advancePrefix()) { this.protect(mode, state.latest.map(object => object.key)); state.phase = "manifests"; }
       return save();
     }
 
@@ -110,16 +137,16 @@ export class WorkspaceGc {
       const reachable = new Set(sql.exec<{ key: string }>("SELECT key FROM workspace_gc_refs WHERE mode=? AND key IN (SELECT value FROM json_each(?))", mode, JSON.stringify(hashes)).toArray().map(row => row.key));
       candidates = page.objects.filter((object, index) => object.uploaded.getTime() <= state.startedAt - state.policy.grace && !reachable.has(hashes[index])).map(object => object.key);
     } else if (state.phase === "archives") {
-      const active = archive && `${prefix}/archives/${archive.record.id}.tar.zst`;
+      const active = archive && `${activePrefix}/archives/${archive.record.id}.tar.zst`;
       candidates = page.objects.filter(object => object.key !== active && object.uploaded.getTime() <= state.startedAt - state.policy.grace).map(object => object.key);
     } else {
-      const recent = new Set((await storage.get<string[]>("workspace:recent") ?? []).map(key => `${prefix}/results/${key.slice("workspace:op:".length)}`));
+      const recent = new Set((await storage.get<string[]>("workspace:recent") ?? []).map(key => `${activePrefix}/results/${key.slice("workspace:op:".length)}`));
       candidates = page.objects.filter(object => object.uploaded.getTime() <= state.startedAt - Math.max(state.policy.retention, 30 * 86400000) && !recent.has(object.key)).map(object => object.key);
     }
     if (!dryRun && candidates.length) await bucket.delete(candidates);
     state.candidates += candidates.length;
     state.deleted += dryRun ? 0 : candidates.length;
-    if (!page.truncated) state.phase = state.phase === "manifests" ? "blobs" : state.phase === "blobs" ? "results" : state.phase === "results" ? "archives" : "cleanup";
+    if (advancePrefix()) state.phase = state.phase === "manifests" ? "blobs" : state.phase === "blobs" ? "results" : state.phase === "results" ? "archives" : "cleanup";
     return save();
   }
 }

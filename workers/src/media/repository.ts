@@ -66,10 +66,28 @@ export async function readMediaToken(bucket: R2Bucket, token: string): Promise<{
   return new MediaRepository({ bucket, scope: ref.scope }).get(ref.id);
 }
 
+const LEGACY_CURSOR_PREFIX = "legacy:";
+
 /** 独立于模型回合的维护入口；游标推进防止大量未过期票据阻塞后续对象。 */
 export async function gcMediaTickets(bucket: R2Bucket, options: { limit?: number; cursor?: string; dryRun?: boolean } = {}): Promise<{ scanned: number; deleted: number; cursor?: string }> {
-  const listing = await bucket.list({ prefix: `${ASSET_PREFIX}/tickets/`, limit: Math.max(1, Math.min(1000, options.limit ?? 100)), cursor: options.cursor, include: ["customMetadata"] });
+  const limit = Math.max(1, Math.min(1000, options.limit ?? 100));
+  const useLegacy = options.cursor?.startsWith(LEGACY_CURSOR_PREFIX) ?? false;
+  const cursor = useLegacy ? options.cursor!.slice(LEGACY_CURSOR_PREFIX.length) || undefined : options.cursor;
+  const listing = await bucket.list({ prefix: `${useLegacy ? LEGACY_ASSET_PREFIX : ASSET_PREFIX}/tickets/`, limit, cursor, include: ["customMetadata"] });
+  let scanned = listing.objects.length;
   const expired = listing.objects.filter(object => Number(object.customMetadata?.expires) <= Date.now()).map(object => object.key);
+  let nextCursor = listing.truncated ? (useLegacy ? LEGACY_CURSOR_PREFIX + (listing.cursor ?? "") : listing.cursor) : undefined;
+  if (!useLegacy && !listing.truncated) {
+    const remaining = limit - scanned;
+    if (remaining > 0) {
+      const legacyListing = await bucket.list({ prefix: `${LEGACY_ASSET_PREFIX}/tickets/`, limit: remaining, include: ["customMetadata"] });
+      scanned += legacyListing.objects.length;
+      expired.push(...legacyListing.objects.filter(object => Number(object.customMetadata?.expires) <= Date.now()).map(object => object.key));
+      if (legacyListing.truncated) nextCursor = LEGACY_CURSOR_PREFIX + (legacyListing.cursor ?? "");
+    } else {
+      nextCursor = LEGACY_CURSOR_PREFIX;
+    }
+  }
   if (!options.dryRun && expired.length) await bucket.delete(expired);
-  return { scanned: listing.objects.length, deleted: options.dryRun ? 0 : expired.length, ...(listing.truncated ? { cursor: listing.cursor } : {}) };
+  return { scanned, deleted: options.dryRun ? 0 : expired.length, ...(nextCursor ? { cursor: nextCursor } : {}) };
 }

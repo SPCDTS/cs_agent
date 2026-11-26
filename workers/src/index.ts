@@ -60,7 +60,7 @@ export default {
     }
     if (request.method === "GET" && (path === "/" || path === "/landing.js")) {
       const csp = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
-      const commit = (env.JOULE_COMMIT || "dev").replace(/[^A-Za-z0-9._-]/g, "").slice(0, 40) || "dev";
+      const commit = (env.JOULE_COMMIT || "dev").replace(/[^A-Za-z0-9._-]/g, "").slice(0, 7) || "dev";
       const body = path === "/" ? LANDING_PAGE_HTML.replaceAll("__JOULE_COMMIT__", commit) : LANDING_APP_JS;
       return new Response(body, {
         headers: {
