@@ -98,14 +98,14 @@ describe("diagnostics core", () => {
       const pending: Promise<unknown>[] = [];
       const ctx = { waitUntil: (p: Promise<unknown>) => { pending.push(p); }, passThroughOnException: () => {}, props: {} } as unknown as ExecutionContext;
       await worker.tail?.([
-        { outcome: "ok", exceptions: [], logs: [], eventTimestamp: 2000, scriptName: "cs-agent", event: null } as unknown as TraceItem,
-        { outcome: "exception", exceptions: [], logs: [], eventTimestamp: 2000, scriptName: "cs-agent", event: { consumedEvents: [] } } as unknown as TraceItem,
+        { outcome: "ok", exceptions: [], logs: [], eventTimestamp: 2000, scriptName: "joule", event: null } as unknown as TraceItem,
+        { outcome: "exception", exceptions: [], logs: [], eventTimestamp: 2000, scriptName: "joule", event: { consumedEvents: [] } } as unknown as TraceItem,
         ...Array.from({ length: 25 }, (_, i) => ({
           outcome: "exceededCpu",
           exceptions: [{ name: "Error", message: "sensitive", timestamp: 2001 + i }],
           logs: [],
           eventTimestamp: 2001 + i,
-          scriptName: "cs-agent",
+          scriptName: "joule",
           scriptVersion: { id: "v-test" },
           event: null,
         } as unknown as TraceItem)),
@@ -378,7 +378,7 @@ describe("ops observability tools", () => {
     return { offers, sections, outputs };
   }
   
-  describe("cs-agent 自观测能力（ops_health 与 runtime-ops Code Mode 命名空间）", () => {
+  describe("Joule 自观测能力（ops_health 与 runtime-ops Code Mode 命名空间）", () => {
     it("向主人会话暴露顶层 ops_health 与 Code Mode runtime-ops，并默认过滤当前回合自身请求", async () => {
       const now = Date.now();
       const store = env.REQUESTS.getByName("main");

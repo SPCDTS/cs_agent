@@ -3,7 +3,7 @@
 // Runtime types generated with workerd@1.20261023.1 2026-10-01 nodejs_compat
 interface __BaseEnv_Env {
 	ASSETS: R2Bucket;
-	CS_AGENT_COMMIT: "dev";
+	JOULE_COMMIT: "dev";
 	PUBLIC_ORIGIN: "https://agent.spcdts.dev";
 	QQ_GROUP_MENTIONS: true;
 	MEMORY_EXTRACT_MODEL: "";
@@ -34,7 +34,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "CS_AGENT_COMMIT" | "PUBLIC_ORIGIN" | "QQ_GROUP_MENTIONS" | "MEMORY_EXTRACT_MODEL" | "MEMORY_EXTRACT_NAMESPACES" | "MODEL_PROVIDER" | "MODEL_ID" | "GMAIL_PUBSUB_SERVICE_ACCOUNT" | "GMAIL_PUBSUB_TOPIC">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "JOULE_COMMIT" | "PUBLIC_ORIGIN" | "QQ_GROUP_MENTIONS" | "MEMORY_EXTRACT_MODEL" | "MEMORY_EXTRACT_NAMESPACES" | "MODEL_PROVIDER" | "MODEL_ID" | "GMAIL_PUBSUB_SERVICE_ACCOUNT" | "GMAIL_PUBSUB_TOPIC">> {}
 }
 declare module "*.txt" {
 	const value: string;

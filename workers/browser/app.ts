@@ -130,7 +130,7 @@ export function showLogin(message: string) {
   $("login-message").textContent = message;
   $("cua-setup-token").value = "";
   $("cua-grant-devices").replaceChildren();
-  document.dispatchEvent(new Event("cs-agent-logout"));
+  document.dispatchEvent(new Event("joule-logout"));
   $("login-token").value = "";
   $("login-token").focus();
 }

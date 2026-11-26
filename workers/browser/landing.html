@@ -1,0 +1,652 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" type="image/png" href="/joule.png">
+<title>Joule · 让个人 AI 在云端与真机间长期共事</title>
+<style>/*__LANDING_CSS__*/</style>
+</head>
+<body class="dark">
+<header id="top-nav" class="nav">
+  <div class="wrap nav-inner">
+    <a class="logo" href="#overview">
+      <img class="logo-icon" src="/joule.png" alt="Joule">
+      <span>Joule</span>
+    </a>
+    <nav class="nav-links" aria-label="页面导航">
+      <a href="#overview">实况工作流</a>
+      <a href="#memory">记忆与规则</a>
+      <a href="#compute">算力与设备</a>
+      <a href="#arch">系统拓扑</a>
+      <a href="#compare">方案对比</a>
+    </nav>
+    <div class="nav-actions">
+      <button id="theme-toggle" class="icon-btn" type="button" aria-label="切换明暗主题">
+        <span id="theme-label">LIGHT</span>
+      </button>
+      <a class="btn btn-primary nav-cta" href="/admin/">进入管理台</a>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="wrap hero" aria-label="系统概览与朱尔形象">
+    <div class="hero-left">
+      <p class="tagline"><b>[single-owner]</b> always-on cloud brain · zero-trust execution · 9 durable objects</p>
+      <pre class="banner" aria-label="JOULE">     ██╗ ██████╗ ██╗   ██╗██╗     ███████╗
+     ██║██╔═══██╗██║   ██║██║     ██╔════╝
+     ██║██║   ██║██║   ██║██║     █████╗  
+██   ██║██║   ██║██║   ██║██║     ██╔══╝  
+╚█████╔╝╚██████╔╝╚██████╔╝███████╗███████╗
+ ╚════╝  ╚═════╝  ╚═════╝ ╚══════╝╚══════╝<span class="cursor">▍</span></pre>
+      <p class="hero-sub">
+        <em>向 QQ 或网页发一句指令，常驻云端大脑负责记忆、拆解步骤、跨群协同与防呆，</em>按场景调度 Cloudflare 容器、Cua 个人设备或一次性 Windows 沙盒。
+      </p>
+      <div class="hero-buttons">
+        <a class="btn btn-primary" href="/admin/">进入管理台 →</a>
+        <a class="btn btn-outline" href="#overview">看它怎么干活 ↓</a>
+      </div>
+    </div>
+
+    <div class="hero-art">
+      <canvas id="joule-canvas" class="ascii-canvas" width="580" height="580" role="img" aria-label="Interactive Joule Pixel Portrait"></canvas>
+    </div>
+  </section>
+
+  <!-- Chapter 1: Interactive 5-Step Live Workflow Stage -->
+  <section id="overview" class="wrap chap" aria-label="实况工作流">
+    <div class="chap-head">
+      <div>
+        <p class="eyebrow">LIVE WORKFLOW</p>
+        <h2 class="chap-title">不是一问一答的聊天框，<br><span class="dim">从交代到交付都看得见。</span></h2>
+      </div>
+      <p class="chap-lead">
+        在 QQ 群里 @ 一句、传一张日志包，剩下的全部交给云端大脑。每条请求都会在隔离的 Durable Object 里完成零等待派发、脚本编排、凭证代查与账本回执，管理台全程实时同步，但不惊动正在执行的主线程。
+      </p>
+    </div>
+
+    <div class="wf-grid">
+      <div class="wf-stepper" id="wf-stepper" role="tablist" aria-label="工作流步骤">
+        <button class="wf-step active" type="button" data-wf="1" aria-selected="true">
+          <div class="wf-step-head"><span class="wf-num">1</span><span>交代与直存</span></div>
+          <p class="wf-desc">OneBot 验签校验 QQ_OWNER 身份，附带的截图和 HAR 日志通过 get_file 直接落进 /work。</p>
+          <span class="wf-bar"><i></i></span>
+        </button>
+        <button class="wf-step" type="button" data-wf="2" aria-selected="false">
+          <div class="wf-step-head"><span class="wf-num">2</span><span>零等待派发</span></div>
+          <p class="wf-desc">ThreadDO.alarm() 首行零前置 await 同步触发 modelAlarm.dispatch()，长流式思考不因 IoContext 回收中断。</p>
+          <span class="wf-bar"><i></i></span>
+        </button>
+        <button class="wf-step" type="button" data-wf="3" aria-selected="false">
+          <div class="wf-step-head"><span class="wf-num">3</span><span>脚本与拆步</span></div>
+          <p class="wf-desc">QuickJS Code Mode 单轮串联多步工具与沙盒调用，中间件直接丢弃不撑爆上下文，前端同步更新步骤卡。</p>
+          <span class="wf-bar"><i></i></span>
+        </button>
+        <button class="wf-step" type="button" data-wf="4" aria-selected="false">
+          <div class="wf-step-head"><span class="wf-num">4</span><span>跨群与代查</span></div>
+          <p class="wf-desc">共享 Token 由宿主 Proxy 代附认证头，群线程绝不触碰原文；agent_send 沿有向授权边跨群投递只读附件。</p>
+          <span class="wf-bar"><i></i></span>
+        </button>
+        <button class="wf-step" type="button" data-wf="5" aria-selected="false">
+          <div class="wf-step-head"><span class="wf-num">5</span><span>审批与账本</span></div>
+          <p class="wf-desc">敏感绑定申请进入管理台审批流；SQLite 触发器 150ms 投影至 RequestsDO，四元组账本严禁 unknown 自动重放。</p>
+          <span class="wf-bar"><i></i></span>
+        </button>
+      </div>
+
+      <div class="app-stage" aria-label="Joule 运行实况界面">
+        <div class="stage-top">
+          <span class="stage-dots"><i></i><i></i><i></i></span>
+          <span>joule · runtime live view</span>
+          <span>ThreadDO(owner) ⇄ RequestsDO</span>
+        </div>
+
+        <div class="stage-body">
+          <div class="stage-col">
+            <div class="spot-box spotlight" data-spot="1">
+              <div class="msg-meta">
+                <span><span class="msg-author">主人 (QQ 群)</span> · 10:14</span>
+                <span class="mono">QQ_OWNER ✓</span>
+              </div>
+              <p class="msg-text">@Joule 看下刚才 502 报错的网关包，跑完压测把结果和修复 PR 发到运维群。</p>
+              <div class="file-chip">↓ gateway.har (2.4 MB) → /work/gateway.har</div>
+            </div>
+
+            <div class="spot-box" data-spot="3">
+              <div class="msg-meta">
+                <span><span class="msg-author">Joule · update_steps</span> · 执行卡</span>
+                <span class="badge-run">● 进行中 2/3</span>
+              </div>
+              <div class="check-list">
+                <div class="check-item"><span>① 解析 gateway.har 过滤 502 状态帧</span><span class="badge-ok">✓ 完成</span></div>
+                <div class="check-item"><span>② QuickJS 聚合上游 P99 延迟分布</span><span class="badge-run">● 840ms</span></div>
+                <div class="check-item"><span>③ agent_send 推送复盘至运维群</span><span class="mono" style="color:#7d7e77">○ 排队</span></div>
+              </div>
+            </div>
+
+            <div class="spot-box" data-spot="5">
+              <div class="msg-meta">
+                <span><span class="msg-author">Cloudflare 资源审批</span> · 高危变更拦截</span>
+                <span class="badge-run">等你拍板</span>
+              </div>
+              <p class="msg-text">申请新建并绑定 KV 命名空间 <code style="color:#6fe0a0">edge-cache-prod</code>（仅限批准后执行一次）。</p>
+              <div class="approve-actions">
+                <span class="mini-btn solid">批准执行</span>
+                <span class="mini-btn">拒绝</span>
+                <span class="mono" style="font-size:11px;color:#7d7e77;margin-left:auto">10m 过期 · 无自动重试</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="stage-col">
+            <div class="spot-box" data-spot="2">
+              <div class="msg-meta">
+                <span><span class="msg-author">ModelAlarm · ThreadDO.alarm()</span></span>
+                <span class="badge-ok">0ms pre-await</span>
+              </div>
+              <div class="term-line"><em>line 1:</em> <b>modelAlarm.dispatch()</b> // 零前置 await</div>
+              <div class="term-line"><em>stream:</em> waitUntil(SSE) · Codex Zstd→JSON 还原</div>
+              <div class="term-line"><em>budget:</em> TTFT <b>280ms</b> · Turn 1.8s · 不惧 IoContext 回收</div>
+            </div>
+
+            <div class="spot-box" data-spot="4">
+              <div class="msg-meta">
+                <span><span class="msg-author">Host Proxy · Zero-Trust</span></span>
+                <span class="mono" style="color:#a7f3d0">_meta.caller 强注</span>
+              </div>
+              <div class="term-line"><em>cred:</em> credential_request("gh-prod") → <b>宿主代附头</b></div>
+              <div class="term-line"><em>send:</em> agent_send(to="group:ops", files=["report.md"])</div>
+              <div class="term-line"><em>path:</em> /work/agent-files/9a2c <b>[只读隔离]</b></div>
+            </div>
+
+            <div class="spot-box" data-spot="5">
+              <div class="msg-meta">
+                <span><span class="msg-author">RequestsDO (CQRS) &amp; 发送账本</span></span>
+                <span class="mono" style="color:#6fe0a0">150ms 触发器</span>
+              </div>
+              <div class="ledger-mini">
+                <div class="ledger-row"><span>onebot:group:ops · req_8f2a</span><span class="badge-ok">sent ✓</span></div>
+                <div class="ledger-row"><span>cua:mac-mini · space_write</span><span class="badge-warn">outcome_unknown · 禁重放</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Chapter 2: 50/50 Split for Team Memory & CAS Rules -->
+  <section id="memory" class="wrap chap" aria-label="记忆与主线程行为规则">
+    <div class="split-2">
+      <div>
+        <p class="eyebrow">MEMORY &amp; CAS RULES</p>
+        <h2 class="chap-title">聊过的偏好带证据记下，<br><span class="dim">定下的规矩每轮必读。</span></h2>
+        <p class="chap-lead" style="margin-top:16px">
+          哪些偏好从聊天里自动沉淀，哪些硬规则必须每轮遵守，在主线程里分开管理。后台抽取必须附带原话引文，冲突自动暂停待审；显式规则则走双版本 CAS，修改后下一轮立刻生效。
+        </p>
+
+        <div class="kv-rows">
+          <div class="kv-row">
+            <span class="kv-key">原文引文</span>
+            <span class="kv-val">后台租约摘录强制附对话引文，避免模型凭空臆断偏好。</span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">每轮直读</span>
+            <span class="kv-val">每次 prepare 无缓存直读 SQLite 规则表，不靠提示词拼凑缓存。</span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">双版本锁</span>
+            <span class="kv-val">memory_version + binding_revision 双 CAS 校验与触发器锁定。</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="ui-panel" aria-label="主线程规则与证据记忆面板">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">主线程规则与证据记忆</div>
+            <div class="panel-sub">owner ThreadDO · 回合前直读</div>
+          </div>
+          <div class="pills" id="mem-filters" role="group" aria-label="筛选记忆类型">
+            <button class="t-btn active" type="button" data-kind="all">全部</button>
+            <button class="t-btn" type="button" data-kind="rule">行为规则</button>
+            <button class="t-btn" type="button" data-kind="evidence">证据记忆</button>
+            <button class="t-btn" type="button" data-kind="conflict">冲突待审</button>
+          </div>
+        </div>
+        <div class="panel-list" id="mem-list">
+          <div class="mem-row" data-kind="rule">
+            <span class="kind-pill rule">规则</span>
+            <div class="mem-body">
+              <p>功能更新必须走独立分支与 PR，等待检查通过后再合并，禁止直推 main。</p>
+              <div class="mem-src">来自管理台 /admin/memory/rules · memory_version #18 · 实时生效</div>
+            </div>
+          </div>
+          <div class="mem-row" data-kind="evidence">
+            <span class="kind-pill">证据</span>
+            <div class="mem-body">
+              <p>网关与数据库变更先在预发环境跑回归，结果贴回群里。</p>
+              <div class="mem-src">引文：「预发先跑完再动线上」 · 来自运维群 · 4 天前</div>
+            </div>
+          </div>
+          <div class="mem-row" data-kind="evidence">
+            <span class="kind-pill">证据</span>
+            <div class="mem-body">
+              <p>周报与故障复盘默认附带 TurnTiming 与上游状态码分布。</p>
+              <div class="mem-src">引文：「以后复盘都带上耗时分布」 · 来自主人私聊 · 1 周前</div>
+            </div>
+          </div>
+          <div class="mem-row" data-kind="rule">
+            <span class="kind-pill rule">规则</span>
+            <div class="mem-body">
+              <p>群聊与子任务严禁读取共享凭证原文，统一由宿主 Proxy 代为附头。</p>
+              <div class="mem-src">全局安全基线 · SQLite 触发器锁定 · 常驻生效</div>
+            </div>
+          </div>
+          <div class="mem-row" data-kind="conflict">
+            <span class="kind-pill conflict">待审</span>
+            <div class="mem-body">
+              <p>周五下午 16:00 后是否允许自动合并非紧急依赖更新？</p>
+              <div class="mem-src">与显式规则 #12 冲突 · 已暂停画像自动复核，等待主人确认</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Chapter 3: Reversed 50/50 Split for Hybrid Compute & Devices -->
+  <section id="compute" class="wrap chap" aria-label="混合算力与真机分配">
+    <div class="split-2 flip">
+      <div class="ui-panel" aria-label="算力与设备面板">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">可用算力与设备 · 4</div>
+            <div class="panel-sub">按会话与风险等级按需调度</div>
+          </div>
+          <div class="pills" id="mach-filters" role="group" aria-label="筛选算力场景">
+            <button class="t-btn active" type="button" data-mach="all">全部算力</button>
+            <button class="t-btn" type="button" data-mach="code">日常改码</button>
+            <button class="t-btn" type="button" data-mach="cua">操控真机</button>
+            <button class="t-btn" type="button" data-mach="wsb">高危沙盒</button>
+          </div>
+        </div>
+
+        <div class="panel-list" id="mach-list">
+          <div class="mach-group-label">个人设备与持久 VM · CUA 反向 WEBSOCKET 桥</div>
+          <div class="mach-row" data-mach="all cua">
+            <div>
+              <div class="mach-name">办公室 MacBook Pro <span class="mono" style="font-size:11px;color:#7d7e77">join.sh</span></div>
+              <div class="mach-meta">macOS · /mcp/reverse/cua · 桌面截图自动入库 imageId · 仅限主人私聊</div>
+            </div>
+            <span class="status-dot online">● 在线</span>
+          </div>
+          <div class="mach-row" data-mach="all cua code">
+            <div>
+              <div class="mach-name">ubuntu-workstation <span class="mono" style="font-size:11px;color:#7d7e77">持久 Linux VM</span></div>
+              <div class="mach-meta">space_bash / space_job 常驻项目盘 · 反向 443 出站免开公网端口</div>
+            </div>
+            <span class="status-dot online">● 在线</span>
+          </div>
+
+          <div class="mach-group-label">云端容器与一次性虚拟沙盒</div>
+          <div class="mach-row" data-mach="all code">
+            <div>
+              <div class="mach-name">SandboxDO · cs.coding <span class="mono" style="font-size:11px;color:#7d7e77">uid 1000</span></div>
+              <div class="mach-meta">Cloudflare Container · 空闲 3m 休眠 · R2 去重快照 + QQ 附件直落盘</div>
+            </div>
+            <span class="status-dot online">● 按需唤醒</span>
+          </div>
+          <div class="mach-row" data-mach="all wsb">
+            <div>
+              <div class="mach-name">win-runner · WSB <span class="mono" style="font-size:11px;color:#7d7e77">127.0.0.1:7791</span></div>
+              <div class="mach-meta">Windows Sandbox (wsb.exe) · 固定 6 个 env_* · 关闭即整机销毁</div>
+            </div>
+            <span class="status-dot ephemeral">◐ 用完即焚</span>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <p class="eyebrow">HYBRID COMPUTE</p>
+        <h2 class="chap-title">给不同风险的活，<br><span class="dim">分配最合适的一台机器。</span></h2>
+        <p class="chap-lead" style="margin-top:16px">
+          轻量代码与文件检索直接在 Cloudflare 容器按需运行；需要用现成开发环境或桌面 GUI 时，通过反向 WebSocket 桥派给主人电脑或持久 VM；遇到来历不明的安装包或脚本，扔进一次性 Windows Sandbox 用完即焚。
+        </p>
+
+        <div class="kv-rows">
+          <div class="kv-row">
+            <span class="kv-key">自己的电脑</span>
+            <span class="kv-val">一行脚本主动 443 连出，管理台按会话精确勾选哪台设备可用。</span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">云端容器</span>
+            <span class="kv-val">免运维 Linux 环境，R2 去重快照保留项目工作区，空闲 3 分钟休眠。</span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-key">一次性沙盒</span>
+            <span class="kv-val">同 session 复用、取消即销毁，独立 Guardian 守护防失控超时。</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Chapter 4: 9 Durable Objects Topology & Lifecycle -->
+  <section id="arch" class="wrap chap" aria-label="9 Durable Objects 工程分层拓扑">
+    <div class="chap-head">
+      <div>
+        <p class="eyebrow">ARCHITECTURE &amp; LIFECYCLE</p>
+        <h2 class="chap-title">9 个 Durable Objects，<br><span class="dim">把执行、存储与观测彻底拆开。</span></h2>
+      </div>
+      <p class="chap-lead">
+        主对话通过单个 alarm() 串行推进；管理台只查 RequestsDO 的 150ms 增量投影，随时看进度、看日志或复查耗时分布，都不会唤醒或卡住正在思考的工作线程。
+      </p>
+    </div>
+
+    <div class="ui-panel">
+      <div class="arch-toolbar">
+        <div class="panel-title">工程分层拓扑 · 点击或悬停节点查看职责</div>
+        <div class="pills" id="route-filters" role="group" aria-label="链路过滤">
+          <button class="t-btn active" data-route="all" type="button">全景 (All)</button>
+          <button class="t-btn" data-route="qq" type="button">QQ 消息链路</button>
+          <button class="t-btn" data-route="admin" type="button">管理台只读 (CQRS)</button>
+          <button class="t-btn" data-route="async" type="button">异步子任务与编码</button>
+        </div>
+      </div>
+
+      <div class="svg-wrap">
+        <svg id="arch-svg" viewBox="0 0 1120 450" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="交互式分层架构拓扑图">
+          <defs>
+            <marker id="mOr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 1L8 5L0 9z" fill="#FF5A36"/>
+            </marker>
+            <marker id="mCy" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 1L8 5L0 9z" fill="#6FE0A0"/>
+            </marker>
+          </defs>
+
+          <rect x="16" y="14" width="236" height="422" rx="10" fill="rgba(255,90,54,.03)" stroke="rgba(255,90,54,.24)"/>
+          <text x="134" y="36" text-anchor="middle" fill="#FF7A59" font-size="11" font-family="ui-monospace,monospace" letter-spacing="1">INGRESS / 边界接入</text>
+
+          <rect x="282" y="14" width="504" height="422" rx="10" fill="rgba(111,224,160,.03)" stroke="rgba(111,224,160,.24)"/>
+          <text x="534" y="36" text-anchor="middle" fill="#6FE0A0" font-size="11" font-family="ui-monospace,monospace" letter-spacing="1">DURABLE OBJECTS / 9 个状态核心</text>
+
+          <rect x="816" y="14" width="288" height="422" rx="10" fill="rgba(230,229,222,.025)" stroke="rgba(180,178,166,.22)"/>
+          <text x="960" y="36" text-anchor="middle" fill="#E6E5DE" font-size="11" font-family="ui-monospace,monospace" letter-spacing="1">EXECUTION &amp; STORAGE / 执行与存储</text>
+
+          <!-- Edges -->
+          <path class="svg-edge flow-dash" data-routes="all qq" d="M236 86 L306 86" stroke="#FF5A36" stroke-width="2" marker-end="url(#mOr)"/>
+          <path class="svg-edge flow-dash" data-routes="all admin" d="M236 176 C268 176, 510 176, 548 184" stroke="#6FE0A0" stroke-width="2" marker-end="url(#mCy)"/>
+          <path class="svg-edge flow-dash" data-routes="all admin" d="M236 184 C272 184, 272 282, 306 282" stroke="#FF5A36" stroke-width="1.6"/>
+          <path class="svg-edge flow-dash" data-routes="all async" d="M236 270 L306 364" stroke="#FF5A36" stroke-width="1.8"/>
+          <path class="svg-edge flow-dash" data-routes="all async" d="M236 362 L306 368" stroke="#FF5A36" stroke-width="1.8"/>
+
+          <path class="svg-edge flow-dash" data-routes="all qq" d="M466 86 L548 86" stroke="#6FE0A0" stroke-width="2"/>
+          <path class="svg-edge flow-dash" data-routes="all qq async" d="M630 118 L630 220" stroke="#6FE0A0" stroke-width="1.8"/>
+          <path class="svg-edge flow-dash" data-routes="all qq admin" d="M386 248 L548 112" stroke="#34D399" stroke-width="1.6"/>
+          <path class="svg-edge flow-dash" data-routes="all qq admin async" d="M630 118 L630 156" stroke="#6FE0A0" stroke-width="1.8"/>
+          <path class="svg-edge flow-dash" data-routes="all async" d="M466 364 L548 258" stroke="#6FE0A0" stroke-width="1.8"/>
+          <path class="svg-edge flow-dash" data-routes="all async" d="M548 358 L466 358" stroke="#6FE0A0" stroke-width="1.5"/>
+
+          <path class="svg-edge flow-dash" data-routes="all qq async" d="M766 86 L836 78" stroke="#6FE0A0" stroke-width="1.8"/>
+          <path class="svg-edge flow-dash" data-routes="all async" d="M766 250 L836 78" stroke="#6FE0A0" stroke-width="1.6"/>
+          <path class="svg-edge flow-dash" data-routes="all async" d="M766 358 L836 226" stroke="#6FE0A0" stroke-width="1.8"/>
+          <path class="svg-edge flow-dash" data-routes="all qq async" d="M716 118 L836 296" stroke="#A7F3D0" stroke-width="1.7"/>
+          <path class="svg-edge flow-dash" data-routes="all qq async" d="M716 268 L836 376" stroke="#FF5A36" stroke-width="1.7"/>
+          <path class="svg-edge flow-dash" data-routes="all async" d="M766 382 L836 146" stroke="#6FE0A0" stroke-width="1.6"/>
+
+          <!-- INGRESS NODES -->
+          <g class="svg-node" tabindex="0" data-node="in-onebot" data-routes="all qq">
+            <rect class="box" x="32" y="58" width="204" height="54" rx="8" fill="#121412" stroke="rgba(255,90,54,.55)"/>
+            <text x="134" y="90" text-anchor="middle" fill="#FF9E85" font-size="13" font-weight="650" font-family="ui-monospace,monospace">/onebot &amp; /media/</text>
+          </g>
+
+          <g class="svg-node" tabindex="0" data-node="in-admin" data-routes="all admin">
+            <rect class="box" x="32" y="150" width="204" height="54" rx="8" fill="#121412" stroke="rgba(255,90,54,.55)"/>
+            <text x="134" y="182" text-anchor="middle" fill="#FF9E85" font-size="13" font-weight="650" font-family="ui-monospace,monospace">/admin/ &amp; /mcp/reverse/*</text>
+          </g>
+
+          <g class="svg-node" tabindex="0" data-node="in-hooks" data-routes="all async">
+            <rect class="box" x="32" y="242" width="204" height="54" rx="8" fill="#121412" stroke="rgba(255,90,54,.5)"/>
+            <text x="134" y="274" text-anchor="middle" fill="#FF9E85" font-size="13" font-weight="650">GitHub · Gmail 事件</text>
+          </g>
+
+          <g class="svg-node" tabindex="0" data-node="in-cron" data-routes="all async">
+            <rect class="box" x="32" y="334" width="204" height="54" rx="8" fill="#121412" stroke="rgba(255,90,54,.5)"/>
+            <text x="134" y="366" text-anchor="middle" fill="#FF9E85" font-size="13" font-weight="650" font-family="ui-monospace,monospace">Workers Cron (*/5)</text>
+          </g>
+
+          <!-- DO NODES -->
+          <g class="svg-node" tabindex="0" data-node="do-bridge" data-routes="all qq">
+            <rect class="box" x="306" y="58" width="160" height="54" rx="8" fill="#121412" stroke="rgba(111,224,160,.55)"/>
+            <text x="386" y="90" text-anchor="middle" fill="#A7F3D0" font-size="13.5" font-weight="650" font-family="ui-monospace,monospace">BridgeDO</text>
+          </g>
+
+          <g class="svg-node selected" tabindex="0" data-node="do-thread" data-routes="all qq admin async">
+            <rect class="box" x="548" y="58" width="218" height="54" rx="8" fill="rgba(111,224,160,.14)" stroke="#6FE0A0" stroke-width="1.5"/>
+            <text x="657" y="90" text-anchor="middle" fill="#F0EFE9" font-size="13.5" font-weight="700" font-family="ui-monospace,monospace">ThreadDO (Master)</text>
+          </g>
+
+          <g class="svg-node" tabindex="0" data-node="do-requests" data-routes="all qq admin async">
+            <rect class="box" x="548" y="156" width="218" height="52" rx="8" fill="rgba(111,224,160,.1)" stroke="#6FE0A0"/>
+            <text x="657" y="187" text-anchor="middle" fill="#6FE0A0" font-size="13" font-weight="650" font-family="ui-monospace,monospace">RequestsDO (CQRS)</text>
+          </g>
+
+          <g class="svg-node" tabindex="0" data-node="do-registry" data-routes="all qq admin">
+            <rect class="box" x="306" y="236" width="160" height="54" rx="8" fill="#121412" stroke="rgba(52,211,153,.55)"/>
+            <text x="386" y="268" text-anchor="middle" fill="#6EE7B7" font-size="13.5" font-weight="650" font-family="ui-monospace,monospace">RegistryDO</text>
+          </g>
+
+          <g class="svg-node" tabindex="0" data-node="do-sub" data-routes="all qq async">
+            <rect class="box" x="548" y="232" width="218" height="54" rx="8" fill="#121412" stroke="rgba(111,224,160,.55)"/>
+            <text x="657" y="264" text-anchor="middle" fill="#A7F3D0" font-size="13.5" font-weight="650" font-family="ui-monospace,monospace">SubagentDO</text>
+          </g>
+
+          <g class="svg-node" tabindex="0" data-node="do-sched" data-routes="all async">
+            <rect class="box" x="306" y="336" width="160" height="54" rx="8" fill="#121412" stroke="rgba(111,224,160,.5)"/>
+            <text x="386" y="368" text-anchor="middle" fill="#A7F3D0" font-size="12" font-weight="650" font-family="ui-monospace,monospace">ScheduleDO / EventsDO</text>
+          </g>
+
+          <g class="svg-node" tabindex="0" data-node="do-sandbox" data-routes="all async">
+            <rect class="box" x="548" y="336" width="218" height="54" rx="8" fill="#121412" stroke="rgba(111,224,160,.5)"/>
+            <text x="657" y="368" text-anchor="middle" fill="#6FE0A0" font-size="12.5" font-weight="650" font-family="ui-monospace,monospace">SandboxDO &amp; WorkspaceDO</text>
+          </g>
+
+          <!-- EXECUTION & STORAGE NODES -->
+          <g class="svg-node" tabindex="0" data-node="ex-llm" data-routes="all qq async">
+            <rect class="box" x="836" y="50" width="250" height="52" rx="8" fill="#121412" stroke="rgba(111,224,160,.45)"/>
+            <text x="961" y="81" text-anchor="middle" fill="#6FE0A0" font-size="13" font-weight="650">LLM / Codex SSE (ModelAlarm)</text>
+          </g>
+
+          <g class="svg-node" tabindex="0" data-node="ex-r2" data-routes="all async">
+            <rect class="box" x="836" y="122" width="250" height="52" rx="8" fill="#121412" stroke="rgba(111,224,160,.4)"/>
+            <text x="961" y="153" text-anchor="middle" fill="#6FE0A0" font-size="13" font-weight="650">R2 去重快照 &amp; SQLite 状态</text>
+          </g>
+
+          <g class="svg-node" tabindex="0" data-node="ex-cscoding" data-routes="all async">
+            <rect class="box" x="836" y="196" width="250" height="52" rx="8" fill="#121412" stroke="rgba(111,224,160,.45)"/>
+            <text x="961" y="227" text-anchor="middle" fill="#6FE0A0" font-size="13" font-weight="650">Sandbox cs.coding (Containers)</text>
+          </g>
+
+          <g class="svg-node" tabindex="0" data-node="ex-device" data-routes="all qq async">
+            <rect class="box" x="836" y="272" width="250" height="52" rx="8" fill="#121412" stroke="rgba(167,243,208,.5)"/>
+            <text x="961" y="303" text-anchor="middle" fill="#A7F3D0" font-size="13" font-weight="650">Cua 反向桥 (个人设备 &amp; VM)</text>
+          </g>
+
+          <g class="svg-node" tabindex="0" data-node="ex-runner" data-routes="all qq async">
+            <rect class="box" x="836" y="348" width="250" height="52" rx="8" fill="#121412" stroke="rgba(255,90,54,.55)"/>
+            <text x="961" y="379" text-anchor="middle" fill="#FF9E85" font-size="13" font-weight="650">Windows runner/ (临时 WSB)</text>
+          </g>
+        </svg>
+      </div>
+
+      <div class="inspector" id="arch-inspector">
+        <div class="insp-main">
+          <span class="insp-name" id="insp-name">ThreadDO</span>
+          <span class="insp-role" id="insp-role">主对话状态机：单 alarm() 合并批处理，维护 update_steps 实时步骤卡、agent_send 跨会话通信与 QuickJS 编排。</span>
+        </div>
+        <div class="insp-tags" id="insp-tags">
+          <span class="tag-mini">ModelAlarm</span>
+          <span class="tag-mini">agent_send</span>
+          <span class="tag-mini">update_steps</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="sequence" class="ui-panel" style="margin-top:24px" aria-label="5 泳道消息生命周期时序">
+      <div class="arch-toolbar">
+        <div class="panel-title">消息生命周期时序 · 5 泳道 6 步</div>
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px">
+          <button class="t-btn joule active" id="seq-play" type="button">▶ 逐步演示</button>
+          <button class="t-btn" id="seq-reset" type="button">重置</button>
+          <div class="pills" id="seq-pills" role="group" aria-label="时序步骤">
+            <button class="t-btn active" data-step="all" type="button">全部</button>
+            <button class="t-btn" data-step="1" type="button">①</button>
+            <button class="t-btn" data-step="2" type="button">②</button>
+            <button class="t-btn" data-step="3" type="button">③</button>
+            <button class="t-btn" data-step="4" type="button">④</button>
+            <button class="t-btn" data-step="5" type="button">⑤</button>
+            <button class="t-btn" data-step="6" type="button">⑥</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="svg-wrap">
+        <svg id="seq-svg" viewBox="0 0 1120 420" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="5泳道消息生命周期时序图">
+          <defs>
+            <marker id="mSeqOr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 1L8 5L0 9z" fill="#FF5A36"/></marker>
+            <marker id="mSeqVi" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 1L8 5L0 9z" fill="#A7F3D0"/></marker>
+            <marker id="mSeqCy" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 1L8 5L0 9z" fill="#6FE0A0"/></marker>
+            <marker id="mSeqGr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 1L8 5L0 9z" fill="#34D399"/></marker>
+          </defs>
+
+          <rect x="28" y="16" width="154" height="40" rx="8" fill="rgba(255,90,54,.1)" stroke="rgba(255,90,54,.55)"/>
+          <text x="105" y="41" text-anchor="middle" fill="#FF9E85" font-size="13" font-weight="650">QQ / 网页入站</text>
+
+          <rect x="242" y="16" width="156" height="40" rx="8" fill="rgba(111,224,160,.08)" stroke="rgba(111,224,160,.5)"/>
+          <text x="320" y="41" text-anchor="middle" fill="#A7F3D0" font-size="13" font-weight="650" font-family="ui-monospace,monospace">BridgeDO</text>
+
+          <rect x="462" y="16" width="156" height="40" rx="8" fill="rgba(111,224,160,.16)" stroke="#6FE0A0" stroke-width="1.4"/>
+          <text x="540" y="41" text-anchor="middle" fill="#F0EFE9" font-size="13" font-weight="700" font-family="ui-monospace,monospace">ThreadDO</text>
+
+          <rect x="688" y="16" width="174" height="40" rx="8" fill="rgba(255,90,54,.1)" stroke="rgba(255,90,54,.55)"/>
+          <text x="775" y="41" text-anchor="middle" fill="#FF9E85" font-size="13" font-weight="650">ModelAlarm / LLM</text>
+
+          <rect x="922" y="16" width="174" height="40" rx="8" fill="rgba(111,224,160,.08)" stroke="rgba(111,224,160,.5)"/>
+          <text x="1009" y="41" text-anchor="middle" fill="#6FE0A0" font-size="13" font-weight="650">QuickJS / 执行端</text>
+
+          <line x1="105" y1="56" x2="105" y2="404" stroke="rgba(255,255,255,.14)" stroke-dasharray="4 5"/>
+          <line x1="320" y1="56" x2="320" y2="404" stroke="rgba(255,255,255,.14)" stroke-dasharray="4 5"/>
+          <line x1="540" y1="56" x2="540" y2="404" stroke="rgba(255,255,255,.18)" stroke-dasharray="4 5"/>
+          <line x1="775" y1="56" x2="775" y2="404" stroke="rgba(255,255,255,.14)" stroke-dasharray="4 5"/>
+          <line x1="1009" y1="56" x2="1009" y2="404" stroke="rgba(255,255,255,.14)" stroke-dasharray="4 5"/>
+
+          <g class="seq-step" data-step="1">
+            <rect x="128" y="74" width="172" height="24" rx="5" fill="rgba(255,90,54,.14)"/>
+            <text x="214" y="90" text-anchor="middle" fill="#FF9E85" font-size="11.5" font-weight="600">① 验签 QQ_OWNER + 入账</text>
+            <line x1="105" y1="106" x2="314" y2="106" stroke="#FF5A36" stroke-width="2.2" marker-end="url(#mSeqOr)"/>
+            <circle cx="105" cy="106" r="4" fill="#FF5A36"/>
+          </g>
+
+          <g class="seq-step" data-step="2">
+            <rect x="342" y="128" width="178" height="24" rx="5" fill="rgba(111,224,160,.14)"/>
+            <text x="431" y="144" text-anchor="middle" fill="#A7F3D0" font-size="11.5" font-weight="600">② 单 alarm() 合并批处理</text>
+            <line x1="320" y1="160" x2="534" y2="160" stroke="#A7F3D0" stroke-width="2.2" marker-end="url(#mSeqVi)"/>
+            <circle cx="320" cy="160" r="4" fill="#A7F3D0"/>
+          </g>
+
+          <g class="seq-step" data-step="3">
+            <rect x="448" y="180" width="184" height="32" rx="6" fill="rgba(52,211,153,.13)" stroke="rgba(52,211,153,.45)"/>
+            <text x="540" y="200" text-anchor="middle" fill="#6EE7B7" font-size="11.5" font-weight="600">③ 装配窗口 &amp; 直读规则</text>
+          </g>
+
+          <g class="seq-step" data-step="4">
+            <rect x="560" y="228" width="194" height="24" rx="5" fill="rgba(255,90,54,.15)"/>
+            <text x="657" y="244" text-anchor="middle" fill="#FF9E85" font-size="11.5" font-weight="600">④ alarm() 首行同步 dispatch()</text>
+            <line x1="540" y1="260" x2="769" y2="260" stroke="#FF5A36" stroke-width="2.2" marker-end="url(#mSeqOr)"/>
+          </g>
+
+          <g class="seq-step" data-step="5">
+            <rect x="795" y="286" width="194" height="24" rx="5" fill="rgba(111,224,160,.14)"/>
+            <text x="892" y="302" text-anchor="middle" fill="#6FE0A0" font-size="11.5" font-weight="600">⑤ QuickJS / Subagent / agent_send</text>
+            <line x1="775" y1="318" x2="1003" y2="318" stroke="#6FE0A0" stroke-width="2.2" marker-end="url(#mSeqCy)"/>
+            <line x1="1009" y1="332" x2="546" y2="332" stroke="#6FE0A0" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#mSeqCy)"/>
+          </g>
+
+          <g class="seq-step" data-step="6">
+            <rect x="332" y="356" width="196" height="24" rx="5" fill="rgba(52,211,153,.14)"/>
+            <text x="430" y="372" text-anchor="middle" fill="#6EE7B7" font-size="11.5" font-weight="600">⑥ 账本回执 + 150ms CQRS 投影</text>
+            <line x1="540" y1="388" x2="326" y2="388" stroke="#34D399" stroke-width="2.2" marker-end="url(#mSeqGr)"/>
+            <line x1="320" y1="400" x2="111" y2="400" stroke="#34D399" stroke-width="1.8" marker-end="url(#mSeqGr)"/>
+          </g>
+        </svg>
+      </div>
+
+      <div class="inspector">
+        <div class="insp-main">
+          <span class="insp-name" id="seq-badge">STEP ALL</span>
+          <span class="insp-role" id="seq-caption">点击数字步骤 ①–⑥ 或“逐步演示”，观察请求如何在 5 条泳道间安全流转。</span>
+        </div>
+        <div class="insp-tags" id="seq-tags">
+          <span class="tag-mini">Zero-Await Dispatch</span>
+          <span class="tag-mini">update_steps</span>
+          <span class="tag-mini">150ms Debounce</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Chapter 5: Compare -->
+  <section id="compare" class="wrap chap" aria-label="方案对比">
+    <div class="chap-head">
+      <div>
+        <p class="eyebrow">COMPARE</p>
+        <h2 class="chap-title">为什么不直接在群里<br><span class="dim">挂个普通 Bot 或裸调 CLI？</span></h2>
+      </div>
+      <p class="chap-lead">
+        在聊天软件里接个 Webhook 很容易，但一旦涉及 Serverless 长连接超时、多步工具编排、群聊凭证隔离和断连防重放，普通做法就会频频掉链子。
+      </p>
+    </div>
+
+    <div class="cmp-bar">
+      <div class="pills" id="cmp-tabs" role="tablist" aria-label="对比方案">
+        <button class="t-btn active" type="button" data-cmp="webhook">普通聊天 Webhook Bot</button>
+        <button class="t-btn" type="button" data-cmp="cli">单机 CLI / 本地 Agent</button>
+        <button class="t-btn" type="button" data-cmp="shared">多群共用简单脚本</button>
+      </div>
+      <p class="cmp-summary" id="cmp-summary">只在 HTTP 请求里同步转发模型和工具，连接超过平台限时就会中途断掉。</p>
+    </div>
+
+    <div class="cmp-table" role="region" aria-label="Joule 工程对比表">
+      <div class="cmp-head">
+        <div>维度</div>
+        <div id="cmp-col-other">普通聊天 Webhook Bot</div>
+        <div>Joule</div>
+      </div>
+      <div id="cmp-rows"></div>
+    </div>
+
+    <p class="cmp-concession" id="cmp-concession">什么时候选它：只需要无状态一问一答、不涉及私有凭证和长耗时构建时，普通 Webhook 更省事。</p>
+  </section>
+</main>
+
+<footer class="wrap foot">
+  <div class="foot-row">
+    <a class="logo" href="#overview">
+      <img class="logo-icon" src="/joule.png" alt="Joule">
+      <span>Joule <span class="logo-sub">// commit: __JOULE_COMMIT__</span></span>
+    </a>
+    <div class="foot-links">
+      <a href="/admin/">/admin/</a>
+      <a href="/healthz">/healthz</a>
+      <a href="/joule.png">/joule.png</a>
+      <a href="https://github.com/SPCDTS/cs_agent" target="_blank" rel="noreferrer">GitHub ↗</a>
+    </div>
+  </div>
+</footer>
+<script src="/landing.js" defer></script>
+</body>
+</html>

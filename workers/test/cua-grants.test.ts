@@ -847,7 +847,7 @@ it('管理台签发并通过真实反向连接兑换，未授权、过期、伪�
   const claims: Record<string,string>[] = [];
   ws.addEventListener('message',ev => {
     const frame = JSON.parse(String(ev.data));
-    if (frame.close || frame.message.method !== 'cs-agent/cua/pair') return;
+    if (frame.close || frame.message.method !== 'joule/cua/pair') return;
     const {params,id} = frame.message;
     if (params.action === 'claim') claims.push(params);
     const result = params.action === 'ready' ? {status:'ready'} :

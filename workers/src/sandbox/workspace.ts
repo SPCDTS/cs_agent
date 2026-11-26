@@ -2,7 +2,7 @@ import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { WorkspaceGc, type GcOptions } from "./workspace-gc";
 import { FILE_MAX_BYTES, WORKSPACE_MAX_BYTES, sha256 } from "../media/model";
-import { scopePrefix } from "../media/repository";
+import { legacyScopePrefix, scopePrefix } from "../media/repository";
 import { SandboxError, type ExecResult, type FileEdit, type ReadResult, type RuntimeSnapshot, type SandboxClient } from "./client";
 
 const FileSchema = Type.Object({ path: Type.String({ minLength: 1, maxLength: 1024 }), sha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
@@ -72,12 +72,14 @@ export class WorkspaceManager {
     return pending;
   }
   private async prefix(): Promise<string> { return `${await scopePrefix(this.deps.workspace)}/workspace`; }
+  private async legacyPrefix(): Promise<string> { return `${await legacyScopePrefix(this.deps.workspace)}/workspace`; }
   private empty(): WorkspaceManifest { return { schemaVersion: 1, workspace: this.deps.workspace, revision: "0", parentRevision: null, files: [], directories: [], totalBytes: 0 }; }
   private async manifest(revision?: string): Promise<WorkspaceManifest> {
     const requested = revision ?? await this.deps.storage.get<string>(HEAD) ?? "0";
     if (requested === "0") return this.empty();
     if (!/^[a-f0-9-]{1,64}$/.test(requested)) throw new Error("invalid_request");
-    const object = await this.deps.bucket.get(`${await this.prefix()}/manifests/${requested}`);
+    const object = await this.deps.bucket.get(`${await this.prefix()}/manifests/${requested}`)
+      ?? await this.deps.bucket.get(`${await this.legacyPrefix()}/manifests/${requested}`);
     if (!object) throw new Error("workspace_manifest_missing");
     const manifest = parseManifest(await object.json());
     if (manifest.workspace !== this.deps.workspace || manifest.revision !== requested) throw new Error("workspace_manifest_corrupt");
@@ -95,7 +97,8 @@ export class WorkspaceManager {
     });
   }
   private async blob(file: WorkspaceManifest["files"][number], workspace = this.deps.workspace): Promise<Uint8Array> {
-    const object = await this.deps.bucket.get(`${await scopePrefix(workspace)}/workspace/blobs/${file.sha256}`);
+    const object = await this.deps.bucket.get(`${await scopePrefix(workspace)}/workspace/blobs/${file.sha256}`)
+      ?? await this.deps.bucket.get(`${await legacyScopePrefix(workspace)}/workspace/blobs/${file.sha256}`);
     if (!object || object.size !== file.bytes || object.size > FILE_MAX_BYTES) throw new Error("blob_corrupt");
     const bytes = new Uint8Array(await object.arrayBuffer());
     if (await sha256(bytes) !== file.sha256) throw new Error("blob_corrupt");

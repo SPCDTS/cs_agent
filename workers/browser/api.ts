@@ -4,7 +4,7 @@ import { showLogin } from "./app";
 import { Diagnostic, type RefreshDiagnostic } from "./app-contracts";
 export { Diagnostic, type RefreshDiagnostic };
 
-export const TOKEN_KEY = "cs-agent-admin-token";
+export const TOKEN_KEY = "joule-admin-token";
 const ErrorBody = Type.Object({
   error: Type.Optional(Type.String()), reason: Type.Optional(Type.String()), current: Type.Optional(Type.Unknown()),
   diagnostic: Type.Optional(Diagnostic),
@@ -17,7 +17,19 @@ export class ApiError extends Error {
     this.body = Check(ErrorBody, value) ? value : null;
   }
 }
-export const readToken = () => { try { return sessionStorage.getItem(TOKEN_KEY); } catch { return null; } };
+export const readToken = () => {
+  try {
+    const current = sessionStorage.getItem(TOKEN_KEY);
+    if (current) return current;
+    const legacy = sessionStorage.getItem("cs-agent-admin-token");
+    if (legacy) {
+      sessionStorage.setItem(TOKEN_KEY, legacy);
+      sessionStorage.removeItem("cs-agent-admin-token");
+      return legacy;
+    }
+    return null;
+  } catch { return null; }
+};
 export const writeToken = (value: string | null) => { try { if (value) sessionStorage.setItem(TOKEN_KEY, value); else sessionStorage.removeItem(TOKEN_KEY); } catch {} };
 
 /** 返回值在调用方按所需视图 schema 校验，写操作可以直接忽略正文。 */

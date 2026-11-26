@@ -5,9 +5,9 @@
 # secrets/admin-token.env、oauth-store-key.env 不存在时就地生成。ChatGPT 订阅不走 secrets，在管理面板登录。
 # 用法：在仓库根执行  bash workers/scripts/put-secrets.sh deployments/<档案>.json
 set -euo pipefail
-# 在 worktree 里跑时 .env 与 secrets/ 只在主工作区，用 CS_AGENT_ROOT 指过去
+# 在 worktree 里跑时 .env 与 secrets/ 只在主工作区，用 JOULE_ROOT 指过去
 workers_dir="$(cd "$(dirname "$0")/.." && pwd)"
-root="${CS_AGENT_ROOT:-$(cd "$workers_dir/.." && pwd)}"
+root="${JOULE_ROOT:-$(cd "$workers_dir/.." && pwd)}"
 profile="${1:?请显式提供 deployments/<档案>.json}"
 (cd "$workers_dir" && node scripts/deploy.mjs "$profile" --prepare-only)
 env_file="$root/.env"

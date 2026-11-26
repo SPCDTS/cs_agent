@@ -25,7 +25,7 @@ test('管理台启动后仍显示失败原因，展开时加载 Cloudflare 授�
   Object.defineProperty(editor,'open',{get:()=>editor.hasAttribute('open'),set:open=>{
     editor.toggleAttribute('open',open); editor.dispatchEvent(new page.window.Event('toggle'));
   }});
-  sessionStorage.setItem('cs-agent-cloudflare-state','expected');
+  sessionStorage.setItem('joule-cloudflare-state','expected');
   const { completeCloudflareLogin } = await bundleModule({contents: "import './browser/main.ts'; export { completeCloudflareLogin } from './browser/cloudflare.ts';"});
   await page.settle();
   assert.deepEqual(rewrites,['/admin/']); assert.ok(editor.open);
@@ -41,7 +41,7 @@ test('管理台启动后仍显示失败原因，展开时加载 Cloudflare 授�
 
   t.mock.timers.enable({apis:['setTimeout']});
   location.hash = '#cloudflare?state=expected&code=sample';
-  sessionStorage.setItem('cs-agent-cloudflare-state','expected');
+  sessionStorage.setItem('joule-cloudflare-state','expected');
   await completeCloudflareLogin();
   assert.deepEqual(exchanges,[{state:'expected',code:'sample'}]);
   assert.equal(element('mcp-section').hidden, false);
@@ -50,6 +50,6 @@ test('管理台启动后仍显示失败原因，展开时加载 Cloudflare 授�
   assert.equal(element('status').className,'status-line info');
   t.mock.timers.tick(6000);
   assert.equal(element('status').hidden,true);
-  assert.equal(sessionStorage.getItem('cs-agent-cloudflare-state'),null);
+  assert.equal(sessionStorage.getItem('joule-cloudflare-state'),null);
   delete globalThis.history; delete globalThis.location;
 });

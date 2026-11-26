@@ -1,9 +1,9 @@
 {
-  "name": "cs-agent-workers",
+  "name": "joule-workers",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "cs-agent on Cloudflare Workers: one Durable Object per conversation (docs/ARCHITECTURE.md)",
+  "description": "Joule on Cloudflare Workers: one Durable Object per conversation (docs/ARCHITECTURE.md)",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "node scripts/deploy.mjs",

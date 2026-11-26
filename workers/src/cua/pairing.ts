@@ -54,7 +54,7 @@ async function control(env: Env, digest: string, params: Record<string,string>) 
     const send = async () => {
       await transport.start();
       if (signal.aborted) { await transport.close(); signal.throwIfAborted(); }
-      await transport.send({jsonrpc:'2.0',id,method:'cs-agent/cua/pair',params});
+      await transport.send({jsonrpc:'2.0',id,method:'joule/cua/pair',params});
     };
     const [,result] = await Promise.all([send(),reply.promise]);
     if (result.status === 'full') throw new HttpError(409,'pairing_full');

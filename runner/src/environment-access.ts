@@ -16,7 +16,7 @@ export function environmentCaller(principal: string, meta: unknown): Environment
   const direct: EnvironmentCaller = { subject: { principal, scope: 'default' }, environments: { kind: 'all' } };
   if (meta === undefined) return direct;
   if (!Check(Type.Record(Type.String(), Type.Unknown()), meta)) throw new Error('invalid_caller_metadata');
-  const caller = meta[CALLER_META_KEY];
+  const caller = meta[CALLER_META_KEY] ?? meta['cs-agent/caller'];
   if (caller === undefined) return direct;
   // 旧宿主只传 scope 时拒绝执行，不能将缺失的环境授权解释为全部开放。
   if (!Check(callerSchema, caller)) throw new Error('invalid_caller_metadata');

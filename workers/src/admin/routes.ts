@@ -272,7 +272,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
       const sandbox = key === "owner" || key.startsWith("group:") ? await env.SANDBOX.getByName(key).status().catch(() => "unavailable" as const) : undefined;
       return { key, ...(name ? { name } : {}), kind: threadKind(key), seenAt, stats, ...(sandbox ? { sandbox } : {}) };
     }));
-    return json({ commit: env.CS_AGENT_COMMIT, bridge: connection, model, sendRules, threads, schedule, events,
+    return json({ commit: env.JOULE_COMMIT, bridge: connection, model, sendRules, threads, schedule, events,
       mcp: accounts.map(account => ({ ...account, tools: counts === null ? null : counts[account.server] ?? 0 })),
       configured: Object.fromEntries(SECRET_NAMES.map(name => [name, !!env[name]])) });
   } },

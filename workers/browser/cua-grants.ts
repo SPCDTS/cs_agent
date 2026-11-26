@@ -926,7 +926,7 @@ export async function loadCuaGrants() {
     if (data.setup === 'pending') scheduleSetupRefresh();
 
     $('cua-grant-status').textContent = data.setup === 'pending'
-      ? (data.online ? 'VPS 已连接，正在检测工具。若持续未启用，请核对 VPS 桥版本。' : 'cs-agent 已保存配置，等待 VPS 连接。')
+      ? (data.online ? 'VPS 已连接，正在检测工具。若持续未启用，请核对 VPS 桥版本。' : 'Joule 已保存配置，等待 VPS 连接。')
       : !data.configured ? '尚未配置 Cua 反向 MCP 服务。'
       : !data.enabled ? 'Cua 服务已停用。'
       : !data.online ? 'Cua 节点离线，可撤销已有分配。'
@@ -1010,5 +1010,5 @@ export function initCuaGrants() {
   $('open-cua-settings').addEventListener('click', () => consoleView('access', 'access-cua-tab'));
   $('cua-setup-form').addEventListener('submit', enableCua);
   $('cua-grant-reload').addEventListener('click', () => void loadCuaGrants());
-  document.addEventListener('cs-agent-logout', clearAllCuaState);
+  document.addEventListener('joule-logout', clearAllCuaState);
 }

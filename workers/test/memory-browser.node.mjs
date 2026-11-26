@@ -130,12 +130,12 @@ test("迟到 scopes、bindings、proposals 不覆盖其他 namespace、记忆或
 test("退出重登后的迟到读取和提案错误不能恢复旧编辑器或注销新登录",async()=>{
  for(const [stage,status] of [["scopes",401],["bindings",500],["proposals",400]]){
   reset();const release=await deferRule(stage);
-  ui.resetMemory();sessionStorage.setItem("cs-agent-admin-token","synthetic-new-session");
+  ui.resetMemory();sessionStorage.setItem("joule-admin-token","synthetic-new-session");
   await ui.memoryDetail(2);
   const body=$("memory-detail-body").textContent;
   release(Response.json({error:"late"},{status}));await settle();
   assert.equal($("memory-detail-body").textContent,body);
-  assert.equal(sessionStorage.getItem("cs-agent-admin-token"),"synthetic-new-session");
+  assert.equal(sessionStorage.getItem("joule-admin-token"),"synthetic-new-session");
   assert.equal(errors.length,0);assert.equal(notices.length,0);
  }
 });

@@ -452,7 +452,7 @@ describe("mcp environments", () => {
         expect((await call('env_list', {})).isError).not.toBe(true);
         expect((await call('env_status', { envId: 'group852' })).isError).not.toBe(true);
         const requests = remote.requests.filter(row => row.body.includes('"tools/call"')).map(row => JSON.parse(row.body));
-        expect(requests.at(-1).params._meta['cs-agent/caller']).toMatchObject({ environments: { kind: 'selected', envIds: ['group852'] } });
+        expect(requests.at(-1).params._meta['joule/caller']).toMatchObject({ environments: { kind: 'selected', envIds: ['group852'] } });
         expect(requests.at(-1).params.arguments).toEqual({ envId: 'group852' });
         const prior = remote.state.calls;
         expect(JSON.stringify(await call('env_submit', { envId: 'group852' }))).toContain('pending');
@@ -493,7 +493,7 @@ describe("mcp oauth", () => {
       const response = await worker.fetch(new Request(`${origin}/oauth/client-metadata.json`), { ...env, PUBLIC_ORIGIN: origin });
       expect(response.headers.get("content-type")).toContain("application/json");
       expect(response.headers.get("cache-control")).toBe("public, max-age=300");
-      expect(await response.json()).toEqual({ client_id: `${origin}/oauth/client-metadata.json`, client_name: "cs-agent", client_uri: origin,
+      expect(await response.json()).toEqual({ client_id: `${origin}/oauth/client-metadata.json`, client_name: "joule", client_uri: origin,
         redirect_uris: [`${origin}/mcp/oauth/callback`], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" });
       expect((await worker.fetch(new Request(`${origin}/mcp/oauth/callback`), env)).status).toBe(400);
     });

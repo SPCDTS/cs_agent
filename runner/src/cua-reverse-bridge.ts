@@ -313,7 +313,7 @@ function validatedImage(data: unknown, mimeType: unknown) {
 
 class DirectorySession {
   readonly server = new Server({name:'cua-spaces',version:'1'}, {capabilities:{tools:{}}});
-  readonly client = new Client({name:'cs-agent-cua-directory',version:'1'}, {capabilities:{}});
+  readonly client = new Client({name:'joule-cua-directory',version:'1'}, {capabilities:{}});
   readonly upstream: StreamableHTTPClientTransport;
   readonly controller = new AbortController();
   readonly transport: Transport;
@@ -462,7 +462,7 @@ export function serveConnection(socket: WebSocket, socketPath: string, pairing?:
     const msg = parsed.data;
     let s = sessions.get(id);
     // 管理员控制帧独占一次性逻辑连接；普通 MCP 工具会话和 tools/call 都不能进入这里。
-    if (pairing && !s && msg.method === pairMethod && 'id' in msg) {
+    if (pairing && !s && (msg.method === pairMethod || msg.method === 'cs-agent/cua/pair') && 'id' in msg) {
       let result: Record<string,unknown> = {status:'unavailable'};
       try { result = pairing.request(msg.params ?? {}); } catch { /* 不把本机错误或凭据返回给客户端。 */ }
       send({session:id,message:{jsonrpc:'2.0',id:msg.id,result}});

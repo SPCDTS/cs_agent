@@ -294,7 +294,7 @@ export async function fetchFeed(url, fetchImpl = globalThis.fetch) {
   try {
     response = await fetchImpl(url, {
       headers: {
-        "User-Agent": "cs-agent-news/1.0 (public RSS/Atom reader)",
+        "User-Agent": "joule-news/1.0 (public RSS/Atom reader)",
         Accept: "application/atom+xml, application/rss+xml, application/xml, text/xml",
       },
       signal: AbortSignal.timeout(25_000),

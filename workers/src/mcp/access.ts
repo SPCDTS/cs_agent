@@ -23,7 +23,7 @@ export const McpToolSelectionSchema = Type.Array(Type.Object({
 export type McpToolSelection = Static<typeof McpToolSelectionSchema>;
 
 export function mcpCallerScope(authority: McpAuthority, thread: string): string {
-  return digest(["cs-agent/caller:v1", thread, authority.scope, authority.actor, authority.generation, authority.replyChannel, authority.subagentId ?? null]);
+  return digest(["joule/caller:v1", thread, authority.scope, authority.actor, authority.generation, authority.replyChannel, authority.subagentId ?? null]);
 }
 
 export type McpAuthorization = TurnKind | McpAuthority | undefined;

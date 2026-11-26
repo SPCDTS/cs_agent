@@ -312,13 +312,13 @@ test('名称写入期间手动和自动刷新合并等待并保留勾选；新�
   card().querySelector('input[type=text]').value = '过期响应';
   await page.click(buttonWithText(card(), '保存名称'));
   const stale = ui.loadCuaGrants();
-  page.storage.delete('cs-agent-admin-token');
+  page.storage.delete('joule-admin-token');
   await ui.loadCuaGrants();
   assert.equal(byId('cua-grant-devices').querySelector('[data-space]'), null);
 
   directory.devices[0].alias = undefined;
   directory.devices[0].name = '新登录设备';
-  page.storage.set('cs-agent-admin-token', 'second-user');
+  page.storage.set('joule-admin-token', 'second-user');
   await ui.loadCuaGrants();
   assert.equal(card().querySelector('.cua-card-name strong').textContent, '新登录设备');
   gate.resolve(); await stale; await page.settle();

@@ -4,7 +4,7 @@
 )
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path -LiteralPath $Root).Path
-$TaskName = "cs-agent-workshop"
+$TaskName = "joule-workshop"
 $Runner = Join-Path $PSScriptRoot "workshop-local.mjs"
 $Runtime = Join-Path $Root "data\workshop-bridge"
 switch ($Action) {
@@ -18,7 +18,7 @@ switch ($Action) {
     $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $User
     $Principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
     $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-    Register-ScheduledTask -TaskName $TaskName -Action $TaskAction -Trigger $Trigger -Principal $Principal -Settings $Settings -Description "cs-agent 本机 Workshop MCP 与 Cloudflare Tunnel" -Force | Out-Null
+    Register-ScheduledTask -TaskName $TaskName -Action $TaskAction -Trigger $Trigger -Principal $Principal -Settings $Settings -Description "Joule 本机 Workshop MCP 与 Cloudflare Tunnel" -Force | Out-Null
     Start-ScheduledTask -TaskName $TaskName
     Write-Output "已安装并启动 $TaskName；下次登录 Windows 自动启动。"
   }

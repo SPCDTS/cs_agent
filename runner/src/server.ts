@@ -54,7 +54,7 @@ export function createMcpHttpServer(config: ServerConfig, jobs: Jobs, env: NodeJ
   return createLocalMcpHttpServer({
     authenticate,
     createSession(principalId) {
-      const server = new Server({ name: 'cs-agent-windows', version: '1.0.0' }, { capabilities: { tools: {} }, instructions: '此服务管理宿主机的临时 Windows Sandbox。先用 env_list 查看授权范围。HTTP 断线后用 env_job_get 查询原任务。' });
+      const server = new Server({ name: 'joule-windows', version: '1.0.0' }, { capabilities: { tools: {} }, instructions: '此服务管理宿主机的临时 Windows Sandbox。先用 env_list 查看授权范围。HTTP 断线后用 env_job_get 查询原任务。' });
       server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: catalog.map(t => t.tool) }));
       server.setRequestHandler(CallToolRequestSchema, async request => {
         try {

@@ -121,19 +121,19 @@ export async function exportExecution(summary: TraceSummary, rows: Observation[]
         "gen_ai.usage.output_tokens": model ? r.output : null,
         "gen_ai.usage.cache_read.input_tokens": model ? r.cached : null,
         "gen_ai.usage.cache_creation.input_tokens": model ? r.written : null,
-        "cs_agent.cost_usd": model ? r.cost : null,
-        "cs_agent.first_event_ms": model ? r.firstEvent : null,
-        "cs_agent.alarm_wait_ms": model ? r.alarmWait : null,
-        "cs_agent.reasoning_tokens": model ? r.reasoning : null,
-        "cs_agent.turn": r.turn,
-        "cs_agent.actor": r.actor,
-        "cs_agent.record_id": n.kind !== "agent" ? r.id : undefined,
-        "cs_agent.open_at_snapshot": n.end === null,
+        "joule.cost_usd": model ? r.cost : null,
+        "joule.first_event_ms": model ? r.firstEvent : null,
+        "joule.alarm_wait_ms": model ? r.alarmWait : null,
+        "joule.reasoning_tokens": model ? r.reasoning : null,
+        "joule.turn": r.turn,
+        "joule.actor": r.actor,
+        "joule.record_id": n.kind !== "agent" ? r.id : undefined,
+        "joule.open_at_snapshot": n.end === null,
         "gen_ai.tool.call.id": n.kind === "tool" ? r.callId : undefined,
-        "cs_agent.queue_wait_ms": n.kind === "turn" ? r.timing?.queue : null,
-        "cs_agent.delivery_wait_ms": n.kind === "turn" ? r.timing?.delivery : null,
-        "cs_agent.first_visible_ms": n.kind === "turn" ? r.timing?.firstVisible : null,
-        "cs_agent.status": n.kind !== "agent" ? r.status : undefined,
+        "joule.queue_wait_ms": n.kind === "turn" ? r.timing?.queue : null,
+        "joule.delivery_wait_ms": n.kind === "turn" ? r.timing?.delivery : null,
+        "joule.first_visible_ms": n.kind === "turn" ? r.timing?.firstVisible : null,
+        "joule.status": n.kind !== "agent" ? r.status : undefined,
       }),
     };
   });
@@ -147,8 +147,8 @@ export async function exportExecution(summary: TraceSummary, rows: Observation[]
     endTimeUnixNano: ns(end),
     attributes: attributes({
       "gen_ai.conversation.id": summary.thread,
-      "cs_agent.root": summary.root,
-      "cs_agent.snapshot": true,
+      "joule.root": summary.root,
+      "joule.snapshot": true,
     }),
   };
   const inputs = new Map<string, string>();
@@ -170,9 +170,9 @@ export async function exportExecution(summary: TraceSummary, rows: Observation[]
       status: { code: s.status === "error" ? 2 : s.status === "ok" ? 1 : 0 },
       attributes: attributes({
         ...s.attrs,
-        "cs_agent.actor": s.actor,
-        "cs_agent.input_id": s.inputId,
-        "cs_agent.omitted": s.omitted || undefined,
+        "joule.actor": s.actor,
+        "joule.input_id": s.inputId,
+        "joule.omitted": s.omitted || undefined,
         "gen_ai.conversation.id": summary.thread,
       }),
       events: s.events.map((e) => ({ timeUnixNano: ns(e.at), name: e.name, attributes: attributes(e.attrs) })),
@@ -182,9 +182,9 @@ export async function exportExecution(summary: TraceSummary, rows: Observation[]
   return {
     resourceSpans: [
       {
-        resource: { attributes: attributes({ "service.name": "cs-agent" }) },
+        resource: { attributes: attributes({ "service.name": "joule" }) },
         scopeSpans: [
-          { scope: { name: "cs-agent.execution" }, spans: [root, ...spans] },
+          { scope: { name: "joule.execution" }, spans: [root, ...spans] },
           ...(pi.length ? [{ scope: { name: "pi.telemetry" }, spans: pi }] : []),
         ],
       },

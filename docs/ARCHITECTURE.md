@@ -1,4 +1,4 @@
-# cs-agent 架构与运行设计
+# Joule 架构与运行设计
 
 应用统一运行在 Cloudflare Workers，入口、依赖和构建配置集中在 `workers/`（入口 `workers/src/index.ts`）。`runner/` 提供 Windows 宿主机上的 WSB 临时环境服务。个人设备与持久 VM 通过自托管 Cua 控制节点共享一个设备目录，可按会话查询设备及其 Driver 工具说明。
 

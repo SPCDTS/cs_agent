@@ -15,7 +15,7 @@ export const CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
 const CODEX_VERSION = protocol.devDependencies["@openai/codex"];
 export const CODEX_MODELS_URL = CODEX_BASE_URL + "/models?client_version=" + CODEX_VERSION;
 export const CODEX_HEADERS = { originator: "codex_cli_rs", version: CODEX_VERSION,
-  "User-Agent": "codex_cli_rs/" + CODEX_VERSION + " (cs-agent; Cloudflare Workers)" };
+  "User-Agent": "codex_cli_rs/" + CODEX_VERSION + " (joule; Cloudflare Workers)" };
 export const LOGIN_TTL_MS = 10 * 60_000;
 const ISSUER = "https://auth.openai.com";
 const SCOPE = "openid profile email offline_access";
