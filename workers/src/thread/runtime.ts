@@ -303,9 +303,10 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     },
     record: (kind, detail) => host.audit(kind, detail),
   }));
-  if (memory.ns === "owner" || memory.ns.startsWith("group:")) registry.install(objectFileTools(async (api, c) => {
-    if (!await codingAllowed(api, c)) throw new Error("permission_denied");
-    return workspaceFor();
+  if (memory.ns === "owner" || memory.ns.startsWith("group:")) registry.install(objectFileTools(async (api, c, sandboxId) => {
+    const allowed = sandboxId ? ownerTaskAllowed : codingAllowed;
+    if (!await allowed(api, c)) throw new Error("permission_denied");
+    return workspaceFor(sandboxId);
   }));
   const ownerManagementInput = async (api: ToolExecutionApi, c: Context) => {
     const input = await host.currentInput(harness, api, api.conversationId, c);

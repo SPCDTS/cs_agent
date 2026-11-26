@@ -71,7 +71,7 @@ BridgeDO 是 QQ 唯一发送事实源，RegistryDO 保存授权、人设、技�
 - `r2_write({key,content})` 保存文本；`r2_write({key,path})` 将已提交的 Linux 文件上传到该 key。
 - `r2_read({key})` 直接读取文本或图片；`r2_read({key,path:"/work/in/file.bin"})` 将原始字节复制进 Linux 工作区供 `bash` 打开。两处副本后续独立修改。
 - `image(block)` 和超长输出自动写入 `r2://.tmp/<时间戳>/codemode/...`，不唤醒 Linux 容器。系统每小时从 R2 清理一批已超过七天的自动输出和默认 QQ 附件，每批最多 1000 个，资源退出后仍可回收。`r2_write` 写入的自选 key 长期保存；`.tmp/` 为系统保留前缀。要保留自动产物，可用 `r2_read({key,path})` 取入工作区，再用 `r2_write({key:"reports/...",path})` 存为长期对象。
-- 主 agent 可以通过 `send_file({path:"r2://..."})` 转发原始文件。子 agent 汇报其资源 ID 和引用，父 agent 按已有授权传 `sandboxId` 取用。历史 `/work/.codemode/` 文件仍按原路径保存在工作区。`agent_send` 的 `files` 接受工作区路径，转发 R2 对象前先用 `r2_read({key,path})` 取入。
+- 主 agent 可以通过 `send_file({path:"r2://..."})` 转发原始文件。子 agent 汇报其资源 ID 和引用，owner 可用 `r2_read({sandboxId,key})` 核对内容再发送。指定 `path` 时，副本写入调用方自己的 `/work`。历史 `/work/.codemode/` 文件仍按原路径保存在工作区。`agent_send` 的 `files` 接受工作区路径，转发 R2 对象前先用 `r2_read({key,path})` 取入。
 
 ### 主人向群共享登录凭证
 

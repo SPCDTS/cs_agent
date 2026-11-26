@@ -513,7 +513,8 @@ export class SubagentDO extends DurableObject<Env> {
       readObject: (key: string) => parent().subagentReadObject(meta.id, key),
       writeObject: (key: string, content: string | Uint8Array) => parent().subagentWriteObject(meta.id, key, content),
     });
-    if (meta.capabilities?.coding) registry.install(objectFileTools(async () => {
+    if (meta.capabilities?.coding) registry.install(objectFileTools(async (_api, _context, sandboxId) => {
+      if (sandboxId !== undefined) throw new Error("permission_denied");
       const access = await parent().validateSubagentAccess(meta.id);
       if (!access?.capabilities.coding || !access.authority.owner) throw new Error("permission_denied");
       return files();

@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { RegistryDO } from "../src/registry";
 import { SandboxDO } from "../src/sandbox/do";
 import { ThreadDO } from "../src/thread";
-import { MediaRepository } from "../src/media/repository";
 import { MCP_CONFIG } from "../src/mcp/config";
 import { workspaceView } from "../src/admin/read-views";
 import { fakeRemote, login } from "./mcp-helpers";
@@ -140,35 +139,17 @@ describe("subagent sandbox, MCP and delegation boundaries", () => {
     expect(inspection?.analysis?.metrics.chars.result).toBeLessThan(1000);
   });
 
-  it.each([false, true])("子 agent 自动输出沿用分配资源，父 agent 可按 ID 发送，shared=%s", async shared => {
+  it.each([false, true])("子 agent 自动输出沿用分配资源，父 agent 可按 ID 核对原图再发送，shared=%s", async shared => {
     const resources = env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner"), { assignedSandboxId } = await resources.list("owner");
     const resource = shared ? await resources.get("owner", assignedSandboxId) : await resources.create("owner", "image-env", {});
     if (!resource) throw Error("missing_resource");
     const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII=", png = Uint8Array.from(atob(data), char => char.charCodeAt(0));
-    const targets: string[] = [], written = new Map<string, Uint8Array>();
-    vi.spyOn(SandboxDO.prototype, "createOutputPrefix").mockImplementation(async function(this: SandboxDO) {
-      targets.push((await this.files()).workspace);
-      return "r2://.codemode/child-image";
-    });
-    vi.spyOn(SandboxDO.prototype, "writeObject").mockImplementation(async function(this: SandboxDO, path, content) {
-      targets.push((await this.files()).workspace);
-      expect(content).toBeInstanceOf(Uint8Array);
-      const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
-      written.set(path, bytes);
-      return { bytes: bytes.length };
-    });
-    vi.spyOn(SandboxDO.prototype, "exportAsset").mockImplementation(async function(this: SandboxDO, path, scope) {
-      targets.push((await this.files()).workspace);
-      const bytes = written.get(path);
-      expect(bytes).toEqual(png);
-      if (!bytes) throw Error("missing_image");
-      return new MediaRepository({ bucket: env.ASSETS, scope }).put({ bytes, name: "child.png", kind: "image" });
-    });
     let savedPath = "";
     const { outputs, seen } = twoModels([spawn("截图", shared ? {} : { sandboxId: resource.id }), { text: "已派出" },
+      () => ({ tool: "codemode", args: { code: `const preview = await tools.r2_read(${JSON.stringify({ sandboxId: resource.id, key: savedPath })}); text(preview.image.data);` } }),
       () => ({ tool: "send_file", args: { sandboxId: resource.id, path: savedPath } })], [
       { tool: "codemode", args: { code: `image({type:"image",data:${JSON.stringify(data)},mimeType:"image/png"});` } },
-      results => { savedPath = /Image saved to (r2:\/\/\.codemode\/\S+\.png)/.exec(results.join("\n"))?.[1] ?? ""; return { text: savedPath }; },
+      results => { savedPath = /Image saved to (r2:\/\/[^\s]+\.png)/.exec(results.join("\n"))?.[1] ?? ""; return { text: savedPath }; },
     ]);
     const { socket, frames } = await connect(sockets);
     await thread("owner").submit(input(1, "截图后发给我", 10000001));
@@ -178,7 +159,8 @@ describe("subagent sandbox, MCP and delegation boundaries", () => {
     await reports("owner", 1);
     expect(outputs.child.join("\n")).toContain("Image saved to");
     expect(seen.child[0]!.tools).not.toContain("send_file");
-    expect(targets).toEqual(Array(3).fill("workspace:" + env.SANDBOX.idFromName(resource.name)));
+    expect(outputs.parent.join("\n")).toContain(data);
+    expect(await env.SANDBOX.getByName(resource.name).readObject(savedPath)).toEqual(png);
     const sub = await onlySubagent("owner");
     await expect((async () => await thread("owner").subagentWriteObject(sub.id, savedPath, png))()).rejects.toThrow("delegation_denied");
   });

@@ -54,11 +54,14 @@ describe("coding tools suite", () => {
           runtime: host.client, resetRuntime: host.reset, runtimeReady: host.ready,
         }) });
       });
+      const resource = await env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner").create("owner", "r2-source", {});
+      const source = env.SANDBOX.getByName(resource.name);
+      await source.writeObject("reports/a.txt", "子资源对象");
       const restore = vi.spyOn(host.client, "restore");
       const seen = scriptedModel([{ name: "codemode", args: { code:
         'text(await tools.r2_write({key:"reports/a.txt",content:"独立对象"})); text((await tools.r2_read({key:"reports/a.txt"})).text);' } },
         { name: "", args: {} }, { name: "codemode", args: { code:
-        'text(await tools.r2_read({key:"reports/a.txt", path:"/work/local.txt"})); text(await tools.write({path:"local.txt",content:"修改副本"})); text(await tools.r2_write({key:"second.txt",path:"local.txt"}));' } }]);
+        `text(await tools.r2_read({sandboxId:${JSON.stringify(resource.id)},key:"reports/a.txt",path:"/work/local.txt"})); text(await tools.r2_write({key:"second.txt",path:"local.txt"}));` } }]);
       await env.THREAD.getByName("owner").submit(nextInput("保存到 R2"));
       expect(seen.outputs.join("\n")).toContain("独立对象");
       expect(restore).not.toHaveBeenCalled();
@@ -70,8 +73,9 @@ describe("coding tools suite", () => {
       expect(seen.outputs.join("\n")).toContain("second.txt");
       const decode = (value: Uint8Array) => new TextDecoder().decode(value);
       expect(decode(await sandbox.readObject("r2://reports/a.txt"))).toBe("独立对象");
-      expect(decode(await sandbox.readObject("second.txt"))).toBe("修改副本");
-      expect(decode((await sandbox.readBlob("local.txt")).bytes)).toBe("修改副本");
+      expect(decode(await sandbox.readObject("second.txt"))).toBe("子资源对象");
+      expect(decode((await sandbox.readBlob("local.txt")).bytes)).toBe("子资源对象");
+      expect((await source.files()).files).toEqual([]);
     });
     it("超长文本通过同一文件环境保存全文，输出返回可继续读取的路径", async () => {
       vi.spyOn(SandboxDO.prototype, "createOutputPrefix").mockResolvedValue("r2://.tmp/1790000000000/codemode/full-text");
@@ -101,9 +105,12 @@ describe("coding tools suite", () => {
     it.each(["foreign", "group"] as const)("send_file 的资源 ID 不允许 %s 越权", async kind => {
       const resource = await env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner").create(kind === "foreign" ? "other" : "owner", "send-target", {});
       const exported = vi.spyOn(SandboxDO.prototype, "exportAsset");
-      const seen = scriptedModel([{ name: "send_file", args: { path: "/work/out/image.png", sandboxId: resource.id } }]);
+      const read = vi.spyOn(SandboxDO.prototype, "readObject");
+      const seen = scriptedModel([{ name: "codemode", args: { code: `text(await tools.r2_read({sandboxId:${JSON.stringify(resource.id)},key:"x"}));` } },
+        { name: "send_file", args: { path: "/work/out/image.png", sandboxId: resource.id } }]);
       const group = kind === "group";
       await env.THREAD.getByName(group ? "group:200000001" : "owner").submit(nextInput("发送图片", group ? 10000004 : 10000001, group ? 200000001 : undefined, group));
+      expect(read).not.toHaveBeenCalled();
       expect(exported).not.toHaveBeenCalled();
       expect(seen.outputs.join("\n")).toContain(group ? "permission_denied" : "invalid_request");
     });
