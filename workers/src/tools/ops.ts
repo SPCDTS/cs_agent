@@ -135,7 +135,6 @@ export function createOpsExtension(deps: OpsExtensionDeps) {
           thread: args.thread,
           model: args.model,
           purpose: args.purpose,
-          limit: 50,
         });
         return { windowHours: hours, ...data };
       }),

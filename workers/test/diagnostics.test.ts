@@ -175,7 +175,7 @@ describe("diagnostics core", () => {
         totalMs: 1100,
       });
   
-      const usage = await store.usage({ since: now - 60_000, until: now + 1000, thread: "owner", limit: 20 });
+      const usage = await store.usage({ since: now - 60_000, until: now + 1000, thread: "owner" });
       expect(usage.summary).toMatchObject({
         requests: 1,
         reasoningTokens: 60,
@@ -184,9 +184,10 @@ describe("diagnostics core", () => {
       });
       expect(Number(usage.summary.costUsd)).toBeCloseTo(0.0042, 6);
   
-      const trace = await store.turnTrace("owner", ["turn:web:t1"], 0);
-      expect(trace.timings).toHaveLength(1);
-      expect(trace.timings?.[0]).toMatchObject({ queueWaitMs: 100, totalMs: 1100, origin: "web" });
+      const timings = (await store.agentTraceDetail("owner","turn:web:t1")).observations.filter(row=>row.kind==="turn");
+      expect(timings).toHaveLength(1);
+      expect(timings[0]).toMatchObject({timing:{queue:100},label:"web"});
+      expect(timings[0]!.ended! - timings[0]!.started).toBe(1100);
       expect((await store.recentTurns("owner", 5))[0]?.turnId).toBe("turn:web:t1");
   
       const owner = env.THREAD.getByName("owner");
@@ -490,6 +491,13 @@ describe("ops observability tools", () => {
       expect(groupSeen.requests.map(request => request.sections.codemode).join("\n")).not.toContain("runtime-ops");
       expect(groupSeen.outputs[0]).toContain("tools.ops_usage does not exist");
   
+      const ownerSeen = scriptedModel([{ name: "ops_health", args: {} }]);
+      await runInDurableObject(env.THREAD.getByName("owner"), async (instance, state) => {
+        const thread = threadWithBindings(instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
+        expect(await thread.submit(input(3, "查看运行状态", 10000001))).toEqual({ status: "done" });
+      });
+      expect(ownerSeen.requests.flatMap(request => request.tools)).toContain("ops_health");
+
       const eventSeen = scriptedModel([
         { name: "codemode", args: { code: "text(await tools.ops_usage({}));" } },
       ]);

@@ -1,3 +1,4 @@
+import { agentTelemetry, withTraceInput } from "../requests/pi-telemetry";
 import { redactReport, fingerprint, type AgentMessage, type AgentReceipt, type AgentSend } from "../communication/model";
 import { hasPendingAgentProof, importFiles, incomingText, proves, reserveAgent, sendAgent, verifyMessage, type AgentTicket } from "../communication/service";
 import { agentSendTool, durableAgentTicket } from "../communication/tool";
@@ -388,7 +389,7 @@ export class SubagentDO extends DurableObject<Env> {
     }
     const { harness, root } = runtime;
     // requestId 让驱逐后的重交找回同一提交，不会把同一条输入跑两遍。
-    const settled = await (await root.submit({ type: "input", content: row.text, requestId: row.request_id, whenBusy: "followUp" }, context)).wait(context);
+    const settled = await (await withTraceInput(row.request_id, () => root.submit({ type: "input", content: row.text, requestId: row.request_id, whenBusy: "followUp" }, context))).wait(context);
     const answer = settled.status === "done" && settled.type === "input" ? await this.answerText(harness, settled.answer) : undefined;
     const outcome = answer === undefined ? "failed" : "done";
     const text = answer === undefined ? `子 agent 没能给出回答（${settled.status === "unanswered" ? settled.reason : settled.status}）` : answer || "（没有文字回答）";
@@ -533,7 +534,7 @@ export class SubagentDO extends DurableObject<Env> {
     const storage = await openDurableObjectSqliteStorage(this.observedStorage, { prefix: "pi_" });
     this.projection.install();
     let runtimeRef: Runtime | undefined;
-    const harness = await Harness.open(storage, { models, registry,
+    const harness = await Harness.open(storage, { models, registry, telemetry: agentTelemetry(this.env, this.ctx, meta.parent, meta.id),
       settings: () => ({
         stream: { transport: "sse" },
         ...(runtimeRef?.switchCompacting ? { compaction: { keepRecentTokens: SWITCH_KEEP_RECENT_TOKENS }, retry: { enabled: false } } : {}),

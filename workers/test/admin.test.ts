@@ -161,15 +161,35 @@ describe("admin routes and data views", () => {
         id, startedAt: at, endedAt: at + 10, thread: "owner", actor: "thread", purpose: "conversation", provider: "faux", model: "test",
         status: "done", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, reasoningTokens: 0, durationMs: 10, contextWindow: 1000,
       }, context: snapshot({ messages: [] }) });
-      type RequestPage = Awaited<ReturnType<typeof store.list>>;
-      const requestPage = await adminJson<RequestPage>("GET", "/admin/requests");
-      expect(requestPage.requests.map(r => r.id)).toEqual(ids.slice(1).reverse());
-      expect(requestPage.next).toBeDefined();
-      const requestTail = await adminJson<RequestPage>("GET", "/admin/requests?before=" + requestPage.next);
-      expect(requestTail.requests.map(r => r.id)).toEqual([ids[0]]);
-      expect(requestTail.next).toBeUndefined();
+      const traces=await adminJson<Awaited<ReturnType<typeof store.agentTraces>>>("GET","/admin/agent-traces");
+      expect(traces.traces).toHaveLength(10);
+      expect(traces.next).toBeDefined();
+      const tail=await adminJson<typeof traces>("GET","/admin/agent-traces?cursor="+encodeURIComponent(traces.next!));
+      expect(tail.traces).toHaveLength(1);
+      expect(new Set([...traces.traces,...tail.traces].map(t=>t.root)).size).toBe(11);
+      expect((await admin("GET","/admin/agent-traces/detail?thread=owner&root=turn:1",undefined,null)).status).toBe(401);
+      expect((await admin("GET","/admin/agent-traces?cursor=bad")).status).toBe(400);
+
     });
   
+    it("keeps dispatches made during a report in the original execution even when tool records arrive in reverse", async () => {
+      const store = env.REQUESTS.getByName("main"), at = Date.now();
+      const dispatch = (turnId: string, inputId: string, child: string) => store.recordTool({
+        id: crypto.randomUUID(), thread: "owner", actor: "thread", binding: { turnId, inputId, generation: 0 },
+        callId: "send-" + child, name: "subagent", startedAt: at, endedAt: at, status: "done",
+        dispatch: { actor: child, inputId: "task" }, arguments: { text: "{}", chars: 2, truncated: false },
+      });
+      await dispatch("turn:report-b", "subagent-report:b:task", "c");
+      await dispatch("turn:report-a", "subagent-report:a:task", "b");
+      await dispatch("turn:root", "web:original", "a");
+      await dispatch("turn:report-c", "subagent-report:c:task", "d");
+      await dispatch("turn:independent", "web:separate", "e");
+      const details = await store.agentTraceDetail("owner", "turn:root");
+      expect(details.observations.map(row => row.target?.actor).sort()).toEqual(["a", "b", "c", "d"]);
+      expect((await store.agentTraceDetail("owner", "turn:report-b")).observations).toHaveLength(0);
+      expect((await store.agentTraceDetail("owner", "turn:independent")).observations).toHaveLength(1);
+    });
+
     it("pages audit events by rowid and filters by kind and result", async () => {
       const owner = env.THREAD.getByName("owner");
       await owner.syncAdminView("owner");
@@ -371,13 +391,15 @@ describe("browser contracts", () => {
       "/admin/alerts": C.AlertsSchema, "/admin/deliveries": C.DeliveriesSchema, "/admin/mcp/servers": C.McpServersSchema,
       "/admin/threads/owner/chat": C.ChatView, "/admin/threads/owner/history": C.SessionHistorySchema,
       "/admin/threads/owner/subagents": C.Subagents, "/admin/threads/owner/workspace": C.ManifestSchema,
-      "/admin/threads/owner/trace?turn=turn:browser-check": C.Trace,
-      "/admin/requests": C.RequestPage, "/admin/usage": C.Usage, "/admin/agent-topology": C.AgentTopologySchema,
+      "/admin/threads/owner/progress?turn=turn:browser-check": C.ChatProgress,
+      "/admin/usage": C.Usage, "/admin/agent-topology": C.AgentTopologySchema,
       ["/admin/requests/" + id + "?summary=1"]: C.RequestDetail,
       ["/admin/requests/" + id + "/context"]: C.ContextInspection,
       ["/admin/requests/" + id + "/context/message:0"]: C.ContextBody,
       "/admin/context-timeline?thread=owner": C.ContextTimeline,
-      ["/admin/tools/" + toolId + "/execution"]: C.ToolExecution,
+      "/admin/agent-traces": C.TracePage, "/admin/agent-traces/detail?thread=owner&root=turn:browser-check": C.TraceDetail,
+      "/admin/agent-traces/analysis?thread=owner&root=turn:browser-check": C.ExecutionAnalysis,
+      "/admin/agent-traces/runtime?thread=owner&actor=thread&input=web:browser-check": C.PiPage,
       ["/admin/requests/" + id]: C.RequestDetail, ["/admin/tools/" + toolId]: C.ToolDetail,
     };
     for (const [path, schema] of Object.entries(checks)) {

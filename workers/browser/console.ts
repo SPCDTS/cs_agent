@@ -1,3 +1,4 @@
+import { loadExecutions, openExecutions, resetExecutions } from "./executions";
 import { refreshContextMonitor, resetContextMonitor, setContextMonitorExpanded } from "./context-monitor";
 import { resetMemory } from "./memory";
 import * as C from "./request-contracts";
@@ -8,24 +9,23 @@ import { $, ApiError, api, bjTime, duration, el, fail, pill, readToken, state, t
 import { drawTopologyLinks, loadTopology, renderTopology, resetTopology, stopTopology } from "./topology";
 import { listPages } from "./pagination";
 import { loadChat, resetChatTrace, scheduleConsolePoll } from "./trace";
-import { cacheCell, detailCache, openRequest, percent, toolCache } from "./request-detail";
+import { detailCache, percent } from "./request-detail";
 import { loadManagement, managementPages, showManagement } from "./management";
 import { sh } from "./sessions";
 import { expandChatThread, renderChatNavigation, resetChatNavigation } from "./chat-navigation";
 import { loadSubagentChat } from "./subagent-chat";
-import { ADMIN_PAGE_SIZE } from "../src/admin/pagination";
 import type { Static } from "typebox";
 export interface ConsoleState {
-  view: string; until: number; before: number | undefined; next: number | undefined; pages: (number | undefined)[]; requestVersion: number; detailVersion: number;
+  view: string; until: number; requestVersion: number; detailVersion: number;
   chat: C.ChatTarget; chatVersion: number; fingerprint: string; timer: number | undefined; resizeTimer?: number; sending: boolean; epoch: number;
   pending: Static<typeof C.PendingChat> | null; chatActive: boolean; requestActive: boolean; chatLoading: boolean;
-  messages: Map<string, C.ChatMessage>; requests: Map<string, C.RequestRecord>; tools: Map<string, C.ToolSummary>;
-  traceTurns: string; traceCursor: number; chatAfter: number | null; chatRevision?:number; turn: string | null; detailId: string | null;
+  messages: Map<string, C.ChatMessage>; progress: Map<string, C.TurnProgress>;
+  chatAfter: number | null; chatRevision?:number; detailId: string | null;
   chart?: { u: C.Usage; since: number; until: number }; awaitingInput?: string | null; locateTurn?: string | null;
 }
-export const cs: ConsoleState = { view:"usage", until:Date.now(), before:undefined, next:undefined, pages:[], requestVersion:0, detailVersion:0,
+export const cs: ConsoleState = { view:"usage", until:Date.now(), requestVersion:0, detailVersion:0,
   chat:{kind:"thread",thread:"owner"}, chatVersion:0, fingerprint:"", timer:undefined, sending:false, epoch:0, pending:null,
-  chatActive:false,requestActive:false,chatLoading:false,messages:new Map(),requests:new Map(),tools:new Map(),traceTurns:"",traceCursor:0,chatAfter:null,turn:null,detailId:null };
+  chatActive:false,requestActive:false,chatLoading:false,messages:new Map(),progress:new Map(),chatAfter:null,detailId:null };
 export const nf = (n: unknown) => typeof n === "number" ? n.toLocaleString("zh-CN") : "—";
 export const compact = (n: number) => n>=1e6?(n/1e6).toFixed(1)+"M":n>=1000?(n/1000).toFixed(1)+"k":nf(n);
 export const statuses: Record<string, string>={running:"进行中",done:"完成",error:"错误",aborted:"已取消",interrupted:"采集未完成",queued:"排队 / 执行中",failed:"失败"};
@@ -82,57 +82,51 @@ function setInspector(mode: "topo" | "ctx" | null) {
   }
 }
 export function consoleView(view: string, subtab?: string){
-  if(cs.view!==view){clearTimeout(cs.timer);stopTopology();detailCache.clear();toolCache.clear();cs.requestVersion++;if(cs.view==="chat"){cs.chatVersion++;cs.chatLoading=false;}}
-  if(cs.view!=="usage"&&view==="usage"){cs.until=Date.now();cs.before=undefined;cs.pages=[];}
+  if(cs.view!==view){clearTimeout(cs.timer);stopTopology();detailCache.clear();cs.requestVersion++;if(cs.view==="chat"){cs.chatVersion++;cs.chatLoading=false;}}
+  if(cs.view!=="usage"&&view==="usage")cs.until=Date.now();
   cs.view=view;
   document.querySelectorAll<HTMLElement>("[data-view]").forEach(b=>{if(b.dataset.view===view)b.setAttribute("aria-current","page");else b.removeAttribute("aria-current");});
   $("view-requests").hidden=view!=="usage";$("usage-summary").hidden=view!=="usage";$("view-chat").hidden=view!=="chat";
+  $("view-executions").hidden=view!=="executions";
+  if(view==="executions") void loadExecutions();
   showManagement(view, subtab);$("requests-heading").textContent="用量总览";
   if(view==="chat"){
     loadChat().catch(fail);
     if(inspectorMode==="topo"){renderTopology(true);loadTopology(true);requestAnimationFrame(()=>drawTopologyLinks());}
     else if(inspectorMode==="ctx")void refreshContextMonitor(true);
   }
-  if(view==="usage")loadRequests().catch(fail);
+  if(view==="usage")loadUsage().catch(fail);
   if(managementPages[view])loadManagement(view).catch(fail);
 }
 export function resetConsole(){
+  resetExecutions();
   resetMemory();
   setInspector(null);
   resetContextMonitor(true);listPages.clear();resetTopology();resetChatNavigation();chatDrafts.clear();
-  clearTimeout(cs.timer);cs.timer=undefined;detailCache.clear();toolCache.clear();resetChatTrace();cs.epoch++;cs.requestVersion++;cs.chatVersion++;cs.detailVersion++;
+  clearTimeout(cs.timer);cs.timer=undefined;detailCache.clear();resetChatTrace();cs.epoch++;cs.requestVersion++;cs.chatVersion++;cs.detailVersion++;
   $("session-history").close();sh.version++;
   $("request-detail").close();$("detail-body").replaceChildren();$("chat-messages").replaceChildren();
 }
 export function startConsole(){if(cs.chat.kind==="thread")restorePending();expandChatThread(cs.chat.thread);renderChatHeader();renderConsoleThreads();consoleView(cs.view);}
-export function requestParams(){
-  const p=new URLSearchParams({since:String(cs.until-Number($("req-range").value)*3600000),until:String(cs.until),limit:String(ADMIN_PAGE_SIZE)});
+function usageParams(){
+  const p=new URLSearchParams({since:String(cs.until-Number($("req-range").value)*3600000),until:String(cs.until)});
   for(const [key,id] of [["thread","req-thread"],["model","req-model"],["status","req-status"],["purpose","req-purpose"]])if(input(id).value)p.set(key,input(id).value);
-  if(cs.turn)p.set("turn",cs.turn);
   return p;
 }
-export async function loadRequests(){
-  const version=++cs.requestVersion,epoch=cs.epoch,p=requestParams(),summaryParams=p.toString();
-  if(cs.before)p.set("before",String(cs.before));$("request-state").textContent="正在载入…";
+export async function loadUsage(){
+  const version=++cs.requestVersion,epoch=cs.epoch,p=usageParams();
+  $("request-state").textContent="正在载入…";
   try{
-    const [page,u]=await Promise.all([readApi(C.RequestPage, "GET","/admin/requests?"+p),readApi(C.Usage, "GET","/admin/usage?"+summaryParams)]);
+    const u=await readApi(C.Usage,"GET","/admin/usage?"+p);
     if(version!==cs.requestVersion||epoch!==cs.epoch)return;
-    cs.next=page.next;$("req-prev").disabled=!cs.pages.length;$("req-next").disabled=!page.next;
-    $("request-empty").hidden=!!page.requests.length;
-    $("request-rows").replaceChildren(...page.requests.map(r=>el("tr",{},[
-      el("td",{},[el("button",{className:"request-link",type:"button",text:bjTime(r.startedAt),onclick:()=>openRequest(r.id)}),el("div",{className:"table-sub mono",text:r.id.slice(0,8)})]),
-      el("td",{},[el("span",{text:r.model}),el("div",{className:"table-sub",text:r.provider+" / "+(purposes[r.purpose]||r.purpose)})]),
-      el("td",{},[el("button",{className:"request-link",type:"button",text:r.thread,onclick:()=>{chooseChat(r.thread);consoleView("chat");}})]),
-      el("td",{},[requestPill(r.status)]),el("td",{className:"num",text:nf(r.inputTokens)}),el("td",{className:"num",text:nf(r.outputTokens)}),el("td",{className:"num"},[cacheCell(r)]),el("td",{className:"num",text:duration(r.durationMs)})
-    ])));
-    const s=u.summary;cs.requestActive=s.running>0;$("request-turn-filter").hidden=!cs.turn;
+    const s=u.summary;cs.requestActive=s.running>0;
     $("metric-requests").textContent=nf(s.requests);$("metric-failures").textContent=s.failed+" 条异常 · "+s.running+" 条进行中";
     $("metric-input").textContent=s.measured?nf(s.inputTokens):"—";$("metric-output").textContent=s.measured?nf(s.outputTokens):"—";
     $("metric-cache").textContent=s.cacheInputTokens?percent(s.cacheRead/s.cacheInputTokens):"—";
     $("metric-cache-note").textContent=s.cacheMeasured+" / "+s.requests+" 条已上报缓存 · 按输入量加权";
     $("metric-duration").textContent=duration(s.avgDuration==null?null:Math.round(s.avgDuration));
     $("metric-measured").textContent=s.measured+" / "+s.requests+" 条已返回用量";
-    $("req-count").textContent="共 "+nf(s.requests)+" 次调用";$("request-state").textContent="第 "+(cs.pages.length+1)+" 页 · 每页 "+ADMIN_PAGE_SIZE+" 条 · 更新于 "+time(Date.now());
+    $("request-state").textContent="更新于 "+time(Date.now());
     choices("req-model",u.choices,"全部模型");drawTokens(u,Number(p.get("since")),Number(p.get("until")));
     const total=s.inputTokens+s.outputTokens;
     $("model-breakdown").replaceChildren(...u.models.slice(0,5).map(m=>el("div",{className:"model-item"},[
@@ -144,8 +138,8 @@ export async function loadRequests(){
       (u.retainedSince?"当前最早记录："+bjTime(u.retainedSince)+"。":"从新版本上线后开始采集。")+"未返回的用量不计入 token 合计。";
   }catch(error){if(version===cs.requestVersion){cs.requestActive=false;$("request-state").textContent="数据载入失败，请刷新重试";}throw error;}finally{if(version===cs.requestVersion)scheduleConsolePoll();}
 }
-export function refreshConsole(){if(cs.view==="usage"&&cs.requestActive&&!cs.before&&!document.hidden){cs.until=Date.now();loadRequests().catch(fail);}}
-export function refreshRequests(){cs.until=Date.now();cs.before=undefined;cs.pages=[];loadRequests().catch(fail);}
+export function refreshConsole(){if(cs.view==="usage"&&cs.requestActive&&!document.hidden){cs.until=Date.now();loadUsage().catch(fail);}}
+export function refreshUsage(){cs.until=Date.now();loadUsage().catch(fail);}
 export function sv<K extends keyof SVGElementTagNameMap>(name: K, attrs: Record<string, string | number | null | undefined> = {}, text?: string){
   const node=document.createElementNS("http://www.w3.org/2000/svg",name);
   for(const [k,v] of Object.entries(attrs||{}))node.setAttribute(k,String(v));if(text!==undefined)node.textContent=text;return node;
@@ -205,11 +199,13 @@ export async function sendChat(event: Event){
 export function initConsole() {
   window.addEventListener("resize",()=>{clearTimeout(cs.resizeTimer);cs.resizeTimer=setTimeout(()=>{if(cs.chart&&cs.view==="usage")drawTokens(cs.chart.u,cs.chart.since,cs.chart.until);},100);});
   document.querySelectorAll<HTMLElement>("[data-view]").forEach(b=>b.addEventListener("click",()=>{if(b.dataset.view)consoleView(b.dataset.view);}));
-  ["req-range","req-thread","req-model","req-purpose","req-status"].forEach(id=>$(id).addEventListener("change",()=>{cs.turn=null;refreshRequests();}));
-  $("request-turn-clear").addEventListener("click",()=>{cs.turn=null;refreshRequests();});
-  $("req-refresh").addEventListener("click",refreshRequests);
-  $("req-prev").addEventListener("click",()=>{cs.before=cs.pages.pop();loadRequests().catch(fail);});
-  $("req-next").addEventListener("click",()=>{if(!cs.next)return;cs.pages.push(cs.before);cs.before=cs.next;loadRequests().catch(fail);});
+  ["req-range","req-thread","req-model","req-purpose","req-status"].forEach(id=>$(id).addEventListener("change",refreshUsage));
+  $("req-refresh").addEventListener("click",refreshUsage);
+  $("usage-executions").addEventListener("click",()=>openExecutions({
+    thread:input("req-thread").value,model:input("req-model").value,purpose:input("req-purpose").value,
+    status:input("req-status").value,range:input("req-range").value,
+  }));
+  $("chat-executions").addEventListener("click",()=>openExecutions({thread:cs.chat.thread,...(cs.chat.kind==="subagent"?{actor:cs.chat.id}:{})}));
   $("detail-close").addEventListener("click",()=>{$("request-detail").close();cs.detailVersion++;});
   $("chat-parent").addEventListener("click",()=>chooseChat(cs.chat.thread));
   $("chat-older").addEventListener("click",()=>loadSubagentChat(true));

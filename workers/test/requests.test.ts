@@ -1,5 +1,5 @@
 import { env, reset, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createAssistantMessageEventStream, type AssistantMessage, type StreamOptions } from "@earendil-works/pi-ai";
@@ -10,6 +10,7 @@ import { captureModels } from "../src/requests/capture";
 import { snapshot, errorSummary } from "../src/requests/snapshot";
 import { compareContext } from "../src/requests/context-store";
 import { contextSource } from "../src/requests/context-source";
+import { ExecutionStore } from "../src/requests/executions";
 import { totalChars } from "../src/requests/context-types";
 import { argumentPreview, toolResultSnapshot } from "../src/requests/tool-snapshot";
 import type { RequestDetail, RequestQuery, ToolTrace } from "../src/requests/types";
@@ -36,6 +37,8 @@ describe("requests core", () => {
       await store.recordTool(tool);
       await store.recordTool({ ...tool, status: "done", result: { text: "完成", chars: 2, truncated: false } });
       await store.record(detail("expired"));
+      const stale = detail("stale", now - 2 * 3600_000);
+      await store.record({ ...stale, request: { ...stale.request, status: "running", endedAt: null } });
       await runInDurableObject(store, (_instance, state) => {
         state.storage.sql.exec("UPDATE requests SET started=? WHERE id='expired'", now - 31 * 86400_000);
         state.storage.sql.exec("UPDATE request_details SET started=? WHERE id='updated'", now - 8 * 86400_000);
@@ -49,12 +52,15 @@ describe("requests core", () => {
         expect(state.storage.sql.exec("SELECT request_count,detail_bytes FROM request_retention WHERE id=1").one()).toEqual(expected);
       });
       await consistent();
+      // 即使 Pi 写入曾误送到主账本，主账本的过期清理也必须照常运行。
+      await store.recordPiSpans([]);
       expect(await runDurableObjectAlarm(store)).toBe(true);
       await consistent();
       await runInDurableObject(store, async (_instance, state) => {
         expect(await state.storage.getAlarm()).not.toBeNull();
       });
       expect(await store.detail("expired")).toBeUndefined();
+      expect((await store.detail("stale"))?.request.status).toBe("interrupted");
       expect((await store.detail("updated"))?.detailAvailable).toBe(false);
       expect((await store.toolDetail(tool.id))?.result?.text).toBe("完成");
     });
@@ -188,60 +194,127 @@ describe("requests core", () => {
       await runInDurableObject(store, (_instance, state) => { expect(state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM request_details").one().n).toBe(2); });
     });
     it("guards every new route and validates queries", async () => {
-      for (const path of ["/admin/agent-topology", "/admin/requests", "/admin/usage", "/admin/requests/"+crypto.randomUUID(), "/admin/threads/owner/chat", "/admin/threads/owner/trace", "/admin/tools/"+crypto.randomUUID()]) {
+      for (const path of ["/admin/agent-topology", "/admin/agent-traces", "/admin/usage", "/admin/requests/"+crypto.randomUUID(), "/admin/threads/owner/chat", "/admin/threads/owner/progress", "/admin/tools/"+crypto.randomUUID()]) {
         expect((await worker.fetch(new Request("https://test"+path), { ...env, ADMIN_TOKEN:"test" })).status).toBe(401);
       }
       const call = (path: string) => worker.fetch(new Request("https://test"+path, { headers:{Authorization:"Bearer test"} }), { ...env, ADMIN_TOKEN:"test" });
-      for (const q of ["status=unexpected", "since=NaN", "limit=101", "thread=other", "since=0&until=9999999999999"]) expect((await call("/admin/requests?"+q)).status).toBe(400);
+      for (const q of ["status=unexpected", "since=NaN", "turn=bad", "thread=other", "since=0&until=9999999999999"]) expect((await call("/admin/agent-traces?"+q)).status).toBe(400);
       expect((await call("/admin/usage")).status).toBe(200);
-      expect((await call("/admin/threads/owner/trace?turn=wrong")).status).toBe(400);
+      const id=crypto.randomUUID();
+      for (const path of ["/admin/requests", "/admin/threads/owner/trace", "/admin/tools/"+id+"/execution", "/admin/subagents/"+id+"/transcript?thread=owner"]) {
+        const response=await call(path);
+        expect(response.status, path).toBe(404);
+        expect(await response.text(), path).toBe("not found");
+      }
+      expect((await call("/admin/threads/owner/progress?turn=wrong")).status).toBe(400);
+    });
+    it("limits chat progress to the latest valid main-agent checklist and links usage filters to the same model call", async () => {
+      const store=env.REQUESTS.getByName("main"), now=Date.now(), req=detail(crypto.randomUUID(),now);
+      const binding={turnId:"turn:main",inputId:"web:main",generation:0};
+      req.request.binding=binding;
+      await store.record(req);
+      await store.record({...req,request:{...req.request,id:crypto.randomUUID(),purpose:"compaction",model:"compact",status:"error"}});
+      const first:ToolTrace={id:crypto.randomUUID(),thread:"owner",actor:"thread",binding,name:"update_steps",
+        callId:"first",steps:[{title:"第一版",status:"pending"}],status:"done",startedAt:now,endedAt:now,
+        arguments:{text:"should never appear",chars:19,truncated:false}};
+      await store.recordTool(first);
+      const steps=[{title:"已完成",status:"done" as const}];
+      await store.recordTool({...first,id:crypto.randomUUID(),callId:"second",startedAt:now+1,steps});
+      await store.recordTool({...first,id:crypto.randomUUID(),callId:"failed",startedAt:now+2,status:"error"});
+      await store.recordTool({...first,id:crypto.randomUUID(),callId:"child",startedAt:now+3,actor:"child"});
+      const active={...first,id:crypto.randomUUID(),callId:"read",name:"read",steps:undefined,status:"running" as const,endedAt:null};
+      await store.recordTool(active);
+      expect(await store.turnProgress("owner",[binding.turnId])).toEqual([{turnId:binding.turnId,active:true,steps}]);
+      await store.recordTool({...active,status:"done",endedAt:now+4});
+      expect(await store.turnProgress("owner",[binding.turnId])).toEqual([{turnId:binding.turnId,active:false,steps}]);
+      expect(await store.turnProgress("group:123",[binding.turnId])).toEqual([]);
+      expect((await store.agentTraces({...query(),model:"faux/test",purpose:"compaction",status:"error"})).traces).toEqual([]);
+      const matches=await store.agentTraces({...query(),model:"faux/compact",purpose:"compaction",status:"error"});
+      expect(matches.traces).toMatchObject([{root:binding.turnId,requests:2}]);
+      expect(await store.requestSnapshot(req.request.id,true)).not.toHaveProperty("related");
+      expect((await store.detail(req.request.id,true))?.related).toHaveLength(2);
+    });
+    it("按执行根和时间窗口限制账本读取，并保留旧请求的独立执行根", async () => {
+      const store = env.REQUESTS.getByName("main"), now = Date.now();
+      const root = { turnId: "turn:root", inputId: "web:root", generation: 0 };
+      const child = { actor: "child", inputId: "task" };
+      const legacy = detail("legacy", now);
+      await store.record(legacy);
+      await store.record({ ...legacy, request: { ...legacy.request, id: "child-model", actor: child.actor,
+        binding: { ...root, inputId: child.inputId, turnId: "turn:child" } } });
+      await store.recordTool({ id: "dispatch", name: "subagent", actor: "thread", thread: "owner", callId: "call",
+        binding: root, dispatch: child, status: "done", startedAt: now, endedAt: now, arguments: {text:"{}", chars:2, truncated:false} });
+
+      await runInDurableObject(store, (_instance, state) => {
+        const sql = state.storage.sql;
+        const batch = `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<512) `;
+        sql.exec(batch + `INSERT INTO requests(id,started,thread,turn_id,model,purpose,status,record)
+          SELECT 'r'||i,1,'owner','outside','m','conversation','done','{}' FROM n`);
+        sql.exec(batch + `INSERT INTO tool_traces(id,thread,turn_id,call_id,started,revision,record,bytes)
+          SELECT 't'||i,'owner','outside','c'||i,1,0,'{}',0 FROM n`);
+        sql.exec(batch + `INSERT INTO turn_timings(thread,input_id,turn_id,ended,revision,record)
+          SELECT 'owner','i'||i,'outside',1,0,'{"receivedAt":1}' FROM n`);
+        const ledger = new ExecutionStore(sql);
+        const queries = vi.spyOn(sql, "exec");
+        function bounded<T>(read: () => T): T {
+          queries.mockClear();
+          const result = read();
+          const reads = queries.mock.results.reduce((n, call) => n + call.value.rowsRead, 0);
+          expect(reads).toBeGreaterThan(0);
+          expect(reads).toBeLessThan(150);
+          return result;
+        }
+        try {
+          const ids = bounded(() => ledger.detail("owner", root.turnId)).observations.map(row => row.id);
+          expect(ids.sort()).toEqual(["child-model", "dispatch"]);
+          const tail = bounded(() => ledger.detail("owner", root.turnId, {at: now, id: "model/child-model"}));
+          expect(tail.observations.map(row => row.id)).toEqual(["dispatch"]);
+          expect(bounded(() => ledger.analysis("owner", root.turnId)).groups).toMatchObject([{actor: child.actor, n:1}]);
+          expect(ledger.detail("owner", "turn:child").observations).toEqual([]);
+          expect(bounded(() => ledger.detail("owner", "request:legacy")).observations).toMatchObject([{id:"legacy"}]);
+          for (const thread of [undefined, "owner"]) {
+            const roots = bounded(() => ledger.list({ since: now, until: now, thread })).traces.map(trace => trace.root);
+            expect(roots.sort()).toEqual(["request:legacy", root.turnId]);
+          }
+        } finally {
+          queries.mockRestore();
+        }
+      });
     });
     it("keeps tool failures separate from model status and reads bodies only in detail", async () => {
       const store=env.REQUESTS.getByName("main"), request=detail(crypto.randomUUID());
       request.request.binding={turnId:"turn:test",inputId:"web:test",generation:0};
       request.request.toolCalls=[{id:"call1",name:"qq_image"}];
       await store.record(request);
-      const first=await store.turnTrace("owner",["turn:test"],0);
       const tool:ToolTrace={id:crypto.randomUUID(),thread:"owner",binding:request.request.binding,callId:"call1",name:"qq_image",startedAt:Date.now(),endedAt:null,status:"running",arguments:{text:'{"message_id":"123"}',chars:20,truncated:false}};
       await store.recordTool(tool);
-      const running=await store.turnTrace("owner",["turn:test"],first.cursor);
-      expect(running.requests).toEqual([]);expect(running.tools[0].status).toBe("running");
+      const running=await store.agentTraceDetail("owner","turn:test");
+      expect(running.observations.find(row=>row.id===tool.id)?.status).toBe("running");
       expect(JSON.stringify(running)).not.toContain("message_id");
       await store.recordTool({...tool,status:"error",endedAt:Date.now(),result:{text:"image unavailable",chars:17,truncated:false}});
-      const ended=await store.turnTrace("owner",["turn:test"],running.cursor);
-      expect(ended.tools[0].status).toBe("error");
+      const ended=await store.agentTraceDetail("owner","turn:test");
+      expect(ended.observations.find(row=>row.id===tool.id)?.status).toBe("error");
       const captured=await store.detail(request.request.id);
       expect(captured?.request.status).toBe("done");expect(captured?.tools[0].status).toBe("error");
       expect(captured?.tools[0]).not.toHaveProperty("result");
-      expect((await store.turnTrace("group:123",["turn:test"],0)).tools).toEqual([]);
+      expect((await store.agentTraceDetail("group:123","turn:test")).observations).toEqual([]);
       expect((await store.toolDetail(tool.id))?.arguments?.text).toContain("message_id");
     });
-    it("loads traces for the full visible turn list without truncating or leaking another thread", async () => {
-      const store = env.REQUESTS.getByName("main"), turns = Array.from({ length: 100 }, (_, i) => "turn:visible:" + i);
-      const requests: string[] = [], tools: string[] = [];
-      for (const turnId of turns.filter((_, index) => [0, 48, 99].includes(index))) {
-        const request = detail(crypto.randomUUID());
-        request.request.binding = { turnId, inputId: "web:" + turnId, generation: 0 };
-        await store.record(request); requests.push(request.request.id);
-        const tool: ToolTrace = { id: crypto.randomUUID(), thread: "owner", binding: request.request.binding, callId: "call:" + turnId,
-          name: "qq_image", startedAt: Date.now(), endedAt: Date.now(), status: "done", arguments: { text: "{}", chars: 2, truncated: false } };
-        await store.recordTool(tool); tools.push(tool.id);
-        await store.record({ ...request, request: { ...request.request, id: crypto.randomUUID(), thread: "group:12345" } });
-        await store.recordTool({ ...tool, id: crypto.randomUUID(), thread: "group:12345" });
+    it("reads progress for all 100 visible turns and isolates overlapping turn IDs by thread", async () => {
+      const store=env.REQUESTS.getByName("main"), turns=Array.from({length:100},(_,i)=>"turn:visible:"+i);
+      for (const turnId of [turns[0]!, turns[48]!, turns[99]!, "turn:outside"]) {
+        const tool:ToolTrace={id:crypto.randomUUID(),thread:"owner",binding:{turnId,inputId:"web:"+turnId,generation:0},
+          callId:"steps",name:"update_steps",startedAt:Date.now(),endedAt:Date.now(),status:"done",
+          steps:[{title:turnId,status:"done"}],arguments:{text:"{}",chars:2,truncated:false}};
+        await store.recordTool(tool);
+        await store.recordTool({...tool,id:crypto.randomUUID(),thread:"group:12345",steps:[{title:"另一会话",status:"done"}]});
       }
-      const unselected = detail(crypto.randomUUID());
-      unselected.request.binding = { turnId: "turn:outside", inputId: "web:outside", generation: 0 };
-      await store.record(unselected);
-      const params = new URLSearchParams(); turns.forEach(turn => params.append("turn", turn));
-      const response = await worker.fetch(new Request("https://test/admin/threads/owner/trace?" + params,
-        { headers: { Authorization: "Bearer test" } }), { ...env, ADMIN_TOKEN: "test" });
+      const params=new URLSearchParams();turns.forEach(turn=>params.append("turn",turn));
+      const response=await worker.fetch(new Request("https://test/admin/threads/owner/progress?"+params,
+        {headers:{Authorization:"Bearer test"}}),{...env,ADMIN_TOKEN:"test"});
       expect(response.status).toBe(200);
-      const trace = await response.json<Awaited<ReturnType<typeof store.turnTrace>>>();
-      expect(trace.requests.map(request => request.id)).toEqual(requests);
-      expect(trace.tools.map(tool => tool.id)).toEqual(tools);
-      expect(trace.more).toBe(false);
-      const delta = await store.turnTrace("owner", turns, trace.cursor);
-      expect(delta.requests).toEqual([]); expect(delta.tools).toEqual([]);
+      const progress=await response.json<Awaited<ReturnType<typeof store.turnProgress>>>();
+      expect(progress.map(row=>row.steps[0]?.title).sort()).toEqual([turns[0],turns[48],turns[99]].sort());
     });
     it("summarizes recent agents and their parents without loading request or tool bodies", async () => {
       const store=env.REQUESTS.getByName("main"),now=Date.now(),child=crypto.randomUUID(),otherChild=crypto.randomUUID();
@@ -375,13 +448,12 @@ describe("requests tool execution", () => {
     expect(result?.analysis?.metrics.chars.result).toBe(5);
     expect(result?.analysis?.items.find(item => item.category === "result")?.execution).toMatchObject({ id: root.id, calls: 2, failures: 1, label: "read · mcp_lookup" });
     expect(JSON.stringify(result)).not.toContain("原始长结果");
-    const execution = await store.toolExecution(root.id);
-    expect(execution?.sourceRequestId).toBe(source.request.id);
-    expect(execution?.tools).toHaveLength(3);
+    const records=(await store.agentTraceDetail("owner",binding.turnId)).observations;
+    expect(records.find(row=>row.id===source.request.id)?.calls).toContain(root.callId);
+    expect(records.filter(row=>row.kind==="tool")).toHaveLength(3);
     await runInDurableObject(store, (_instance, state) => state.storage.sql.exec("UPDATE tool_traces SET payload=NULL,bytes=0"));
-    expect((await store.toolExecution(root.id))?.tools.every(tool => tool.detailAvailable === false)).toBe(true);
+    expect((await store.toolDetail(root.id))?.detailAvailable).toBe(false);
     expect((await store.toolDetail(root.id))?.result).toBeUndefined();
-    expect((await worker.fetch(new Request("https://test/admin/tools/" + root.id + "/execution"), { ...env, ADMIN_TOKEN: "test" })).status).toBe(401);
   });
   
   it("结构化结果保留可读字段，凭据与图片正文隐藏，大小仍受原有截断限制", () => {

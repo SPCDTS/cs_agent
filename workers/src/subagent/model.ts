@@ -23,7 +23,6 @@ export type SubagentStart = Pick<SubagentMeta, "parent" | "id" | "task" | "summa
 export type SubagentReport = {
   subagentId: string; requestId: string; text: string; identity: SubagentIdentity; outcome: "done" | "failed"; state: SubagentState;
 };
-export type SubagentEntry = { id: number; kind: string; role?: string; text: string };
 
 export const MIN_TIMEOUT_MS = 1000;
 export const RETENTION_MS = 14 * 86400_000;

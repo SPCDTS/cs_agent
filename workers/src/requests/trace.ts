@@ -1,3 +1,5 @@
+import { Check } from "typebox/value";
+import { Delegation } from "./execution-contracts";
 import { defineExtension, GenerationTask, hook, ToolTask, type HookApi } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord/context";
 import type { Env } from "../env";
@@ -40,9 +42,12 @@ export function requestTrace(
         try {
           const memo = await api.memo<{ binding: RequestBinding; id: string; at: number }>("cs.trace", context);
           if (!memo) return;
+          const details = result.details;
+          const dispatch = call.name === "subagent" && !result.isError && details && typeof details === "object" && !Array.isArray(details) ? details.dispatch : undefined;
           const steps = result.isError ? undefined : extractStepsSnapshot(call.name, call.arguments);
           await save({ id: memo.id, thread, actor, binding: memo.binding, callId: call.id, ...(call.parent ? { parentCallId: call.parent.callId } : {}),
             name: call.name, ...(call.name !== "codemode" ? { argumentPreview: argumentPreview(call.arguments) } : {}), ...(steps !== undefined ? { steps } : {}),
+            ...(Check(Delegation, dispatch) ? { dispatch } : {}),
             startedAt: memo.at, endedAt: Date.now(), status: result.isError ? "error" : "done",
             arguments: boundedText(JSON.stringify(call.arguments, null, 2)), ...toolResultSnapshot(result) });
         } catch (error) { logDiag(env, ctx, { event: "tool_trace_end_failed", thread, actor, turnId: binding?.turnId, error, detail: { tool: call.name } }); }

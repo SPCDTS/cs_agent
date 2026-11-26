@@ -2,11 +2,13 @@
 
 ## 1. 入口与日常视图
 
-打开 `/admin/`，使用 `ADMIN_TOKEN` 登录（口令仅存于当前标签页 `sessionStorage`，通过 `Authorization: Bearer` 发送，401 自动清除）。左侧固定 224px 导航栏分为「用量总览」「会话对话」与管理分区「模型与接入」「会话与记忆」「任务与事件」「权限与运维」「工作区」，底部集成 Worker / QQ / 模型健康状态卡与登出操作。数据列表统一按每页 10 条分页。
+打开 `/admin/`，使用 `ADMIN_TOKEN` 登录（口令仅存于当前标签页 `sessionStorage`，通过 `Authorization: Bearer` 发送，401 自动清除）。左侧固定 224px 导航栏分为「用量总览」「执行链路」「会话对话」与管理分区「模型与接入」「会话与记忆」「任务与事件」「权限与运维」「工作区」，底部集成 Worker / QQ / 模型健康状态卡与登出操作。数据列表统一按每页 10 条分页。
 
-- **用量总览与请求记录**：支持最近 24 小时 / 7 天 / 30 天及会话、模型、用途、状态筛选，按北京时间分桶；每条请求展示缓存命中率，点击查看上下文字符组成、系统提示、消息、工具定义、输出、CodeMode 执行组与原始快照（按需展开加载）。
+- **用量总览**按北京时间和所选会话、模型、用途、状态聚合。点击「查看匹配的执行链路」会携带当前筛选条件。
+- **执行链路**集中查询模型请求和工具明细。用量总览、聊天回合、子会话和上下文中的工具结果都能定位到对应执行。请求详情按需读取模型输入、输出和上下文差异。
 - **会话对话与拓扑**：
   - 全视口三栏工作台布局：左侧按父会话嵌套展示子 agent（默认最近 24 小时内最多 5 个已结束任务，运行中与当前选中始终可见），中间为主对话舞台与底部输入区。
+  - 主会话按回合显示最新的步骤进度，点击「查看本轮执行链路」可打开该回合所属的执行。
   - 右侧可折叠观测抽屉由顶部「拓扑」「上下文」按钮按需展开：支持查看最近 24 小时 Agent 拓扑（全局最多 5 个最近活跃子 agent + 对应父会话与近期活跃主 agent，点击或键盘 Enter/空格切换对话）及按当前 agent 隔离的上下文监控趋势（详见 [架构与运行设计](ARCHITECTURE.md#5-上下文监控与-codemode-执行组)）。
   - 选择已有 QQ 会话继续同一 Harness root，显示最近 100 条 QQ / 网页消息，以及当前会话已入模的 Agent 收件、子任务报告、外部事件、Agent 发件回执和模型回答。未入模的内部收件只显示状态；模型回答不等于 QQ 投递，Agent 入箱不等于已读。仅展示白名单正文，不展开宿主说明、推理和工具原始参数；网页发言使用稳定 UUID（断网重试不重复入队），回复留在网页。点击子 agent 在中间同一对话区只读查看，保留父会话草稿。
 - **管理分区**（进入对应视图才按需加载，不增加后台轮询；各分区通过顶部二级 Sub-tabs 切换，低频大表单默认折叠收起）：
@@ -25,8 +27,9 @@
 | 分组 | 接口 | 用途 |
 | --- | --- | --- |
 | 总览与健康 | `GET /admin/health`、`GET /admin/overview`、`GET /admin/logs`、`POST /admin/diagnostics/model-egress` | 组件健康（含 MCP 调用健康度、沙箱容器遥测与未关闭告警计数）、全局总览、环形诊断日志、手动出口诊断 |
-| 用量与上下文 | `GET /admin/usage`、`GET /admin/requests`、`GET /admin/requests/:id`、`GET /admin/requests/:id/context[/:part]`、`GET /admin/context-timeline`、`GET /admin/tools/:id[/execution]`、`GET /admin/agent-topology` | 用量趋势、请求分页、上下文分析、工具执行组与拓扑 |
-| 会话与续聊 | `GET/POST /admin/threads/:key/chat`、`GET /admin/threads/:key/history`、`GET /admin/threads/:key/trace`、`POST /admin/threads/:key/{stop,compact,reset}`、`GET /admin/threads/:key/subagents`、`GET /admin/subagents/:id/{history,transcript}`、`POST /admin/subagents/:id/cancel` | 网页续聊（202 入队）、历史分页、执行时间线与子任务控制 |
+| 用量与上下文 | `GET /admin/usage`、`GET /admin/requests/:id`、`GET /admin/requests/:id/context[/:part]`、`GET /admin/context-timeline`、`GET /admin/tools/:id`、`GET /admin/agent-topology` | 用量趋势、单次请求与工具详情、上下文分析与拓扑 |
+| 执行链路 | `GET /admin/agent-traces`、`GET /admin/agent-traces/{detail,analysis,runtime}` | 按会话、子 agent、回合或请求筛选，查看调用树、分组分析与 Pi 原生阶段 |
+| 会话与续聊 | `GET/POST /admin/threads/:key/chat`、`GET /admin/threads/:key/history`、`GET /admin/threads/:key/progress`、`POST /admin/threads/:key/{stop,compact,reset}`、`GET /admin/threads/:key/subagents`、`GET /admin/subagents/:id/history`、`POST /admin/subagents/:id/cancel` | 网页续聊（202 入队）、历史分页、聊天步骤进度与子任务控制 |
 | 模型与设置 | `GET/PUT /admin/settings`、`GET/PUT /admin/model`、`POST /admin/model/oauth/codex/{start,select,catalog,logout}`、`POST /admin/send-rules/release` | 运行设置 CAS、主模型与子任务默认模型选择、Codex 多账号管理与解封发送规则 |
 | 记忆与规则 | `GET /admin/memory[/list\|/:id\|/candidates\|/jobs\|/proposals]`、`POST /admin/memory/{entries,consolidate,proposals}`、`PUT/DELETE /admin/memory/:id`、`PUT /admin/memory/profile`、`/admin/memory/rules/*` | 记忆增删改查、冲突/画像/整理/回滚与主人主线程行为规则 |
 | 技能、权限与运维 | `GET/PUT/DELETE /admin/skills[/:name]`、`POST /admin/skills/:name/{enable,disable,publish}`、`GET/PUT /admin/persona`、`GET/POST /admin/grants[/revoke]`、`GET/PUT /admin/ops-settings`、`GET /admin/alerts`、`GET /admin/deliveries[/:id]`、`POST /admin/deliveries/:id/reconcile` | 技能、人设、授权、运维设置、告警与发送账本核对 |
@@ -54,3 +57,13 @@
 - **按需刷新**：对话活跃时每 2.5 秒增量读取，用量页有运行中请求每 5 秒刷新，拓扑有活动时服务端 10 秒缓存刷新，上下文趋势展开后最多每 10 秒随活跃会话刷新；空闲、离页或标签页隐藏时全部停止轮询。
 - **网页通道隔离**：网页输入写入 `inbound`（`reply_channel = "web"`、`user_id = "admin:web"`），不进入 QQ `messages`、`outbox` 或自动记忆抽取；同一子任务不允许跨回复入口追加指令。
 - **视觉规范**：系统中文无衬线字体、`tabular-nums` 数字、动态内容一律走 `textContent`；桌面 224px 侧栏，窄屏（820px 及以下）顶部横向导航 + 表格横向滚动。
+
+## Agent 执行链路
+
+侧栏「执行链路」按时间、会话、模型、工具、请求 ID 或结果查询。点选执行后，调用树和时间轴共用起点，能看到主 agent、每次派工对应的子回合、报告回合、模型请求和嵌套工具。派工与追问使用宿主实际返回的子任务输入 ID 关联。旧记录保留原回合，历史缺边时可单独查询子回合。
+
+展开「按 agent、模型与首轮 / 续轮分析」可比较调用数、输入输出、耗时、成本和缓存命中率。命中率分母只计有缓存读数的输入，计价与缓存均显示覆盖数。列表摘要按所选窗口汇总，点入执行后可查看整次执行中仍在保留期内的记录。节点支持查看现有的上下文差异、模型输出、工具参数 / 结果与回合耗时。
+
+主、子 Harness 通过 Pi telemetry 记录提交、阶段、恢复、重试、模型调用和事件。节点按需加载运行时数据，已结束的原生 span 每个根会话最多保留 2,048 条、最长 7 天。批量写入失败或超出采集额度时，部分明细可能缺失。原生记录只收白名单元数据。模型计量仍取请求账本，原生 span 不重复计费。
+
+「导出执行链路 · OTLP JSON」会读取整次执行仍在保留期内的所有分页，包含调用树和对应的 Pi 原生阶段。原生 span 保留自己的 trace ID、父子关系、事件与跨 span 链接，通过 span link 关联到执行树中的模型调用或 agent。进行中的节点标记为快照。导出复用 GenAI 的操作、模型、工具与 token 字段，本地回合、首流事件和调度等待等扩展放在 `cs_agent.*` 属性中。消息与工具正文仅在管理台按需读取。[OTLP 规范](https://opentelemetry.io/docs/specs/otlp/)

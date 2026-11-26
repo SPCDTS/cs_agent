@@ -14,7 +14,6 @@ import type { SkillSummary } from "../src/skills";
 import { scriptedModel } from "./events-helpers";
 import { input } from "./helpers";
 import { createModels } from "@earendil-works/pi-ai/models";
-import type { JsonObject } from "@earendil-works/pi-durable";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import * as models from "../src/models";
 
@@ -139,7 +138,8 @@ describe("coding tools suite", () => {
       expect(request).toBeDefined();
       const detail = await store.detail(request!.id), root = detail!.tools.find(tool => tool.name === "codemode")!;
       expect(detail!.tools.filter(tool => tool.parentCallId === root.callId).map(tool => tool.argumentPreview).sort()).toEqual(["command: one", "command: two"]);
-      expect((await store.toolExecution(root.id))?.sourceRequestId).toBe(request!.id);
+      const observations=(await store.agentTraceDetail("owner",root.binding.turnId)).observations;
+      expect(observations.find(row=>row.id===request!.id)?.calls).toContain(root.callId);
       const followup = page.requests.find(row => row.actor === "thread" && !row.toolCalls?.length && row.purpose === "conversation");
       expect((await store.contextInspection(followup!.id))?.analysis?.items.find(item => item.execution)?.execution).toMatchObject({ calls: 2, label: "bash ×2" });
     });
@@ -281,33 +281,6 @@ describe("skills suite", () => {
     return { status: response.status, body: await response.json<Record<string, unknown>>() };
   }
   
-  /** 记录每次模型请求时生效的 skills section（按系统消息重放，null 表示已撤下）与工具结果。 */
-  function script(steps: { name: string; args: JsonObject }[]) {
-    const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
-    const outputs: string[] = [], sections: (string | null | undefined)[] = [], tools = new Set<string>(), captured = new Set<string>();
-    const respond: FauxResponseFactory = transcript => {
-      faux.setResponses([respond]);
-      let skills: string | null | undefined;
-      for (const message of transcript.messages) if (message.role === "system") {
-        if (message.sections && "skills" in message.sections) skills = message.sections.skills;
-        for (const tool of message.toolsAdded ?? []) tools.add(tool.name);
-      }
-      sections.push(skills);
-      const last = transcript.messages.findLast(message => message.role === "toolResult");
-      if (last?.role === "toolResult" && !captured.has(last.toolCallId)) {
-        captured.add(last.toolCallId);
-        outputs.push(last.content.filter(block => block.type === "text").map(block => block.text).join(""));
-      }
-      const next = transcript.messages.at(-1)?.role === "assistant" ? undefined : steps.shift();
-      return next ? fauxAssistantMessage(fauxToolCall(next.name, next.args), { stopReason: "toolUse" }) : fauxAssistantMessage("done");
-    };
-    faux.setResponses([respond]);
-    vi.spyOn(models, "openModels").mockImplementation(() => {
-      const registry = createModels(); registry.setProvider(faux.provider);
-      return registry;
-    });
-    return { outputs, sections, tools, steps };
-  }
   // 每回合新建 ThreadDO 实例：实例里的目录缓存是 60 秒，新实例代表缓存过期后的下一次请求。
   const turn = (key: string, messageId: number, userId: number, groupId?: number) => runInDurableObject(env.THREAD.getByName(key),
     (_instance, state) => threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" }).submit(input(messageId, "按技能练枪", userId, groupId)));
@@ -357,7 +330,7 @@ describe("skills suite", () => {
       expect((await put("aim", { markdown: skillMd("aim"), files: { "ref/notes.md": "急停要点", "long.txt": long } })).status).toBe(200);
       expect((await put("spray", { markdown: skillMd("spray", "<控枪> & 弹道") })).status).toBe(200);
       expect((await admin("POST", "/admin/skills/spray/disable")).status).toBe(200);
-      const seen = script([
+      const seen = scriptedModel([
         { name: "read_skill", args: { name: "aim" } },
         { name: "read_skill", args: { name: "aim", path: "ref/notes.md" } },
         { name: "read_skill", args: { name: "aim", path: "long.txt" } },
@@ -366,7 +339,7 @@ describe("skills suite", () => {
         { name: "read_skill", args: { name: "spray" } },
       ]);
       expect(await turn("owner", 1, 10000001)).toEqual({ status: "done" });
-      expect(seen.tools).toContain("read_skill");
+      expect(seen.requests[0]?.tools).toContain("read_skill");
       expect(seen.outputs[0]).toBe(skillMd("aim"));
       expect(seen.outputs[1]).toBe("急停要点");
       expect(seen.outputs[2]).toBe("a".repeat(20_000) + "\n…（已截断，全文 30000 字）");
@@ -374,26 +347,25 @@ describe("skills suite", () => {
       expect(seen.outputs[3]).toContain("ref/notes.md");
       expect(seen.outputs[4]).toBe("技能 nobody 不存在或已停用。");
       expect(seen.outputs[5]).toBe("技能 spray 不存在或已停用。");
-      const section = seen.sections.at(-1);
+      const section = seen.requests.at(-1)?.sections.skills;
       expect(section).toContain("<available_skills>");
       expect(section).toContain("<name>aim</name>\n<description>压枪与急停的练习步骤</description>");
       expect(section).not.toContain("spray");
       expect(section).not.toContain("先练急停");
   
       expect((await admin("POST", "/admin/skills/aim/disable")).status).toBe(200);
-      seen.steps.push({ name: "read_skill", args: { name: "aim" } });
-      seen.outputs.length = 0;
+      const disabled = scriptedModel([{ name: "read_skill", args: { name: "aim" } }]);
       expect(await turn("owner", 2, 10000001)).toEqual({ status: "done" });
-      expect(seen.sections.at(-1) ?? null).toBeNull();
-      expect(seen.outputs[0]).toBe("技能 aim 不存在或已停用。");
+      expect(disabled.requests.at(-1)?.sections.skills ?? null).toBeNull();
+      expect(disabled.outputs[0]).toBe("技能 aim 不存在或已停用。");
     });
   
     it("serves the same catalog and read_skill in group threads", async () => {
       expect((await put("aim", { markdown: skillMd("aim") })).status).toBe(200);
-      const seen = script([{ name: "read_skill", args: { name: "aim" } }]);
+      const seen = scriptedModel([{ name: "read_skill", args: { name: "aim" } }]);
       expect(await turn("group:200000001", 1, 10000004, 200000001)).toEqual({ status: "done" });
       expect(seen.outputs[0]).toBe(skillMd("aim"));
-      expect(seen.sections.at(-1)).toContain("<name>aim</name>");
+      expect(seen.requests.at(-1)?.sections.skills).toContain("<name>aim</name>");
     });
   });
 });
