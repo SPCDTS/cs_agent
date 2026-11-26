@@ -209,7 +209,7 @@ describe("worker bridge", () => {
 
 describe("agent alarm dispatch", () => {
   const input = helperInput;
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   
   it("persists input before execution, keeps history passive, and runs tool continuations from the alarm", async () => {
     const origin = new AsyncLocalStorage<string>();

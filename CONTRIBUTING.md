@@ -15,7 +15,16 @@ npm run check
 
 日常单模块改动先运行 `npm run typecheck` 和相关测试，例如 `npm run test:related -- src/github/app.ts`；路径相对 `workers/`。也可直接指定测试文件：`npm test -- test/github-user-auth.test.ts`。相关测试根据静态 import 关系选择，涉及共享入口、DO 生命周期、配置或跨模块行为时运行完整 `npm run check`。纯说明文档无需运行代码测试。
 
-完整检查将测试拆分为轻量 `node` 池（`workers/test/projects.mjs` 中的 `NODE_TESTS`）与按文件隔离（`isolate: true`）的 `workers` 池，在 `workers` 池内通过每用例 `reset()` 清理 DO 状态（涉及活跃后台 DO 定时器时配合 `abortAllDurableObjects()`），本机最多并发 2 个测试文件、CI 最多 4 个；排查时可以用 `npm test -- --maxWorkers=1` 或 `--sequence.shuffle` 验证隔离。`npm run test:ci` 自动执行测试卫生门禁（禁止过程命名文件、禁止 >12s 超时、纯逻辑必须分流至 `NODE_TESTS`、`workers` 池文件数上限 36），CI 还会输出 Vitest 耗时摘要并校验耗时预算红线；仅修改 `docs/` 或根目录说明文档时快速完成必需的 `workers check`，并跳过部署。合并 main 后的代码发布仍须通过该提交的完整检查。
+完整检查将测试拆分为轻量 `node` 池（`workers/test/projects.mjs` 中的 `NODE_TESTS`）与按文件隔离（`isolate: true`）的 `workers` 池，在 `workers` 池内通过全局 `workers/test/setup-workers.ts` 与每用例清理隔离 DO 状态，本机最多并发 2 个测试文件、CI 最多 3 个；排查时可以用 `npm test -- --maxWorkers=1` 或 `--sequence.shuffle` 验证隔离。
+
+#### DO 后台任务与跨用例竞态规避
+
+`cloudflare:test` 的 `reset()` 底层调用 `deleteAllDurableObjects()`，仅重置当前仍在 `ActorNamespace` 中活跃的 DO；一方面，若在 `reset()` 之前调用 `abortAllDurableObjects()`，会把 DO 从活跃映射移除导致存储未被清空、把脏数据漏给下一用例，还可能让遗留后台 Promise 抛出未捕获的 `Application called abortAllDurableObjects()` 异常；另一方面，若 DO 在用例内因 `ctx.waitUntil()`（如模型记账、20ms `pi-telemetry` 批量上报）提前被驱逐或测试 `afterEach` 先调用 `vi.restoreAllMocks()`，遗留后台任务还会打到真实网络、还原真实 provider，甚至使已驱逐 DO 的持久状态污染同文件后续用例（如在相同消息 ID 上返回 `{ deduped: true }`）。因此：
+1. `workers` 池统一由 [workers/test/setup-workers.ts](workers/test/setup-workers.ts) 在每用例结束后通过 `listDurableObjectIds()` 兜底清理已驱逐 DO 的残留存储/alarm，并按 `reset() -> vi.restoreAllMocks()` 兜底收尾；
+2. 任何测试文件自定义 `afterEach` 必须严格按「关闭客户端 WebSocket/句柄 -> `await reset()` ->（如确需显式中止活跃 DO 则再调用 `await abortAllDurableObjects()`）-> `vi.restoreAllMocks()`（如使用）」顺序执行，禁止在 `reset()` 前调用 `abortAllDurableObjects()` 或先还原 mock；
+3. 业务代码中 DO 内延迟异步工作（如遥测聚合、日志/回执同步）必须挂载 `ctx.waitUntil()` 并控制队列/重试有界，避免无界定时 loop 在运行期与测试清理期长期悬停 DO。
+
+`npm run test:ci` 自动执行测试卫生门禁（禁止过程命名文件、禁止 >12s 超时、纯逻辑必须分流至 `NODE_TESTS`、`workers` 池文件数上限 36，以及 `afterEach` 清理顺序校验），CI 还会输出 Vitest 耗时摘要并校验耗时预算红线；仅修改 `docs/` 或根目录说明文档时快速完成必需的 `workers check`，并跳过部署。合并 main 后的代码发布仍须通过该提交的完整检查。
 
 ## 测试取舍
 

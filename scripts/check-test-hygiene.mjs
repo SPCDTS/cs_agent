@@ -10,6 +10,42 @@ const OPTION_TIMEOUT = /\btimeout\s*:\s*([\d_]+)/g;
 const CLOUDFLARE_TEST_IMPORT = /\bfrom\s+["']cloudflare:test["']|\bimport\s*\(\s*["']cloudflare:test["']\s*\)/;
 const RESET_USAGE = /\breset\s*\(|\b(?:after|before)Each\s*\(\s*reset\s*\)/;
 
+function extractAfterEachBlocks(content) {
+  const blocks = [];
+  const pattern = /\bafterEach\s*\(/g;
+  let match;
+  while ((match = pattern.exec(content)) !== null) {
+    let i = match.index + match[0].length;
+    let depth = 1;
+    let quote = "";
+    while (i < content.length && depth > 0) {
+      const ch = content[i];
+      if (quote) {
+        if (ch === "\\") i++;
+        else if (ch === quote) quote = "";
+      } else if (ch === "\"" || ch === "'" || ch === "`") {
+        quote = ch;
+      } else if (ch === "(") {
+        depth++;
+      } else if (ch === ")") {
+        depth--;
+      }
+      i++;
+    }
+    const line = content.slice(0, match.index).split(/\r?\n/).length;
+    blocks.push({ line, text: content.slice(match.index, i) });
+  }
+  return blocks;
+}
+
+function callPositions(block, pattern) {
+  const positions = [];
+  const re = new RegExp(pattern.source, "g");
+  let match;
+  while ((match = re.exec(block)) !== null) positions.push(match.index);
+  return positions;
+}
+
 function parseDuration(raw) {
   const value = Number(raw.replaceAll("_", ""));
   return Number.isFinite(value) ? value : 0;
@@ -90,6 +126,23 @@ export function checkTestHygiene(entries) {
 
     if (!inNode && importsCfTest && !RESET_USAGE.test(file.content)) {
       errors.push(`workers 池测试必须调用 reset()（防止同文件跨用例 DO 状态串扰）：workers/${rel}`);
+    }
+
+    if (!inNode && importsCfTest) {
+      for (const block of extractAfterEachBlocks(file.content)) {
+        const resets = callPositions(block.text, /\breset\s*\(/);
+        const aborts = callPositions(block.text, /\babortAllDurableObjects\s*\(/);
+        const restores = callPositions(block.text, /\bvi\.(?:restoreAllMocks|unstubAllGlobals)\s*\(/);
+        if (restores.length > 0 && (resets.length > 0 || aborts.length > 0)) {
+          const lastCleanup = Math.max(...resets, ...aborts);
+          if (restores[0] < lastCleanup) {
+            errors.push(`workers 池测试 afterEach 必须先重置/清理 DO 再调用 restoreAllMocks()：workers/${rel}:${block.line}`);
+          }
+        }
+        if (resets.length > 0 && aborts.length > 0 && aborts[0] < resets[0]) {
+          errors.push(`workers 池测试 afterEach 禁止在 reset() 前调用 abortAllDurableObjects()：workers/${rel}:${block.line}`);
+        }
+      }
     }
   }
 

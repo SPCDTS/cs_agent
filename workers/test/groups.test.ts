@@ -175,7 +175,7 @@ describe("group messaging", () => {
 
 describe("group coding", () => {
   const sockets: WebSocket[] = [];
-  afterEach(async () => { for (const socket of sockets.splice(0)) socket.close(); vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { for (const socket of sockets.splice(0)) socket.close(); await reset(); vi.restoreAllMocks(); });
   const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII=";
   const png = Uint8Array.from(atob(data), c => c.charCodeAt(0));
   const group = "group:200000001";

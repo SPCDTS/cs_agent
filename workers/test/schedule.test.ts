@@ -21,9 +21,9 @@ import { action, connect, input, reply } from "./helpers";
 describe("schedule suite", () => {
   const sockets: WebSocket[] = [];
   afterEach(async () => {
-    vi.restoreAllMocks();
     for (const socket of sockets.splice(0)) socket.close();
     await reset();
+    vi.restoreAllMocks();
   });
   
   const directory = () => env.SCHEDULE.getByName("main");
@@ -265,7 +265,7 @@ describe("schedule suite", () => {
 });
 
 describe("maintenance suite", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   
   const DAY = 86400;
   const bj = (date: string, time = "10:00") => Date.parse(`${date}T${time}:00+08:00`);

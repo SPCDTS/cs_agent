@@ -48,6 +48,7 @@ export default defineConfig({
           name: "workers",
           include: ["test/**/*.test.ts"],
           exclude: NODE_TESTS,
+          setupFiles: ["./test/setup-workers.ts"],
           isolate: true,
           testTimeout: TEST_TIMEOUT,
         },

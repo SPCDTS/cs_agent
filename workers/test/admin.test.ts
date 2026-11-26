@@ -18,7 +18,7 @@ import { fakeRemote, login, TEST_STORE_KEY, adminEnv } from "./mcp-helpers";
 describe("admin routes and data views", () => {
   const TOKEN = "test-admin-only";
   const sockets: WebSocket[] = [];
-  afterEach(async () => { vi.restoreAllMocks(); for (const socket of sockets.splice(0)) socket.close(); await reset(); await abortAllDurableObjects(); });
+  afterEach(async () => { for (const socket of sockets.splice(0)) socket.close(); await reset(); await abortAllDurableObjects(); vi.restoreAllMocks(); });
   
   function admin(method: string, path: string, body?: unknown, token: string | null = TOKEN) {
     const headers: Record<string, string> = {};
@@ -362,7 +362,7 @@ describe("admin routes and data views", () => {
 });
 
 describe("browser contracts", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); await abortAllDurableObjects(); });
+  afterEach(async () => { await reset(); await abortAllDurableObjects(); vi.restoreAllMocks(); });
   const admin = (path: string, method = "GET", body?: unknown) => worker.fetch(new Request("https://test" + path, {
     method, headers: { Authorization: "Bearer browser-test", "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body),
   }), { ...env, ADMIN_TOKEN: "browser-test" });
@@ -411,7 +411,7 @@ describe("browser contracts", () => {
 });
 
 describe("public boundaries", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); await abortAllDurableObjects(); });
+  afterEach(async () => { await reset(); await abortAllDurableObjects(); vi.restoreAllMocks(); });
   const adminEnv = { ...env, ADMIN_TOKEN: "test-admin" };
   
   it("公开存活探针不读取绑定，详情需要管理员认证并分别报告各组件", async () => {
@@ -475,7 +475,7 @@ describe("public boundaries", () => {
 });
 
 describe("cloudflare management", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); await abortAllDurableObjects(); });
+  afterEach(async () => { await reset(); await abortAllDurableObjects(); vi.restoreAllMocks(); });
   const instance = { ...env, PUBLIC_ORIGIN:'https://agent.example.test', DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID:'synthetic-client' };
   const target = { account:'a'.repeat(32), zone:'e'.repeat(32), domain:'example.test', token:'synthetic-access' };
   it('PKCE 回调仅使用一次，匹配活动父域，续期轮换加密令牌并区分授权撤销', async () => {
@@ -584,7 +584,7 @@ describe("cloudflare management", () => {
 });
 
 describe("model egress", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); await abortAllDurableObjects(); });
+  afterEach(async () => { await reset(); await abortAllDurableObjects(); vi.restoreAllMocks(); });
   
   it("requires admin authentication and probes fixed public targets from the owner DO without credentials", async () => {
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {

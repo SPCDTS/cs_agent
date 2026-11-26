@@ -12,7 +12,7 @@ import { action, connect, event, input, reply } from "./helpers";
 
 describe("message context", () => {
   const sockets: WebSocket[] = [];
-  afterEach(async () => { vi.restoreAllMocks(); for (const socket of sockets.splice(0)) socket.close(); await reset(); });
+  afterEach(async () => { for (const socket of sockets.splice(0)) socket.close(); await reset(); vi.restoreAllMocks(); });
   
   describe("per-thread message context", () => {
     it("searches trigram and two-character Chinese terms with before and scope isolation", async () => {
@@ -126,7 +126,7 @@ describe("message context", () => {
 });
 
 describe("quote context", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   function quotedInput() {
     const message = normalizeMessage({ ...event(2, "1", 10000001), message: [
       { type: "reply", data: { id: 1 } }, { type: "text", data: { text: "1" } },

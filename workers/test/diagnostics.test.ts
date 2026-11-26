@@ -20,7 +20,7 @@ import { input } from "./helpers";
 
 describe("diagnostics core", () => {
   const TOKEN = "test-admin-only";
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   
   describe("诊断分类与环形日志缓冲", () => {
     it("提取安全错误分类并排除自由文本与潜在凭据", () => {
@@ -347,7 +347,7 @@ describe("diagnostics core", () => {
 });
 
 describe("ops observability tools", () => {
-  afterEach(async () => { vi.restoreAllMocks(); await reset(); });
+  afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   
   function scriptedModel(steps: { name: string; args: JsonObject }[]) {
     const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
