@@ -120,7 +120,7 @@ test("执行链路从根回合展开子任务，可筛选 Pi 调用并导出相�
     paths.push(path);
     if(path.startsWith("/admin/agent-traces/detail"))return Response.json(!paginate?{observations:rows}:path.includes("cursor=")?{observations:[tool,child]}:{observations:[base],next:"page2"});
     if(path.startsWith("/admin/agent-traces/runtime"))return Response.json({spans:[]});
-    return Response.json({traces:[summary]});
+    return Response.json({traces:[summary,{...summary,root:"turn:other"}]});
   };
   initConsole();initExecutions();await click(document.querySelector('[data-view="executions"]'));await settle();
   assert.match(document.querySelector("#execution-detail").textContent,/50.0%/);
@@ -130,6 +130,13 @@ test("执行链路从根回合展开子任务，可筛选 Pi 调用并导出相�
   paginate=true;openExecutions({record:"t1"});await settle();
   assert.equal(document.querySelector('.execution-node[aria-current="true"]').dataset.observation,"t1");
   assert.match(document.querySelector(".execution-evidence").textContent,/subagent/);
+  const beforeSwitch=paths.length;
+  await click(document.querySelectorAll(".execution-item")[1]);
+  const switched=paths.slice(beforeSwitch).map(path=>new URL(path,"https://local").searchParams);
+  assert.equal(switched.length,1);
+  assert.equal(switched[0].get("root"),"turn:other");
+  assert.equal(switched[0].has("cursor"),false);
+  assert.equal(document.querySelector('.execution-node[aria-current="true"]'),null);
   const native={trace:"1".repeat(32),id:"2".repeat(16),parent:"3".repeat(16),actor:"child-a",inputId:"task",
     name:"pi.ai.request",started:122,ended:175,status:"ok",attrs:{"request.id":"m2"},
     events:[{name:"pi.ai.first_chunk",at:130,attrs:{index:1}}],links:[{trace:"4".repeat(32),id:"5".repeat(16)}],omitted:0};

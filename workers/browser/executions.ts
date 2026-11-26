@@ -125,6 +125,8 @@ export async function loadExecutions(reset = true) {
 }
 
 async function selectExecution(summary: TraceSummary) {
+  let target = focusRecord;
+  focusRecord = undefined;
   const version = ++selection;
   const host = $("execution-detail");
   host.replaceChildren(
@@ -205,7 +207,6 @@ async function selectExecution(summary: TraceSummary) {
   more.hidden = true;
   const all: Observation[] = [];
   let cursor: string | undefined;
-  let target = focusRecord;
   async function load() {
     more.disabled = true;
     const params = new URLSearchParams({ thread: summary.thread, root: summary.root });
@@ -354,10 +355,6 @@ function showEvidence(host: HTMLElement, r: Observation, kind: string, thread: s
       ]),
       button("查看上下文、输入与输出", () => void openRequest(r.id)),
     );
-    if (r.target) {
-      const target = { ...r, actor: r.target.actor, inputId: r.target.inputId };
-      inner.append(button("查看派出子任务的 Pi 记录", () => void runtime(body, thread, target)));
-    }
     if (r.inputId) inner.append(button("查看本次模型调用的原生 span", () => void runtime(body, thread, r, true)));
   }
   if (kind === "turn" && r.timing)
