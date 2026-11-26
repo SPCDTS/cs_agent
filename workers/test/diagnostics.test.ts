@@ -1,15 +1,12 @@
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
-import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
+import { scriptedModel } from "./events-helpers";
 import type { Context } from "@earendil-works/chord/context";
-import type { JsonObject, ToolExecutionApi } from "@earendil-works/pi-durable";
+import type { ToolExecutionApi } from "@earendil-works/pi-durable";
 import worker from "../src/index";
 import { classifyError, logDiag, type DiagRecord } from "../src/shared/diagnostics";
 import { safeError } from "../src/mcp/connection";
 import { createSubagentCapabilityHost } from "../src/mcp/delegated";
-import * as models from "../src/models";
 import { hydrateCatalogs, ModelAlarm, modelEgressDiagnostics, openModels } from "../src/models";
 import { captureModels } from "../src/requests/capture";
 import { threadView } from "../src/admin/read-views";
@@ -348,36 +345,7 @@ describe("diagnostics core", () => {
 
 describe("ops observability tools", () => {
   afterEach(async () => { await reset(); vi.restoreAllMocks(); });
-  
-  function scriptedModel(steps: { name: string; args: JsonObject }[]) {
-    const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
-    const offers: string[] = [], sections: string[] = [], outputs: string[] = [];
-    const pendingCalls = new Set<string>();
-    const respond: FauxResponseFactory = transcript => {
-      faux.setResponses([respond]);
-      const system = getCurrentSystemMessage(transcript.messages);
-      offers.push(...(system?.toolsAdded ?? []).map(tool => tool.name));
-      if (system?.sections?.codemode) sections.push(system.sections.codemode);
-      for (const message of transcript.messages) {
-        if (message.role === "toolResult" && pendingCalls.delete(message.toolCallId)) {
-          outputs.push(message.content.filter(c => c.type === "text").map(c => c.text).join("\n"));
-        }
-      }
-      const next = steps.shift();
-      if (!next) return fauxAssistantMessage("done");
-      const call = fauxToolCall(next.name, next.args);
-      pendingCalls.add(call.id);
-      return fauxAssistantMessage(call, { stopReason: "toolUse" });
-    };
-    faux.setResponses([respond]);
-    vi.spyOn(models, "openModels").mockImplementation(() => {
-      const m = createModels();
-      m.setProvider(faux.provider);
-      return m;
-    });
-    return { offers, sections, outputs };
-  }
-  
+
   describe("cs-agent 自观测能力（ops_health 与 runtime-ops Code Mode 命名空间）", () => {
     it("向主人会话暴露顶层 ops_health 与 Code Mode runtime-ops，并默认过滤当前回合自身请求", async () => {
       const now = Date.now();
@@ -469,12 +437,12 @@ describe("ops observability tools", () => {
       });
   
       // 仅 ops_health 作为顶层模型工具暴露，其余 4 个工具收纳在 runtime-ops 命名空间。
-      expect(seen.offers).toContain("ops_health");
+      expect(seen.requests.flatMap(request => request.tools)).toContain("ops_health");
       for (const hidden of ["ops_usage", "ops_requests", "ops_inspect", "ops_logs"]) {
-        expect(seen.offers).not.toContain(hidden);
+        expect(seen.requests.flatMap(request => request.tools)).not.toContain(hidden);
       }
-      expect(seen.sections.join("\n")).toContain("runtime-ops");
-      expect(seen.sections.join("\n")).toContain("ops_usage");
+      expect(seen.requests.map(request => request.sections.codemode).join("\n")).toContain("runtime-ops");
+      expect(seen.requests.map(request => request.sections.codemode).join("\n")).toContain("ops_usage");
   
       const healthOut = JSON.parse(seen.outputs[0]!);
       expect(healthOut).toMatchObject({
@@ -517,10 +485,10 @@ describe("ops observability tools", () => {
         expect(await thread.submit(input(2, "看看日志", 10000001, 200000001, true))).toEqual({ status: "done" });
       });
       for (const hidden of ["ops_health", "auth_list", "auth_grant", "auth_revoke", "qq_chats", "edge_list", "edge_grant", "edge_revoke"]) {
-        expect(groupSeen.offers).not.toContain(hidden);
+        expect(groupSeen.requests.flatMap(request => request.tools)).not.toContain(hidden);
       }
-      expect(groupSeen.sections.join("\n")).not.toMatch(/^## access\b/m);
-      expect(groupSeen.sections.join("\n")).not.toContain("runtime-ops");
+      expect(groupSeen.requests.map(request => request.sections.codemode).join("\n")).not.toMatch(/^## access\b/m);
+      expect(groupSeen.requests.map(request => request.sections.codemode).join("\n")).not.toContain("runtime-ops");
       expect(groupSeen.outputs[0]).toContain("tools.ops_usage does not exist");
   
       const ownerSeen = scriptedModel([{ name: "ops_health", args: {} }]);
@@ -528,7 +496,7 @@ describe("ops observability tools", () => {
         const thread = threadWithBindings(instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
         expect(await thread.submit(input(3, "查看运行状态", 10000001))).toEqual({ status: "done" });
       });
-      expect(ownerSeen.offers).toContain("ops_health");
+      expect(ownerSeen.requests.flatMap(request => request.tools)).toContain("ops_health");
 
       const eventSeen = scriptedModel([
         { name: "codemode", args: { code: "text(await tools.ops_usage({}));" } },
@@ -550,10 +518,9 @@ describe("ops observability tools", () => {
           kind: "event",
         });
         expect(accepted).toBe("accepted");
-        await thread.alarm();
-        await expect.poll(async () => await thread.eventOutcome("evt_test_1")).not.toBe("queued");
+        await expect.poll(() => thread.eventOutcome("evt_test_1")).toBe("silent");
       });
-      expect(eventSeen.offers).not.toContain("ops_health");
+      expect(eventSeen.requests.flatMap(request => request.tools)).not.toContain("ops_health");
       expect(eventSeen.outputs[0]).toContain("denied");
     });
   

@@ -7,6 +7,7 @@ import { handleAdmin } from "./admin/routes";
 import { publicOrigin } from "./mcp/config";
 import { oauthErrorCode } from "./mcp/oauth-fetch";
 import type { Env } from "./env";
+import { cleanupTemporaryObjects } from "./sandbox/object-files";
 import { MAINTENANCE_CRON, runMaintenance } from "./maintenance";
 import { githubAppConfigured } from "./github/app";
 import { readWebhook, WebhookError } from "./github/model";
@@ -19,12 +20,18 @@ export { ThreadDO } from "./thread";
 export { ScheduleDO } from "./schedule/do";
 export { EventsDO } from "./events/do";
 export { SubagentDO } from "./subagent/do";
+export { DirectoryBackupGateway } from "@cloudflare/sandbox";
 export { SandboxDO } from "./sandbox/do";
 export { CloudflareWorkspaceResourcesDO } from "./sandbox/resources";
 
 // 按 wrangler.jsonc 的 crons 字符串分派，各后台任务各占一行。
 const CRONS: Record<string, (env: Env, scheduledTime: number) => Promise<void>> = {
-  "*/5 * * * *": async env => { await Promise.all([env.EVENTS.getByName("main").tick(),env.BRIDGE.getByName("napcat").tick(),env.REGISTRY.getByName("main").opsTick(),finishCuaSetup(env)]); },
+  "*/5 * * * *": async (env, now) => {
+    await Promise.all([
+      env.EVENTS.getByName("main").tick(), env.BRIDGE.getByName("napcat").tick(), env.REGISTRY.getByName("main").opsTick(), finishCuaSetup(env),
+      new Date(now).getUTCMinutes() === 0 ? cleanupTemporaryObjects(env.ASSETS, now) : undefined,
+    ]);
+  },
   [MAINTENANCE_CRON]: runMaintenance,
 };
 

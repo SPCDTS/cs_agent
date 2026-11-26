@@ -21,7 +21,7 @@ it("主人从已提交文件导入，群通过 Code Mode 使用同一引用，�
   });
   const sandbox = env.SANDBOX.getByName("owner");
   const path = "/work/login/cookies.txt";
-  await sandbox.saveAttachment(path, bytes("sid=" + first));
+  await sandbox.writeFile(path, bytes("sid=" + first), undefined, true);
   const code = (code: string): Parameters<typeof scriptedModel>[0] => [{ name: "codemode", args: { code } }, { name: "", args: {} }];
   const query = `text(await tools.credential_request({ref:'shop',url:'${endpoint}?page=1'}))`;
   const seen = scriptedModel([
@@ -40,7 +40,7 @@ it("主人从已提交文件导入，群通过 Code Mode 使用同一引用，�
   await groupTurn(2);
   expect(seen.outputs.at(-1)).toContain("count");
   expect(seen.outputs.at(-1)).not.toContain("credential_import");
-  await sandbox.saveAttachment(path + ".new", bytes("sid=" + second));
+  await sandbox.writeFile(path + ".new", bytes("sid=" + second), undefined, true);
   await ownerTurn(3);
   await groupTurn(4);
   await ownerTurn(5);

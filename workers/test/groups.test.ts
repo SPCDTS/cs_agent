@@ -224,7 +224,7 @@ describe("group coding", () => {
       if (step++ === 0) return fauxAssistantMessage(fauxToolCall("codemode", { code: script }), { stopReason: "toolUse" });
       if (step === 2) {
         const output = transcript.messages.flatMap(message => message.role === "toolResult" ? message.content.filter(block => block.type === "text").map(block => block.text) : []).join("\n");
-        const path = /Image saved to (\/work\/\.codemode\/\S+\/image-\d+\.png)/.exec(output)?.[1];
+        const path = /Image saved to (r2:\/\/[^\s]+\.png)/.exec(output)?.[1];
         expect(path, output).toBeDefined();
         if (!path) throw Error("image_not_saved");
         saved.push(path);
@@ -259,7 +259,7 @@ describe("group coding", () => {
       expect(await run).toEqual({ status: "done" });
       expect(seen.images).toContain(data);
       expect((await env.SANDBOX.getByName(group).readBlob("out/jersey.png")).bytes).toEqual(png);
-      expect((await env.SANDBOX.getByName(group).readBlob(seen.saved[0]!)).bytes).toEqual(png);
+      expect(await env.SANDBOX.getByName(group).readObject(seen.saved[0]!)).toEqual(png);
       for (const scope of ["owner", "group:200000002"]) {
         await runInDurableObject(env.SANDBOX.getByName(scope), async instance => { if (!(instance instanceof SandboxDO)) throw Error("expected SandboxDO"); await expect(instance.readBlob("out/jersey.png")).rejects.toThrow("not_found"); });
         await expect(new MediaRepository({ bucket: env.ASSETS, scope }).get(asset.ref.id)).rejects.toThrow("asset_not_found");

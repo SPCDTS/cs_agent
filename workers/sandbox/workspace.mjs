@@ -16,6 +16,14 @@ export function detectImage(bytes) {
   if (/^GIF8[79]a/.test(bytes.subarray(0,6).toString("latin1"))) return "image/gif";
   if (bytes.subarray(0,4).toString("latin1") === "RIFF" && bytes.subarray(8,12).toString("latin1") === "WEBP") return "image/webp";
 }
+export async function setTreeOwner(dir, own) {
+  await own(dir);
+  for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+    const absolute = path.join(dir, entry.name);
+    if (entry.isDirectory()) await setTreeOwner(absolute, own);
+    else await own(absolute);
+  }
+}
 export function workspaceControl({ root, own }) {
   let restore;
   async function scan(retainedPaths = []) {
@@ -84,14 +92,7 @@ export function workspaceControl({ root, own }) {
     // 先完成所有校验与写入，再替换临时物化视图。中断后由 DO 从同一已提交 manifest 重试恢复。
     for (const entry of await fs.readdir(root)) await fs.rm(path.join(root, entry), { recursive: true, force: true });
     for (const entry of await fs.readdir(state.stage)) await fs.rename(path.join(state.stage, entry), path.join(root, entry));
-    async function ownership(dir) {
-      await own(dir);
-      for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
-        const absolute = path.join(dir, entry.name);
-        if (entry.isDirectory()) await ownership(absolute); else await own(absolute);
-      }
-    }
-    await ownership(root);
+    await setTreeOwner(root, own);
     await fs.rm(state.stage, { recursive: true, force: true });
     restore = undefined;
     return { restored: true };

@@ -169,7 +169,7 @@ it("protects reserved and unknown slots across GC and real eviction; definite pr
   await expect(deliver("owner", { to: group, text: "legacy" }, "legacy")).rejects.toThrow("agent_message_expired");
   await seed(group);
   const bad = { to: group, files: ["/work/secret.txt"] };
-  await env.SANDBOX.getByName("owner").saveAttachment("/work/secret.txt", new TextEncoder().encode("password=synthetic-secret-for-test"), "source");
+  await env.SANDBOX.getByName("owner").writeFile("/work/secret.txt", new TextEncoder().encode("password=synthetic-secret-for-test"), "source", true);
   const refused = await reserve("owner", bad, "refused", baseAt);
   await expect(deliver("owner", bad, "refused", refused)).rejects.toThrow("agent_credentials_forbidden");
   await tick();
@@ -203,7 +203,7 @@ it("all in-flight slots backpressure before file preparation, then one completio
 
 it("a lost source receipt commit recovers after real eviction without reimporting an edited/deleted attachment", async () => {
   await seed("owner"); await seed(group);
-  await env.SANDBOX.getByName("owner").saveAttachment("/work/file.txt", new TextEncoder().encode("original"), "source");
+  await env.SANDBOX.getByName("owner").writeFile("/work/file.txt", new TextEncoder().encode("original"), "source", true);
   const args = { to: group, files: ["/work/file.txt"] }, ticket = await reserve("owner", args, "lost");
   let path = "";
   await runInDurableObject(env.THREAD.getByName("owner"), async (_i, s) => {
@@ -324,8 +324,8 @@ it.each(["group", "child"] as const)("%s partial attachment commits survive clea
   const to = target === "child" ? (await child("owner")).address : group;
   if (target === "group") { await seed("owner"); await seed(group); }
   const source = env.SANDBOX.getByName("owner"), recipient = env.SANDBOX.getByName(to);
-  await source.saveAttachment("/work/one.txt", new TextEncoder().encode("one"), "source-one");
-  await source.saveAttachment("/work/two.txt", new TextEncoder().encode("two"), "source-two");
+  await source.writeFile("/work/one.txt", new TextEncoder().encode("one"), "source-one", true);
+  await source.writeFile("/work/two.txt", new TextEncoder().encode("two"), "source-two", true);
   const args = { to, files: ["/work/one.txt", "/work/two.txt"] }, ticket = await reserve("owner", args, "partial", Date.now() - 20);
   const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("two")))).map(n => n.toString(16).padStart(2, "0")).join("");
   await runInDurableObject(recipient, instance => {

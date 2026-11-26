@@ -2,9 +2,10 @@ import type { Context } from "@earendil-works/chord/context";
 import { ExecutionError, FileError, type ExecutionEnv, type FileErrorCode, type Result } from "@earendil-works/pi-durable/env";
 import type { SandboxDO } from "./do";
 import { FILE_MAX_BYTES } from "../media/model";
+import { fileKey } from "./object-files";
 import { workPath } from "./client";
 
-export type WorkspaceFiles = Pick<SandboxDO, "readBlob" | "writeFile" | "createTempDir">;
+export type WorkspaceFiles = Pick<SandboxDO, "readBlob" | "writeFile" | "readObject" | "writeObject" | "createOutputPrefix">;
 /** Code Mode 输出用的文件环境；每次实际操作重新取得授权，复用已提交的工作区文件。 */
 export function workspaceExecutionEnv(options: {
   id: string; cwd?: string; files(context: Context): Promise<WorkspaceFiles>;
@@ -25,29 +26,32 @@ export function workspaceExecutionEnv(options: {
       return { ok: false, error: new FileError(code, message, undefined, error instanceof Error ? error : undefined) };
     }
   };
-  const path = (value: string) => workPath(value.startsWith("/") ? value : `${environment.cwd}/${value}`);
+  const path = (value: string) => value.startsWith("r2://") ? "r2://" + fileKey(value) : workPath(value.startsWith("/") ? value : `${environment.cwd}/${value}`);
+  const read = async (files: WorkspaceFiles, value: string) => value.startsWith("r2://")
+    ? files.readObject(value) : (await files.readBlob(path(value))).bytes;
   const decoder = new TextDecoder("utf-8", { ignoreBOM: true, fatal: false });
   const environment: ExecutionEnv = {
     id: options.id, cwd: workPath(options.cwd ?? "/work"),
     absolutePath: (value, context) => boundary(context, async () => path(value)),
     joinPath: (parts, context) => boundary(context, async () => path(parts.join("/"))),
-    readBinaryFile: (value, context) => boundary(context, async files => (await files.readBlob(path(value))).bytes),
-    readTextFile: (value, context) => boundary(context, async files => decoder.decode((await files.readBlob(path(value))).bytes)),
+    readBinaryFile: (value, context) => boundary(context, async files => read(files, value)),
+    readTextFile: (value, context) => boundary(context, async files => decoder.decode(await read(files, value))),
     readTextLines: (value, limits, context) => boundary(context, async files => {
-      const lines = decoder.decode((await files.readBlob(path(value))).bytes).split(/\r?\n/);
+      const lines = decoder.decode(await read(files, value)).split(/\r?\n/);
       return limits?.maxLines === undefined ? lines : lines.slice(0, limits.maxLines);
     }),
     writeFile: (value, content, context) => boundary(context, async files => {
       const bytes = typeof content === "string" ? new TextEncoder().encode(content).byteLength : content.byteLength;
       if (bytes > FILE_MAX_BYTES) throw new Error("too_large");
-      await files.writeFile(path(value), content);
+      if (value.startsWith("r2://")) await files.writeObject(value, content);
+      else await files.writeFile(path(value), content);
     }),
-    createTempDir: (prefix, context) => boundary(context, files => files.createTempDir(prefix)),
+    createTempDir: (prefix, context) => boundary(context, files => files.createOutputPrefix(prefix)),
     createTempFile: (settings, context) => boundary(context, async files => {
       if (settings?.suffix && !/^\.[a-zA-Z0-9_-]{1,32}$/.test(settings.suffix)) throw new Error("invalid_request");
-      const directory = await files.createTempDir(settings?.prefix);
+      const directory = await files.createOutputPrefix(settings?.prefix);
       const target = `${directory}/output${settings?.suffix ?? ""}`;
-      await files.writeFile(target, new Uint8Array());
+      await files.writeObject(target, new Uint8Array());
       return target;
     }),
     openTextLineReader: unsupported, openBinaryReader: unsupported, appendFile: unsupported,

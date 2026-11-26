@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { env, evictDurableObject, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceManager, type WorkspaceManifest } from "../src/sandbox/workspace";
+import { cleanupTemporaryObjects, ObjectFiles, temporaryFileRef, persistentFileKey } from "../src/sandbox/object-files";
 import type { GcOptions } from "../src/sandbox/workspace-gc";
 import { SandboxDO } from "../src/sandbox/do";
 import { runtime } from "./sandbox-runtime-fixture";
@@ -16,6 +17,35 @@ import { input, syncedView } from "./helpers";
 describe("workspace persistence and gc", () => {
   afterEach(async () => { await reset(); vi.restoreAllMocks(); });
   describe("持久工作区", () => {
+    it("旧工作区首次物化生成归档，冷启动可直接恢复，差量版本仍按最新清单读取", async () => {
+      await runInDurableObject(env.SANDBOX.getByName("backup-upgrade"), async (_, ctx) => {
+        const host = runtime();
+        const deps = { workspace: "workspace:" + ctx.id, storage: ctx.storage, bucket: env.ASSETS,
+          runtime: host.client, runtimeReady: host.ready, resetRuntime: host.reset };
+        const legacy = new WorkspaceManager(deps);
+        await legacy.run({ operationId: "legacy", operation: { kind: "write", path: "old.txt", text: "旧数据" } });
+        const snapshot = await legacy.files(), bytes = (await legacy.readBlob("old.txt")).bytes;
+        const restore = host.client.restore.bind(host.client);
+        const fromManifest = vi.spyOn(host.client, "restore");
+        const record = { id: crypto.randomUUID(), size: bytes.length, dir: "/work", sha256: await sha256(bytes), format: "tar+zstd/1" as const };
+        const backup = host.client.backupDirectory = vi.fn(async () => record);
+        const load = host.client.restoreDirectory = vi.fn(async () => restore(snapshot, async () => bytes));
+        const read = (manager: WorkspaceManager, path: string) => manager.run({ operationId: crypto.randomUUID(), operation: { kind: "read", path } });
+        const upgraded = new WorkspaceManager(deps);
+        expect(await read(upgraded, "old.txt")).toMatchObject({ result: { text: "旧数据" } });
+        expect(backup).toHaveBeenCalledTimes(1);
+        fromManifest.mockClear();
+        const cold = new WorkspaceManager(deps);
+        expect(await read(cold, "old.txt")).toMatchObject({ result: { text: "旧数据" } });
+        expect(load).toHaveBeenCalledWith(record);
+        expect(fromManifest).not.toHaveBeenCalled();
+        await cold.run({operationId: "append", operation: {kind: "write", path: "new.txt", text: "新增"}});
+        const next = new WorkspaceManager(deps);
+        expect(await read(next, "new.txt")).toMatchObject({ result: { text: "新增" } });
+        expect(fromManifest.mock.calls.at(-1)?.[2]).toMatchObject({revision: snapshot.revision});
+        expect(backup).toHaveBeenCalledTimes(1);
+      });
+    });
     it("Agent 附件经过真实 manifest/CAS 提交后可重建并通过 read 消费（容器客户端为本地夹具）", async () => {
       await runInDurableObject(env.SANDBOX.getByName("agent-import"), async (_instance, state) => {
         const host = runtime(), workspace = "workspace:agent-import";
@@ -40,6 +70,23 @@ describe("workspace persistence and gc", () => {
       });
     });
   
+    it("自动附件和子资源产物跨资源到期回收，长期文件和新产物继续可读", async () => {
+      const now = Date.now(), old = now - 8 * 86400_000;
+      const owner = new ObjectFiles(env.ASSETS, "owner"), child = new ObjectFiles(env.ASSETS, "child");
+      const attachment = temporaryFileRef("attachments/monthly.csv", old), output = child.outputPrefix("report", old) + "/output.txt";
+      const fresh = child.outputPrefix("report", now) + "/output.txt", saved = "attachments/monthly.csv";
+      await owner.write(attachment, "old");
+      await child.write(output, "old");
+      await child.write(fresh, "fresh");
+      await owner.write(persistentFileKey(saved), "saved");
+      expect(() => persistentFileKey(attachment)).toThrow("invalid_request");
+      await expect(owner.read(fresh)).rejects.toThrow("not_found");
+      await cleanupTemporaryObjects(env.ASSETS, now);
+      await expect(owner.read(attachment)).rejects.toThrow("not_found");
+      await expect(child.read(output)).rejects.toThrow("not_found");
+      expect(new TextDecoder().decode(await owner.read(saved))).toBe("saved");
+      expect(new TextDecoder().decode(await child.read(fresh))).toBe("fresh");
+    });
     it("分批GC跨重建续跑，保护两批间的新提交与新租约，完成后释放标记", async () => {
       await runInDurableObject(env.SANDBOX.getByName("gc-pages"), async (_instance, state) => {
         const host = runtime(), workspace = "workspace:gc-pages";
@@ -61,7 +108,10 @@ describe("workspace persistence and gc", () => {
         await env.ASSETS.put(`${prefix}/blobs/${hash}`, bytes);
         await env.ASSETS.put(`${prefix}/blobs/${lateHash}`, lateBytes);
         const future = Date.now() + 31 * 86_400_000;
-        await state.storage.put({ "workspace:head": "0000", "workspace:pins": { "0001": future + 3600_000 } });
+        const record = { id: crypto.randomUUID(), dir: "/work", size: 3, sha256: hash, format: "tar+zstd/1" };
+        const active = `${prefix}/archives/${record.id}.tar.zst`, orphan = `${prefix}/archives/${crypto.randomUUID()}.tar.zst`;
+        await Promise.all([env.ASSETS.put(active, "active"), env.ASSETS.put(orphan, "old")]);
+        await state.storage.put({ "workspace:archive": { revision: "0003", record, savedAt: Date.now() }, "workspace:head": "0000", "workspace:pins": { "0001": future + 3600_000 } });
         vi.spyOn(Date, "now").mockReturnValue(future);
         const list = vi.spyOn(env.ASSETS, "list");
         const step = async (options: GcOptions) => {
@@ -81,6 +131,7 @@ describe("workspace persistence and gc", () => {
         };
         const dry = await finish({ keepManifests: 1, batchSize });
         expect(dry.deleted).toBe(0);
+        expect(await env.ASSETS.head(orphan)).not.toBeNull();
         expect(list.mock.calls.some(([options]) => options?.cursor)).toBe(true);
         expect(dry.candidates).toBeGreaterThan(versions * 2);
         const options = { dryRun: false, keepManifests: 1, batchSize };
@@ -96,6 +147,9 @@ describe("workspace persistence and gc", () => {
         manager = new WorkspaceManager(deps);
         const complete = await finish(options);
         expect(complete.deleted).toBeGreaterThan(versions * 2);
+        expect(await env.ASSETS.head(active)).not.toBeNull();
+        expect(await env.ASSETS.head(`${prefix}/manifests/0003`)).not.toBeNull();
+        expect(await env.ASSETS.head(orphan)).toBeNull();
         expect(state.storage.sql.exec("SELECT * FROM workspace_gc_refs").toArray()).toEqual([]);
         expect(state.storage.sql.exec("SELECT * FROM workspace_gc_manifests").toArray()).toEqual([]);
         expect(await manager.resumeGc()).toBeUndefined();
