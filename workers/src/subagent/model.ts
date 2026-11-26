@@ -1,4 +1,5 @@
 import type { McpCapabilitySnapshot } from "../mcp/access";
+import type { SkillRuntimeSnapshot } from "../skill-runtime/grants";
 import type { ModelSelection } from "../settings";
 import type { TurnKind } from "../policy";
 import type { AgentDescription } from "./activity";
@@ -13,7 +14,7 @@ export type SubagentStatus = "running" | "done" | "failed" | "cancelled";
 export type ParentSubagentStatus = SubagentStatus | "timeout";
 /** 子 DO 的状态与单调版本；父线程只采纳更新的版本，所以消息、汇报与取消的 RPC 无论先后到达都收敛到同一状态。 */
 export type SubagentState = { status: SubagentStatus; version: number };
-export type SubagentCapabilities = { sandboxId?: string; sandboxTask?: string; mcp?: McpCapabilitySnapshot; coding?: boolean };
+export type SubagentCapabilities = { sandboxId?: string; sandboxTask?: string; mcp?: McpCapabilitySnapshot; skillRuntime?: SkillRuntimeSnapshot; coding?: boolean };
 export type SubagentMeta = {
   parent: string; id: string; task: string; createdAt: number; identity: SubagentIdentity; model: ModelSelection;
   lastModelOp?: string; summary?: string; progress?: AgentDescription; activityAt?: number;

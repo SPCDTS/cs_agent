@@ -21,7 +21,7 @@ import { MEMORY_RULE } from '../memory/contracts';
 import { renderMemorySection } from '../memory/render';
 import { RuleService, renderRules, ruleScopeForInput } from '../memory/rules';
 import { formatBeijingTime } from '../memory/time';
-import { credentialExtension } from "../credentials/tools";
+import { skillRuntimeExtension } from "../skill-runtime/tools";
 import { installCodemode } from '../codemode';
 import { createMcpManagementExtension } from '../mcp/manage';
 import { ThreadMcp } from '../mcp';
@@ -315,8 +315,9 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
   };
   const ownerMayManage = async (api: ToolExecutionApi, c: Context) => !!await ownerManagementInput(api, c);
   if (memory.ns === "owner" || memory.ns.startsWith("group:")) {
-    registry.install(credentialExtension({
-      namespace: memory.ns, registry: host.env.REGISTRY.getByName("main"),
+    registry.install(skillRuntimeExtension({
+      namespace: memory.ns,
+      registry: host.env.REGISTRY.getByName("main"),
       caller: async (api, c) => {
         const input = await host.currentInput(harness, api, api.conversationId, c);
         if (!input?.turn_id || input.kind !== "message" || input.user_id === input.self_id || input.session_generation !== await host.sessionGeneration()) return;
@@ -324,8 +325,8 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
           : input.chat_kind === "group" && scopeOf(targetOf(input)) === memory.ns;
         if (valid) return { scope: memory.ns, origin: input.reply_channel };
       },
-      read: async (path, maxBytes) => (await host.env.SANDBOX.getByName("owner").readBlob(path, undefined, maxBytes)).bytes,
-      audit: (action, ref, result, group) => host.audit("shared_credential", { action, ref, result, group }),
+      sandbox: name => host.env.SANDBOX.getByName(name),
+      audit: (op, detail) => host.audit("skill_runtime", { op, ...detail }),
     }));
   }
   if (memory.ns === 'owner') {

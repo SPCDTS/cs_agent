@@ -6,6 +6,7 @@ export const EXEC_MAX_TIMEOUT_MS = 120_000;
 
 // 失败一律以这些分类码作为 Error.message 抛出；RPC 会保留 message，工具按它给模型说明。
 export const SANDBOX_FAILURES = ["sandbox_unavailable", "path_denied", "not_found", "is_directory", "not_a_directory", "binary_file", "too_large",
+  "output_limit", "skill_deps_install_failed",
   "workspace_storage_unavailable", "workspace_quota", "persistence_failed", "operation_unknown", "operation_expired", "operation_conflict", "workspace_conflict", "blob_corrupt", "restore_incomplete", "offset_out_of_range", "edit_not_found", "edit_ambiguous", "edit_overlap", "permission_denied", "invalid_request", "sandbox_error"] as const;
 export type SandboxFailure = typeof SANDBOX_FAILURES[number];
 const known = (code: unknown): SandboxFailure => SANDBOX_FAILURES.find(item => item === code) ?? "sandbox_error";
@@ -20,6 +21,8 @@ export type RuntimeSnapshot = { files: RuntimeFile[]; directories: string[]; tot
 export class SandboxError extends Error { constructor(code: string, readonly issues?: unknown) { super(code); } }
 export type FileEdit = { oldText: string; newText: string };
 export type DirEntry = { name: string; type: "file" | "dir" | "link" | "other"; size: number };
+export type SkillOutputMeta = { path: string; bytes: number; sha256: string };
+export type SkillExecResult = ExecResult & { outputs: SkillOutputMeta[] };
 
 /** 模型路径按 /work 解析；词法上出了 /work 就不发给容器，固定本地助手再核验 realpath。 */
 export function workPath(raw: string): string {
@@ -49,4 +52,11 @@ export interface SandboxClient {
   remove(path: string): Promise<void>;
   editFile(path: string, edits: FileEdit[]): Promise<{ replaced: number }>;
   list(path: string): Promise<DirEntry[]>;
+  materializeSkill?(input: { files: Record<string, string>; revision: string; installNpmDeps?: boolean; depsHash?: string }): Promise<void>;
+  execSkill?(input: { argv: string[]; stdin: string; timeoutMs: number }): Promise<SkillExecResult>;
+  execSkillBash?(input: { command: string; timeoutMs: number }): Promise<SkillExecResult>;
+  skillStateSnapshot?(): Promise<RuntimeSnapshot>;
+  skillStateRestore?(snapshot: RuntimeSnapshot, readBlob: (file: RuntimeFile) => Promise<Uint8Array>): Promise<void>;
+  readSkillOutBlob?(path: string): Promise<Uint8Array>;
+  clearSkillOut?(): Promise<void>;
 }

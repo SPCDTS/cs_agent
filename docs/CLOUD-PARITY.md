@@ -73,25 +73,14 @@ BridgeDO 是 QQ 唯一发送事实源，RegistryDO 保存授权、人设、技�
 - `image(block)` 和超长输出自动写入 `r2://.tmp/<时间戳>/codemode/...`，不唤醒 Linux 容器。系统每小时从 R2 清理一批已超过七天的自动输出和默认 QQ 附件，每批最多 1000 个，资源退出后仍可回收。`r2_write` 写入的自选 key 长期保存；`.tmp/` 为系统保留前缀。要保留自动产物，可用 `r2_read({key,path})` 取入工作区，再用 `r2_write({key:"reports/...",path})` 存为长期对象。
 - 主 agent 可以通过 `send_file({path:"r2://..."})` 转发原始文件。子 agent 汇报其资源 ID 和引用，owner 可用 `r2_read({sandboxId,key})` 核对内容再发送。指定 `path` 时，副本写入调用方自己的 `/work`。历史 `/work/.codemode/` 文件仍按原路径保存在工作区。`agent_send` 的 `files` 接受工作区路径，转发 R2 对象前先用 `r2_read({key,path})` 取入。
 
-### 主人向群共享登录凭证
+### 受控 Skill 执行器与加密登录态共享
 
-主人可以在私聊或 owner 管理页说“把刚才登录生成的 `/work/login/cookies.txt` 用于这个服务的查询，授权给 A 群”。Agent 根据服务取一个简短引用名，使用宿主工具直接导入已保存的文件。主人无需给凭证起名、粘贴内容或上传 Worker Secret。导入完成后，原文件仍位于主人的私有工作区。
+需要登录态的 Skill 可在附件中声明 `runner.json`，由宿主为每个 Skill 维护独立隔离的执行沙箱（`SandboxDO("skill-state:<skill>")`），在不向半信任群会话暴露原始 Cookie/Token 或任意 `bash` 的前提下，让群聊与群子任务无损复用主人登录态：
 
-- 每份凭证独立授权。主人指定受信任的 HTTPS 查询地址，可以一次登记多个。默认精确匹配 HTTPS 来源和路径。主人也可以用 `https://api.example.com/*` 明确授权该来源的所有路径，子域名和其他端口需要单独授权。宿主允许查询参数，发送 GET 并拒绝重定向。应选择只提供业务数据的接口，目标服务会收到认证头。
-- 文件支持单行 Cookie 请求头、curl/Netscape 格式的 `cookies.txt`、单行 Bearer Token 或 API Key。导入 Cookie 文件时保留适用的域、路径和过期条件，也可只选登录所需的 Cookie 名。源文件上限为 16 KiB，筛选后至多保留 128 条。curl 导出的值可包含逗号。API Key 默认经 `X-API-Key` 发送，也可指定服务要求的 `X-*` 头。Registry 使用已有主密钥加密保存凭证。
-- 主人和获授权群的普通消息回合可在 Code Mode 里使用 `credentials` 命名空间。Skill 先调用 `credential_list` 查看本会话可用引用，再调用 `credential_request`。模型和群工作区只接收业务响应。工具限制为 64 KiB 文本，发现凭证值回显会扣留正文。对常见语言、地区和开关 Cookie，检查完整名值对，以免普通计数被误拦。主人显式选择的登录 Cookie 和 API Token 即使很短也检查裸值。HTTP 错误只返回状态或错误码。原生 Bash 可处理宿主工具取回的业务数据。
-- 主人重新登录后从新文件轮换凭证，各群继续使用同一引用。服务返回 401 或请求时 Cookie 已无有效条目，系统按现有主人告警设置提醒更新。撤销一个群的权限即移除它对该引用的访问。删除凭证会同时清除所有群授权。
-- 凭证管理和查询审计只记录操作、引用、结果和授权目标。新的凭证默认仅主人可用。定时、事件、Agent 来信和子任务不继承用户的交互授权。
-
-例如，群里的 Skill 可以在 Code Mode 查询商品，实际登录信息由宿主在发送时附上。
-
-```javascript
-const result = await tools.credential_request({
-  ref: "shop",
-  url: "https://api.example.com/items?id=42",
-});
-if (result.status === 200) text(JSON.parse(result.body).items);
-```
+- **受控动作清单（`runner.json`）**：随 Skill 一起通过 `skill_publish` 或管理台 CAS 发布。每条 action 声明 `command`（`python3`、`node` 或 Skill 内相对路径，运行期禁用 `shell` 直接 `spawn`）、`description`、可选 `ownerOnly`（仅主人可调）、`timeoutSec`（1–120 秒）和 `argsSchema`（JSON Schema 严格校验后通过 `stdin` 传给脚本）；可选 `deps: { kind: "npm" }` 在容器冷启动时将 `package.json` + `package-lock.json` 安装到只读 `/opt/skill-deps`（不计入状态快照）。
+- **容器隔离与零改造承接**：`/opt/skill` 以 `root:root` 只读物化已发布代码；`/work/state`（同时暴露为 `SKILL_STATE_DIR`、`HOME=/work/state/home`、`XDG_CONFIG_HOME=/work/state/.config`、`XDG_DATA_HOME=/work/state/.local/share`）保存 CLI/SDK/脚本落盘的登录态；`/work/out`（`SKILL_OUT_DIR`）作为单次运行产物出口，运行结束后校验无软链接并按最多 5 个文件、总计 8 MiB 写入调用方 `r2://.tmp/...` 后清空。若开启 `deps: { kind: "npm" }`，安装后的 `/opt/skill-deps/node_modules` 会同时通过 `/opt/skill/node_modules` 符号链接与 `NODE_PATH` 暴露给 ESM 与 CJS 脚本。
+- **自动加密写回与并发保护**：同一个 Skill 的所有运行请求经串行队列（最多排队 4 个，超限返回 `skill_busy`）执行，避免多群并发刷新一次性 `refresh_token`。进程正常退出即对 `/work/state` 做快照，使用 `TokenVault`（`AES-GCM` + AAD 绑定）串行加密写入 R2（保留最近 3 个历史版本并自动清理被淘汰版本不再引用的孤儿密文 blob）；超时或容器异常直接回滚并销毁容器，不提交半截状态。删除 Skill 时同步清理加密登录态。
+- **主人运维与群/子任务授权**：主人交互回合可在 Code Mode `skills` 命名空间使用 `skill_owner_bash`（在受控状态沙箱交互登录）、`skill_state_import`（从 `/work/...` 或 `r2://...` 直拷文件）、`skill_state_list`、`skill_state_clear` 与 `skill_grant`。群会话与群派出的子任务仅可调用 `skill_actions` 与 `skill_run`（子任务按授予 `revision` 与实时授权交集校验，撤权后重授不复活旧子任务，禁止调用 `ownerOnly` 与管理类工具），执行结束后再次核验授权才交付输出。`outputs[].path`（`r2://.tmp/...`）在未开启 `coding` 的会话中也可直接传给 `send_file({ path })` 发送给用户，子任务可原样汇报给父会话读取或发送。脚本返回 `authExitCode`（默认 `41`）时自动触发 `credential_login` 主人告警，主人重新登录或导入后自动关闭。
 
 ## 4. MCP、子 agent 能力委派与群审批契约
 

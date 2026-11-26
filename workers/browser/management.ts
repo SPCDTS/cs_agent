@@ -1,6 +1,7 @@
 import { $, el, loadEvents, loadMemory, loadModel, loadSchedules, loadSettings, loadSkills, loadSources } from "./app";
 import { loadMcpServers } from "./mcp-servers";
 import { loadCuaGrants } from './cua-grants';
+import { loadSkillRuntime } from "./skill-runtime";
 import { loadAccess, loadAccessPersona } from "./access";
 
 export const managementPages: Record<string, readonly [string, string] | undefined> = {
@@ -15,7 +16,7 @@ export const managementSubtabs: Record<string, ReadonlyArray<readonly [string, s
   models: [["models-core", "模型与账号"], ["models-mcp", "MCP 与设备"], ["models-qq", "QQ 响应与状态"]],
   memory: [["memory-entries", "长期记忆"], ["memory-threads", "活跃会话"], ["memory-skills", "技能目录"], ["memory-persona", "全局人格"]],
   operations: [["ops-schedules", "定时任务"], ["ops-sources", "事件来源"], ["ops-events", "审计事件"]],
-  access: [["access-grants-tab", "跨会话授权"], ["access-cua-tab", "Cua 设备分配"], ["access-mcp-tab", "MCP 群授权与审批"], ["access-ops-tab", "额度与保留期"], ["access-logs-tab", "告警与发送账本"]],
+  access: [["access-grants-tab", "跨会话授权"], ["access-cua-tab", "Cua 设备分配"], ["access-mcp-tab", "MCP 群授权与审批"], ["access-skills-tab", "Skill 群授权与状态"], ["access-ops-tab", "额度与保留期"], ["access-logs-tab", "告警与发送账本"]],
 };
 
 const activeSubtabs: Record<string, string> = {
@@ -40,6 +41,7 @@ const subtabTargets: Record<string, readonly [string, string]> = {
   "access-panel": ["access", "*"],
   "grants-section": ["access", "access-grants-tab"],
   "mcp-access-section": ["access", "access-mcp-tab"],
+  "skill-runtime-section": ["access", "access-skills-tab"],
   "cua-grants-section": ["access", "access-cua-tab"],
   "ops-section": ["access", "access-ops-tab"],
   "logs-section": ["access", "access-logs-tab"],
@@ -50,6 +52,7 @@ function applySubtab(view: string) {
   const tabs = managementSubtabs[view] || [];
   const active = activeSubtabs[view] || tabs[0]?.[0] || "*";
   if (active === "access-cua-tab") void loadCuaGrants();
+  if (active === "access-skills-tab") void loadSkillRuntime();
   const bar = $("manage-subtabs");
   bar.hidden = !tabs.length;
   if (bar.dataset.view !== view) {
