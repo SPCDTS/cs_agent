@@ -1,3 +1,4 @@
+import type { AndroidRelay } from './android-relay.ts';
 import { pairMethod, type PairingSlots } from './cua-pairing.ts';
 import { request } from 'node:http';
 import { posix } from 'node:path';
@@ -15,7 +16,7 @@ const requestBytes = 700 * 1024;
 const maxImageBytes = 4 * 1024 * 1024;
 const maxErrorTextLength = 4000;
 const sessionId = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
-const deviceId = /^(?:relay:[a-z0-9][a-z0-9-]{6,62}[a-z0-9]|direct:(?:[a-zA-Z0-9._-]+|\[[0-9a-fA-F:]+\]):[0-9]{1,5})$/;
+const deviceId = /^(?:android:[a-z0-9][a-z0-9-]{0,47}|relay:[a-z0-9][a-z0-9-]{6,62}[a-z0-9]|direct:(?:[a-zA-Z0-9._-]+|\[[0-9a-fA-F:]+\]):[0-9]{1,5})$/;
 const jobIdPattern = /^[A-Za-z0-9._-]{1,128}$/;
 const envKeyPattern = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const driverToolPattern = /^[a-zA-Z0-9_.-]{1,128}$/;
@@ -320,7 +321,7 @@ class DirectorySession {
   ready = false;
   done?: Promise<void>;
 
-  constructor(socketPath: string, send: (reply: JSONRPCMessage) => void) {
+  constructor(socketPath: string, send: (reply: JSONRPCMessage) => void, android?: AndroidRelay) {
     this.transport = { async start() {}, async close() { this.onclose?.(); }, async send(reply) { send(reply); } };
     this.upstream = new StreamableHTTPClientTransport(localMcp, {fetch:localFetch(socketPath),
       reconnectionOptions:{maxRetries:0, initialReconnectionDelay:0, maxReconnectionDelay:0, reconnectionDelayGrowFactor:1}});
@@ -333,7 +334,12 @@ class DirectorySession {
     this.server.setRequestHandler(CallToolRequestSchema, async ({params}, {signal}) => {
       const normalized = parseToolArgs(params.name, params.arguments ?? {});
       if (!normalized) throw new McpError(ErrorCode.InvalidParams,'不支持此设备操作或参数。');
-      const cards = spaceCards(await this.readDirectory('list_spaces',{},signal));
+      if (typeof normalized.space === 'string' && normalized.space.startsWith('android:')) {
+        if (!android) throw new McpError(ErrorCode.InvalidParams,'Android Relay 未启用');
+        return android.call(params.name,normalized,signal);
+      }
+      const cards = spaceCards(await this.readDirectory('list_spaces',{},signal)).filter(card=>!card.id.startsWith('android:'));
+      if (android) cards.push(...android.cards());
       if (params.name === 'list_spaces') return {content:[{type:'text',text:JSON.stringify(cards)}]};
 
       // Cua 还接受裸名称、URL 和未登记的地址。只使用本次目录中的唯一规范 ID。
@@ -428,7 +434,7 @@ class DirectorySession {
 }
 
 type Session = { directory: DirectorySession; request?: {id: string | number; timer: NodeJS.Timeout} };
-export function serveConnection(socket: WebSocket, socketPath: string, pairing?: PairingSlots) {
+export function serveConnection(socket: WebSocket, socketPath: string, pairing?: PairingSlots, android?: AndroidRelay) {
   const sessions = new Map<string,Session>();
   let inFlight = 0, closed = false, pongDeadline: NodeJS.Timeout | undefined;
   function send(frame: object) {
@@ -493,7 +499,7 @@ export function serveConnection(socket: WebSocket, socketPath: string, pairing?:
         if (active?.directory !== directory || active.directory.done || !('id' in reply) || reply.id !== active.request?.id) return;
         release(active);
         try { send({session:id,message:reply}); } catch { drop(id,true); }
-      });
+      },android);
       s = {directory}; sessions.set(id,s);
     }
     if ('id' in msg) {

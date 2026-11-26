@@ -174,3 +174,5 @@ sudo -u cua-directory env CUA_HOME=/var/lib/cs-agent-cua CUA_CREDENTIAL_STORE=fi
 ```
 
 同一设备只轮换注册令牌时，更新设备和控制机的注册文件并重启对应 Relay。设备令牌轮换后，重启设备端 join，并重新执行该设备的 register unit。在管理台暂停 `cua` 服务会保留已有设备分配，暂停期间仍可撤回分配。轮换桥的 WSS 凭据会清空原分配。更新控制机桥凭据、重启并核对连接后，按完整 Space ID 重新向所需会话分配设备。
+
+Android 手机主动连接及逐设备授权见 [Android Relay MVP](ANDROID.md)。

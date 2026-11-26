@@ -1,4 +1,5 @@
-import { accessSync, constants, rmSync, writeFileSync } from 'node:fs';
+import { AndroidRelay } from '../src/android-relay.ts';
+import { readFileSync, accessSync, constants, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PairingSlots, pairingCaddy, startPairedRelays } from '../src/cua-pairing.ts';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -22,7 +23,9 @@ if (process.env.CUA_PAIR_RELAY_URL) {
     console.error('Cua 管理台配对未启用，请核对本机组件、Relay 地址和状态目录。');
   }
 }
-const stop = () => controller.abort();
+const android = process.env.ANDROID_REGISTRY_FILE ? new AndroidRelay(JSON.parse(readFileSync(process.env.ANDROID_REGISTRY_FILE,'utf8'))) : undefined;
+if (android) android.http.listen(18876,'127.0.0.1');
+const stop = () => { controller.abort(); android?.close(); };
 process.once('SIGTERM',stop);
 process.once('SIGINT',stop);
 
@@ -32,7 +35,7 @@ async function run() {
   let retryMs = 1000;
   while (!controller.signal.aborted) {
     const socket = new Socket(endpoint,{headers:{Authorization:'Bearer ' + token}});
-    const shutdown = serveConnection(socket as unknown as WebSocket,socketPath,pairing);
+    const shutdown = serveConnection(socket as unknown as WebSocket,socketPath,pairing,android);
     let openedAt = 0;
     await new Promise<void>(resolve => {
       const finish = () => {

@@ -34,6 +34,7 @@ export function cuaCallIsReadOnly(name: string, args: Record<string, unknown>) {
   if (name === 'space_job') return args.action === 'list' || args.action === 'status' || args.action === 'logs';
   if (name === 'call_tool') {
     if (typeof args.tool !== 'string') return false;
+    if (typeof args.space === 'string' && args.space.startsWith('android:')) return args.tool === 'android_get_screen_state';
     if (CUA_DRIVER_READ_ONLY_TOOLS.has(args.tool)) return true;
     // check_permissions 默认会弹出系统授权对话框，仅明确传 prompt=false 时才是纯只读查询。
     return args.tool === 'check_permissions' && isPlainRecord(args.arguments) && args.arguments.prompt === false;
@@ -136,6 +137,15 @@ export function cuaQueryAllowed(tool: string, args: unknown, spaces?: readonly s
   else if (tool === 'space_job') valid = validSpaceJob(args);
   else if (tool === 'call_tool') valid = Check(driverCallQuery, args) && (args.arguments === undefined || isPlainRecord(args.arguments));
   if (!valid || !isPlainRecord(args) || typeof args.space !== 'string') return false;
+  if (args.space.startsWith('android:')) {
+    if (!spaces?.includes(args.space)) return false;
+    if (tool === 'list_tools') return true;
+    if (tool !== 'call_tool') return false;
+    const params = args.arguments ?? {};
+    if (!isPlainRecord(params)) return false;
+    return args.tool === 'android_get_screen_state' ? !Object.keys(params).length : args.tool === 'android_click_node' &&
+      Object.keys(params).length === 1 && typeof params.node_id === 'string' && /^node_[a-zA-Z0-9_-]{1,64}$/.test(params.node_id);
+  }
   return !spaces || spaces.includes(args.space);
 }
 const toolList = Type.Array(Type.Object({
@@ -217,7 +227,7 @@ export async function cuaResult(tool: string, args: Record<string,unknown>, remo
     if (remote.isError) return mcpFailure('cua_unavailable');
     let directory;
     if (tool === 'list_spaces') {
-      const cards = cuaCards(remote,spaces);
+      const cards = cuaCards(remote,spaces).filter(card=>spaces || !card.id.startsWith('android:'));
       const names: Record<string,string> = await env.REGISTRY.getByName('main').cuaNames(cards.map(card => card.id),revision);
       directory = {spaces:cards.map(card => ({...card,name:deviceAlias(names,card.id) ?? card.name}))};
     }
