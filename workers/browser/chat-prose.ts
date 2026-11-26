@@ -35,7 +35,7 @@ export function chatProse(text: string): HTMLElement {
       continue;
     }
     list = undefined;
-    const fence = /^ {0,3}(`{3,})[\w+.#-]*\s*$/.exec(line);
+    const fence = /^ {0,3}(`{3,})([\w+.#-]*)\s*$/.exec(line);
     const heading = /^#{1,6}\s+(.+)$/.exec(line);
     if (fence) {
       endParagraph();
@@ -45,7 +45,8 @@ export function chatProse(text: string): HTMLElement {
         if (close && close[1]!.length >= fence[1]!.length) break;
         i++;
       }
-      prose.append(el("pre", {}, [el("code", { text: lines.slice(begin, i).join("\n") })]));
+      const code = el("pre", {}, [el("code", { text: lines.slice(begin, i).join("\n") })]);
+      prose.append(fence[2] ? el("figure", {}, [el("figcaption", { text: fence[2] }), code]) : code);
     } else if (heading) {
       endParagraph();
       prose.append(el("h4", {}, inline(heading[1]!)));

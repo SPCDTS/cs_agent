@@ -60,7 +60,7 @@ export function renderChatMessages(messages:C.ChatMessage[]){
     ? document.activeElement.parentElement?.dataset.entry : undefined;
   const content: HTMLElement[]=[];
   for(const m of messages){
-    const message=chatCard(m, m.status ? chatStatus[m.status] || m.status : "", downloadAsset, expanded);
+    const message=chatCard(m, m.status ? chatStatus[m.status] || m.status : "", downloadAsset, expanded.has(m.id));
     if(m.turnId&&!seen.has(m.turnId)&&m.role==="assistant"){seen.add(m.turnId);content.push(turnActions(m.turnId));}
     content.push(message);
     if(m.turnId&&!seen.has(m.turnId)&&m.role==="user"){seen.add(m.turnId);content.push(turnActions(m.turnId));}

@@ -2,16 +2,18 @@ import { el } from "./dom";
 
 // 旧会话只保留 renderEventInput 生成的可展示文本，可能止于单条事件中途。
 type EventItem = { ref: string; actor: string; title: string; time: string; summary: string };
-type EventBatch = { source: string; count: number; items: EventItem[]; extra: number; tail: string };
+type EventBatch = { source: string; count: number; time: string; items: EventItem[]; extra: number; tail: string };
 
-function readBatch(source: string, text: string): EventBatch | undefined {
+export function readBatch(source: string, text: string): EventBatch | undefined {
   const lines = text.split("\n");
-  const header = /^\[外部事件\] ([\w:-]+) · (?:新邮件|事件) (\d+) 件 · \d\d-\d\d \d\d:\d\d（北京时间）$/.exec(lines[0] ?? "");
+  const header = /^\[外部事件\] ([\w:-]+) · (?:新邮件|事件) (\d+) 件 · (\d\d-\d\d \d\d:\d\d)（北京时间）$/.exec(lines[0] ?? "");
   if (!header || (source !== "event" && source !== header[1])) return;
-  const batch: EventBatch = { source: header[1]!, count: Number(header[2]), items: [], extra: 0, tail: "" };
+  const batch: EventBatch = { source: header[1]!, count: Number(header[2]), time: header[3]!, items: [], extra: 0, tail: "" };
   let index = 1;
   while (index < lines.length) {
     const line = lines[index]!;
+    // 空批次仍有批次头与汇总行之间的换行。
+    if (index === 1 && batch.count === 0 && line === "") { index++; continue; }
     const overflow = /^\[另有 (\d+) 件未展开\]$/.exec(line);
     if (overflow && index === lines.length - 1) {
       batch.extra = Number(overflow[1]);
@@ -48,7 +50,7 @@ function eventItem(source: string, item: EventItem) {
   const excerpt = action ? action.excerpt : item.summary;
   return el("li", { className: "event-item" }, [
     el("div", { className: "event-byline" }, [
-      context ? el("span", {}, [context]) : null,
+      el("span", {}, [context, source === "gmail" && item.ref ? el("small", { text: (context ? " · " : "") + "邮件 ID " + item.ref }) : null]),
       el("time", { title: "事件时间（北京时间）", text: item.time }),
     ]),
     el("h4", { text: title || (source === "gmail" ? "（无主题）" : "（无标题）") }),
@@ -76,14 +78,14 @@ function githubAction(summary: string) {
   return { label: [label, result].filter(Boolean).join(" · "), tone: "", excerpt: rest.join(": ") };
 }
 
-export function eventContent(source: string, text: string, key: string, open: boolean): HTMLElement | undefined {
-  const batch = readBatch(source, text);
-  if (!batch) return;
+export function eventContent(source: string, batch: EventBatch, key: string, open: boolean): HTMLElement {
   const unit = source === "gmail" ? "封邮件" : "条事件";
   const partial = batch.items.length < batch.count;
+  const metadata: string[] = [];
+  if (source === "event") metadata.push(batch.source);
+  if (batch.count !== 1 || partial) metadata.push((partial ? "已展示 " + batch.items.length + " / " : "") + batch.count + " " + unit);
   return el("div", { className: "event-batch" }, [
-    batch.count > 1 || source === "event" || partial ? el("div", { className: "event-count",
-      text: [source === "event" ? batch.source : "", partial ? "已展示 " + batch.items.length + " / " + batch.count + " " + unit : batch.count + " " + unit].filter(Boolean).join(" · ") }) : null,
+    metadata.length ? el("div", { className: "event-count", text: metadata.join(" · ") }) : null,
     batch.items.length ? el("ul", { className: "event-items" }, batch.items.slice(0, 2).map(item => eventItem(source, item))) : null,
     batch.items.length > 2 ? el("details", { className: "event-more", "data-entry": key, open }, [
       el("summary", { text: "其余 " + (batch.items.length - 2) + " " + unit }),

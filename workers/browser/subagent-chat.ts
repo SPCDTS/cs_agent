@@ -6,7 +6,6 @@ import { SubagentConversationSchema, type SubagentConversation } from "./history
 import { scheduleConsolePoll } from "./trace";
 import { refreshChatChildren } from "./chat-navigation";
 import { chatProse } from "./chat-prose";
-import { rawMessage } from "./chat-cards";
 
 type Entry=SubagentConversation["entries"][number];
 const entries=new Map<number,Entry>();
@@ -65,7 +64,7 @@ function renderSubagentMessages(older:boolean){
         const body = message.role === "user" ? el("div", { className: "chat-literal", text: message.text }) : chatProse(message.text);
         rows.push(el("article",{className:"chat-message "+(message.role==="user"?"user":"assistant")},[
           el("header",{className:"message-meta"},[el("strong",{text:message.role==="user"?"任务 / 跟进":"子 agent"}),message.at?el("time",{text:bjTime(message.at)}):null]),
-          el("div",{className:"chat-body"},[body, body.textContent !== message.text ? rawMessage(key, message.text, open.has(key)) : null]),
+          el("div",{className:"chat-body"},[body]),
         ]));
       }
       for(const tool of message.toolCalls??[])detail(key+":"+tool.id,tool.name+" · 调用参数",tool.arguments);
