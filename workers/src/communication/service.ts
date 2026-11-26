@@ -192,7 +192,7 @@ export async function verifyMessage(env: Env, to: string, message: AgentMessage,
   if (!await allowed(env, message.from, to)) throw new Error("agent_session_denied");
   if (!await endpoint(env, message.from).agentProof(message.id, fingerprint(message))) throw new Error("agent_source_unverified");
 }
-export async function importFiles(env: Env, message: AgentMessage, save: (path: string, bytes: Uint8Array, operationId: string) => Promise<unknown>): Promise<string[]> {
+export async function importFiles(env: Env, message: AgentMessage, save: (path: string, bytes: Uint8Array, operationId: string) => Promise<void>): Promise<string[]> {
   const paths: string[] = [];
   const source = new MediaRepository({ bucket: env.ASSETS, scope: message.from });
   let total = 0;
