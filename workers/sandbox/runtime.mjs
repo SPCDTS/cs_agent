@@ -91,7 +91,13 @@ async function removeTree(dir) {
 async function replaceTree(stage, destination) {
   await removeTree(destination);
   await fs.mkdir(path.dirname(destination), { recursive: true });
-  await fs.rename(stage, destination);
+  try {
+    await fs.rename(stage, destination);
+  } catch (error) {
+    if (error.code !== "EXDEV") throw error;
+    await fs.cp(stage, destination, { recursive: true, verbatimSymlinks: true });
+    await removeTree(stage);
+  }
   await setTreeReadOnly(destination);
 }
 export function createSandboxRuntime({
@@ -208,34 +214,21 @@ export function createSandboxRuntime({
 
   async function materializeSkill({ files, revision, installNpmDeps = false, depsHash = "" }) {
     if (!files || typeof files !== "object" || typeof revision !== "string" || !revision) fail("invalid_request");
-    const currentRev = await fs.readFile(path.join(skillCodeRoot, ".cs-skill-revision"), "utf8").catch(() => "");
-    if (currentRev !== revision) {
-      const stage = await fs.mkdtemp(path.join(os.tmpdir(), "cs-skill-code-"));
-      try {
-        for (const [rawPath, text] of Object.entries(files)) {
-          const rel = relativePath(rawPath);
-          if (typeof text !== "string") fail("invalid_request");
-          const target = path.join(stage, rel);
-          await fs.mkdir(path.dirname(target), { recursive: true });
-          const executable = rel.endsWith(".sh") || text.startsWith("#!");
-          await fs.writeFile(target, text, { mode: executable ? 0o555 : 0o444 });
-        }
-        await fs.writeFile(path.join(stage, ".cs-skill-revision"), revision, { mode: 0o444 });
-        await replaceTree(stage, skillCodeRoot);
-      } catch (error) {
-        await removeTree(stage).catch(() => {});
-        throw error;
-      }
-    }
     if (installNpmDeps) {
       const currentDeps = await fs.readFile(path.join(skillDepsRoot, ".cs-deps-revision"), "utf8").catch(() => "");
       if (currentDeps !== depsHash) {
         if (typeof files["package.json"] !== "string" || typeof files["package-lock.json"] !== "string") fail("invalid_request");
-        const stage = await fs.mkdtemp(path.join(os.tmpdir(), "cs-skill-deps-"));
+        const depsParent = path.dirname(skillDepsRoot);
+        await fs.mkdir(depsParent, { recursive: true });
+        const stage = await fs.mkdtemp(path.join(depsParent, ".cs-deps-stage-"));
         const npmCache = await fs.mkdtemp(path.join(os.tmpdir(), "cs-npm-cache-"));
         try {
           await fs.writeFile(path.join(stage, "package.json"), files["package.json"]);
           await fs.writeFile(path.join(stage, "package-lock.json"), files["package-lock.json"]);
+          await fs.chmod(stage, 0o755);
+          await setTreeOwner(stage, own);
+          await fs.chmod(npmCache, 0o755);
+          await setTreeOwner(npmCache, own);
           const npmEnv = { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: npmCache, npm_config_cache: npmCache, ...env };
           const installed = await runProcess({
             command: "npm",
@@ -253,6 +246,33 @@ export function createSandboxRuntime({
         } finally {
           await removeTree(npmCache).catch(() => {});
         }
+      }
+    }
+    const currentRev = await fs.readFile(path.join(skillCodeRoot, ".cs-skill-revision"), "utf8").catch(() => "");
+    const hasLinkedModules = !installNpmDeps
+      || Object.keys(files).some(key => key === "node_modules" || key.startsWith("node_modules/"))
+      || await fs.lstat(path.join(skillCodeRoot, "node_modules")).then(() => true, () => false);
+    if (currentRev !== revision || !hasLinkedModules) {
+      const codeParent = path.dirname(skillCodeRoot);
+      await fs.mkdir(codeParent, { recursive: true });
+      const stage = await fs.mkdtemp(path.join(codeParent, ".cs-skill-stage-"));
+      try {
+        for (const [rawPath, text] of Object.entries(files)) {
+          const rel = relativePath(rawPath);
+          if (typeof text !== "string") fail("invalid_request");
+          const target = path.join(stage, rel);
+          await fs.mkdir(path.dirname(target), { recursive: true });
+          const executable = rel.endsWith(".sh") || text.startsWith("#!");
+          await fs.writeFile(target, text, { mode: executable ? 0o555 : 0o444 });
+        }
+        if (installNpmDeps && !Object.keys(files).some(key => key === "node_modules" || key.startsWith("node_modules/"))) {
+          await fs.symlink(path.join(skillDepsRoot, "node_modules"), path.join(stage, "node_modules"));
+        }
+        await fs.writeFile(path.join(stage, ".cs-skill-revision"), revision, { mode: 0o444 });
+        await replaceTree(stage, skillCodeRoot);
+      } catch (error) {
+        await removeTree(stage).catch(() => {});
+        throw error;
       }
     }
     return { ready: true };

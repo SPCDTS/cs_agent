@@ -206,6 +206,49 @@ test("受控 Skill 运行时：只读物化代码、shell:false 防注入、状�
       /path_denied/,
     );
     await skillRuntime.clearSkillOut();
+
+    // 验证 npm ci 暂存目录同父级放置、缓存目录可写与 ESM import 解析
+    const fakeBin = path.join(skillBase, "fake-bin");
+    mkdirSync(fakeBin, { recursive: true });
+    const fakeNpm = path.join(fakeBin, "npm");
+    writeFileSync(
+      fakeNpm,
+      [
+        "#!/bin/sh",
+        "set -e",
+        "mkdir -p node_modules/esm-demo",
+        "printf '{\"name\":\"esm-demo\",\"type\":\"module\",\"exports\":\"./index.mjs\"}' > node_modules/esm-demo/package.json",
+        "printf 'export const msg = \"esm-ok\";\\n' > node_modules/esm-demo/index.mjs",
+        "printf 'ok' > \"$npm_config_cache/cache-hit\"",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const depsRuntime = createSandboxRuntime({
+      root: skillRoot,
+      shell,
+      env: { PATH: `${fakeBin}:${envPath}` },
+      skillCodeRoot,
+      skillDepsRoot,
+      cacheRoot,
+    });
+    await depsRuntime.materializeSkill({
+      revision: "rev-esm-1",
+      installNpmDeps: true,
+      depsHash: "deps-h1",
+      files: {
+        "runner.json": "{}",
+        "package.json": "{\"name\":\"demo\",\"type\":\"module\"}",
+        "package-lock.json": "{\"lockfileVersion\":3}",
+        "scripts/esm-run.mjs": "import { msg } from 'esm-demo'; console.log(msg);\n",
+      },
+    });
+    const esmRes = await depsRuntime.execSkill({
+      argv: ["node", "scripts/esm-run.mjs"],
+      stdin: "{}",
+      timeoutMs: 10_000,
+    });
+    assert.equal(esmRes.code, 0, esmRes.stderr);
+    assert.equal(esmRes.stdout.trim(), "esm-ok");
   } finally {
     makeWritable(skillBase);
     rmSync(skillBase, { recursive: true, force: true });

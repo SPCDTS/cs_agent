@@ -191,12 +191,40 @@ describe("skill runtime & encrypted shared state", () => {
       const results = await Promise.all([p1, p2, p3, p4]);
       expect(results.every(r => r.stdout === "restored")).toBe(true);
 
+      // 5 次滚动写入后只保留最近 3 份 manifest，淘汰版本的孤儿 blob 被清理（session.json 仍被引用保留）
+      for (let i = 1; i <= 5; i++) {
+        await manager.importFiles({
+          skill: "shop",
+          files: [{ path: "rolling.txt", bytes: encoder.encode("rolling-secret-version-" + i) }],
+        });
+      }
+      const afterRolling = await env.ASSETS.list({ prefix });
+      const manifestObjs = afterRolling.objects.filter(obj => obj.key.includes("/manifests/"));
+      const blobKeys = new Set(afterRolling.objects.filter(obj => obj.key.includes("/blobs/")).map(obj => obj.key));
+      expect(manifestObjs).toHaveLength(3);
+      expect(blobKeys.size).toBe(4);
+      for (const evictedIdx of [1, 2]) {
+        const evictedHash = await sha256(encoder.encode("rolling-secret-version-" + evictedIdx));
+        expect(blobKeys.has(`${prefix}blobs/${evictedHash}`)).toBe(false);
+      }
+      for (const liveIdx of [3, 4, 5]) {
+        const liveHash = await sha256(encoder.encode("rolling-secret-version-" + liveIdx));
+        expect(blobKeys.has(`${prefix}blobs/${liveHash}`)).toBe(true);
+      }
+
+      // 路径冲突（文件与目录重叠）在写 R2 前拒绝，不留下孤儿 blob
+      await manager.importFiles({ skill: "shop", files: [{ path: "dir/file.txt", bytes: encoder.encode("ok") }] });
+      const beforeConflictCount = (await env.ASSETS.list({ prefix: `${prefix}blobs/` })).objects.length;
+      await expect(manager.importFiles({ skill: "shop", files: [{ path: "dir", bytes: encoder.encode("conflict-blob") }] }))
+        .rejects.toThrow("workspace_conflict");
+      expect((await env.ASSETS.list({ prefix: `${prefix}blobs/` })).objects.length).toBe(beforeConflictCount);
+
       await manager.clear("shop");
       expect((await manager.list("shop")).fileCount).toBe(0);
     });
   });
 
-  it("主人导入/清空加密态与授权群，群在受控沙箱复用状态并支持中途撤权与 41 告警闭环", async () => {
+  it("主人导入状态并授权群，群在受控沙箱执行查询与产物消费并拦截越权", async () => {
     await seedShopSkill();
     const secret = "owner-cookie-secret-xyz";
     const ownerSandbox = env.SANDBOX.getByName("owner");
@@ -204,9 +232,6 @@ describe("skill runtime & encrypted shared state", () => {
     await ownerSandbox.writeObject("r2://login/extra.json", JSON.stringify({ token: secret }));
 
     const runMock = vi.spyOn(SandboxDO.prototype, "skillRun");
-    const bashMock = vi.spyOn(SandboxDO.prototype, "skillOwnerBash");
-
-    // 1. owner 导入状态、尝试授权 ownerOnly 被拒、授权 query 给群
     const code = (src: string): Parameters<typeof scriptedModel>[0] => [{ name: "codemode", args: { code: src } }, { name: "", args: {} }];
     const seen = scriptedModel([
       ...code(`
@@ -216,7 +241,6 @@ describe("skill runtime & encrypted shared state", () => {
         try { await tools.skill_grant({ skill: 'shop', group: '${group}', actions: ['login'] }); } catch (e) { text(String(e)); }
         text(await tools.skill_grant({ skill: 'shop', group: '${group}', actions: ['query'] }));
       `),
-      // 2. 群会话查看可用动作并执行 query
       ...code(`
         text(await describeNamespace('skills'));
         text(await tools.skill_actions({}));
@@ -224,17 +248,10 @@ describe("skill runtime & encrypted shared state", () => {
         text(res);
         text(await tools.r2_read({ key: res.outputs[0].path }));
       `),
-      // 3. 群尝试调用 ownerOnly / 管理工具被拒
       ...code(`
         try { await tools.skill_run({ skill: 'shop', action: 'login' }); } catch (e) { text(String(e)); }
         try { await tools.skill_owner_bash({ skill: 'shop', command: 'cat /work/state/cookie.txt' }); } catch (e) { text(String(e)); }
       `),
-      // 4. 群执行中途被撤权 -> 结果被丢弃
-      ...code(`text(await tools.skill_run({ skill: 'shop', action: 'query', args: { q: 'midflight' } }));`),
-      // 5. 群执行返回 41 -> 触发告警
-      ...code(`text(await tools.skill_run({ skill: 'shop', action: 'query', args: { q: 'expired' } }));`),
-      // 6. owner 跑 skill_owner_bash 登录成功 -> 关闭告警
-      ...code(`text(await tools.skill_owner_bash({ skill: 'shop', command: 'echo ok' }));`),
     ]);
 
     await env.THREAD.getByName("owner").submit(input(1, "导入并授权", 10000001));
@@ -259,26 +276,36 @@ describe("skill runtime & encrypted shared state", () => {
     await env.THREAD.getByName(group).submit(input(3, "越权测试", 10000004, 200000001, true));
     expect(seen.outputs[2]).toContain("skill_denied");
     expect(seen.outputs[2]).toContain("does not exist");
+  });
 
-    // 4. 执行中途撤权
+  it("群执行中途撤权丢弃输出，退出码 41 触发告警且主人重登后关闭", async () => {
+    await seedShopSkill();
+    await registry().skillRuntimeGrant("shop", group, ["query"]);
+    const runMock = vi.spyOn(SandboxDO.prototype, "skillRun");
+    const bashMock = vi.spyOn(SandboxDO.prototype, "skillOwnerBash");
+    const code = (src: string): Parameters<typeof scriptedModel>[0] => [{ name: "codemode", args: { code: src } }, { name: "", args: {} }];
+    const seen = scriptedModel([
+      ...code(`text(await tools.skill_run({ skill: 'shop', action: 'query', args: { q: 'midflight' } }));`),
+      ...code(`text(await tools.skill_run({ skill: 'shop', action: 'query', args: { q: 'expired' } }));`),
+      ...code(`text(await tools.skill_owner_bash({ skill: 'shop', command: 'echo ok' }));`),
+    ]);
+
     runMock.mockImplementationOnce(async () => {
       await registry().skillRuntimeGrant("shop", group, []);
       return { stdout: "should-not-leak", stderr: "", code: 0, timedOut: false, truncated: false, stateRevision: "rev-3", outputs: [] };
     });
     await env.THREAD.getByName(group).submit(input(4, "中途撤权", 10000004, 200000001, true));
-    expect(seen.outputs[3]).toContain("skill_denied");
-    expect(seen.outputs[3]).not.toContain("should-not-leak");
+    expect(seen.outputs[0]).toContain("skill_denied");
+    expect(seen.outputs[0]).not.toContain("should-not-leak");
 
-    // 5. 重新授权后返回 41 触发告警
     await registry().skillRuntimeGrant("shop", group, ["query"]);
     runMock.mockResolvedValueOnce({
       stdout: "", stderr: "login expired", code: 41, timedOut: false, truncated: false, stateRevision: "rev-4", outputs: [],
     });
     await env.THREAD.getByName(group).submit(input(5, "失效测试", 10000004, 200000001, true));
-    expect(seen.outputs[4]).toContain('"authRequired":true');
+    expect(seen.outputs[1]).toContain('"authRequired":true');
     expect(await registry().alerts()).toMatchObject([{ kind: "credential_login", scope: "skill:shop", closedAt: null }]);
 
-    // 6. owner 重新登录后关闭告警
     bashMock.mockResolvedValueOnce({
       stdout: "logged in", stderr: "", code: 0, timedOut: false, truncated: false, stateRevision: "rev-5", outputs: [],
     });
@@ -323,8 +350,11 @@ describe("skill runtime & encrypted shared state", () => {
     const sub = await onlySubagent(group);
     await vi.waitFor(() => expect(runMock).toHaveBeenCalledTimes(1));
 
-    // 子任务仍在运行时撤权，实时授权校验应立即拒绝
+    // 子任务仍在运行时撤权并重新授予同名动作（生成新 revision）：旧子任务不得借新授权复活
     await registry().skillRuntimeGrant("shop", group, []);
+    await registry().skillRuntimeGrant("shop", group, ["query"]);
+    const actionsAfterRegrant = await runInDurableObject(env.THREAD.getByName(group), instance => instance.subagentSkillActions(sub.id));
+    expect(JSON.parse(actionsAfterRegrant.output?.[0]?.type === "text" ? actionsAfterRegrant.output[0].text : "{}")).toEqual({ skills: [] });
     const denied = await runInDurableObject(env.THREAD.getByName(group), instance => instance.subagentSkillRun(sub.id, {
       skill: "shop", action: "query", args: { q: "mouse" }, operationId: "after-revoke",
     }));
@@ -339,7 +369,7 @@ describe("skill runtime & encrypted shared state", () => {
     expect(outputs.child[1]).toContain("denied");
   });
 
-  it("管理台 /admin/skill-runtime 接口支持列表、保存/拒绝授权与清空加密登录态", async () => {
+  it("管理台 /admin/skill-runtime 接口支持列表、保存/拒绝授权、删除同步清理与删后清态", async () => {
     await seedShopSkill();
     await env.SANDBOX.getByName("skill-state:shop").skillStateImport({
       skill: "shop",
@@ -368,10 +398,19 @@ describe("skill runtime & encrypted shared state", () => {
     expect(okGrant.status).toBe(200);
     expect(await okGrant.json()).toMatchObject({ skill: "shop", group, actions: ["query"] });
 
+    // 删除技能自动清理加密登录态，之后新建同名技能不会静默继承旧登录态
+    expect(await registry().skillDelete("shop")).toBe(true);
+    expect((await env.SANDBOX.getByName("skill-state:shop").skillStateList("shop")).fileCount).toBe(0);
+    expect((await registry().alerts())[0]?.closedAt).toEqual(expect.any(Number));
+
+    // 对已删除技能的残留状态直接调用清理接口仍允许成功
+    await env.SANDBOX.getByName("skill-state:shop").skillStateImport({
+      skill: "shop",
+      files: [{ path: "orphan.txt", bytes: encoder.encode("stale") }],
+    });
     const clearRes = await call("POST", "/admin/skill-runtime/shop/state/clear");
     expect(clearRes.status).toBe(200);
     expect(await clearRes.json()).toEqual({ skill: "shop", cleared: true });
     expect((await env.SANDBOX.getByName("skill-state:shop").skillStateList("shop")).fileCount).toBe(0);
-    expect((await registry().alerts())[0]?.closedAt).toEqual(expect.any(Number));
   });
 });

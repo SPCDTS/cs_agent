@@ -61,11 +61,6 @@ export const SKILL_RUNTIME_ROUTES: AdminRoute[] = [
     handle: async ({ env, params }) => {
       if (!Check(SkillNameSchema, params.name)) throw new HttpError(400, "invalid_skill");
       const registry = env.REGISTRY.getByName("main");
-      try {
-        await registry.skillRuntimeResolveOwnerSkill(params.name);
-      } catch (error) {
-        mapSkillRuntimeError(error);
-      }
       await env.SANDBOX.getByName("skill-state:" + params.name).skillStateClear(params.name);
       await registry.skillRuntimeAuthResolved(params.name);
       return json({ skill: params.name, cleared: true });

@@ -187,6 +187,36 @@ export class SkillStateManager {
       if (old) evicted.push(old);
     }
     await this.deps.storage.put({ [SKILL_STATE_HEAD]: next.revision, [SKILL_STATE_RECENT]: recent });
+    if (!evicted.length) return;
+
+    const evictedHashes = new Set<string>();
+    for (const old of evicted) {
+      try {
+        const oldManifest = await this.loadManifest(skill, old);
+        for (const file of oldManifest.files) evictedHashes.add(file.sha256);
+      } catch { /* 已被删除或损坏的旧清单不阻塞清理 */ }
+    }
+    if (evictedHashes.size) {
+      const liveHashes = new Set(next.files.map(file => file.sha256));
+      let liveLoaded = true;
+      for (const rev of recent) {
+        if (rev === next.revision) continue;
+        try {
+          const liveManifest = await this.loadManifest(skill, rev);
+          for (const file of liveManifest.files) liveHashes.add(file.sha256);
+        } catch {
+          liveLoaded = false;
+          break;
+        }
+      }
+      if (liveLoaded) {
+        for (const hash of evictedHashes) {
+          if (!liveHashes.has(hash)) {
+            await this.deps.bucket.delete(`${prefix}/blobs/${hash}`).catch(() => {});
+          }
+        }
+      }
+    }
     for (const old of evicted) {
       await this.deps.bucket.delete(`${prefix}/manifests/${old}`).catch(() => {});
     }
@@ -307,20 +337,33 @@ export class SkillStateManager {
       const fileMap = new Map(current.files.map(file => [file.path, file]));
       const dirSet = new Set(current.directories);
       const seen = new Set<string>();
+      const prepared: Array<{ rel: string; bytes: Uint8Array }> = [];
+      let candidateTotal = current.totalBytes;
       for (const entry of input.files) {
         const rel = relativeWorkPath(entry.path);
-        if (seen.has(rel) || dirSet.has(rel)) throw new Error("invalid_request");
+        if (seen.has(rel)) throw new Error("invalid_request");
+        if (dirSet.has(rel) || current.files.some(file => rel.startsWith(file.path + "/"))) throw new Error("workspace_conflict");
         seen.add(rel);
         if (!(entry.bytes instanceof Uint8Array) || entry.bytes.byteLength > SKILL_STATE_FILE_MAX_BYTES) throw new Error("too_large");
-      }
-      for (const entry of input.files) {
-        const rel = relativeWorkPath(entry.path);
-        const hash = await sha256(entry.bytes);
-        const encrypted = await this.deps.vault.encryptBytes(entry.bytes, blobIdentity(input.skill, hash));
-        await this.deps.bucket.put(`${prefix}/blobs/${hash}`, encrypted);
-        fileMap.set(rel, { path: rel, sha256: hash, bytes: entry.bytes.byteLength, mime: "application/octet-stream", mode: 0o600 });
         const parts = rel.split("/");
-        for (let i = 1; i < parts.length; i++) dirSet.add(parts.slice(0, i).join("/"));
+        for (let i = 1; i < parts.length; i++) {
+          const ancestor = parts.slice(0, i).join("/");
+          if (fileMap.has(ancestor) || seen.has(ancestor)) throw new Error("workspace_conflict");
+          dirSet.add(ancestor);
+        }
+        for (const prior of seen) {
+          if (prior !== rel && (prior.startsWith(rel + "/") || rel.startsWith(prior + "/"))) throw new Error("workspace_conflict");
+        }
+        const replaced = fileMap.get(rel);
+        candidateTotal += entry.bytes.byteLength - (replaced?.bytes ?? 0);
+        prepared.push({ rel, bytes: entry.bytes });
+      }
+      if (candidateTotal > SKILL_STATE_MAX_BYTES) throw new Error("workspace_quota");
+      for (const { rel, bytes } of prepared) {
+        const hash = await sha256(bytes);
+        const encrypted = await this.deps.vault.encryptBytes(bytes, blobIdentity(input.skill, hash));
+        await this.deps.bucket.put(`${prefix}/blobs/${hash}`, encrypted);
+        fileMap.set(rel, { path: rel, sha256: hash, bytes: bytes.byteLength, mime: "application/octet-stream", mode: 0o600 });
       }
       const files = [...fileMap.values()].sort((a, b) => a.path.localeCompare(b.path));
       const directories = [...dirSet].sort();

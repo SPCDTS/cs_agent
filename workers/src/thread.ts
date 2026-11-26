@@ -899,16 +899,9 @@ export class ThreadDO extends DurableObject<Env> {
     if (!access || !snapshot || snapshot.scope !== access.authority.scope) {
       return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
     }
-    const current = formatSkillRuntimeList(await this.env.REGISTRY.getByName("main").skillRuntimeList(access.authority.scope));
-    const bySkill = new Map(snapshot.grants.map(grant => [grant.skill, new Set(grant.actions)]));
-    const skills = current
-      .map(item => {
-        const allowed = bySkill.get(item.skill);
-        if (!allowed) return;
-        const actions = item.actions.filter(action => allowed.has(action.name) && !("ownerOnly" in action && action.ownerOnly));
-        return actions.length ? { skill: item.skill, description: item.description, actions } : undefined;
-      })
-      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+    const skills = formatSkillRuntimeList(
+      await this.env.REGISTRY.getByName("main").skillRuntimeListForSnapshot(access.authority.scope, snapshot),
+    );
     return jsonToolResult({ skills });
   }
   async subagentSkillRun(id: string, call: { skill: string; action: string; args?: unknown; timeoutSec?: number; operationId: string }): ReturnType<SubagentCapabilityHost["subagentSkillRun"]> {

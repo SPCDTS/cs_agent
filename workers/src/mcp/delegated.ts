@@ -96,7 +96,7 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
         }),
         defineTool({
           name: "skill_run",
-          description: "在隔离的技能加密状态沙箱中运行已授权动作。",
+          description: "在隔离的技能加密状态沙箱中运行已授权动作；输出产物 outputs[].path（r2://.tmp/...）可向父会话汇报以供读取或经 send_file 发送。",
           parameters: Type.Object({
             skill: SkillNameSchema,
             action: SkillActionNameSchema,

@@ -261,12 +261,11 @@ export function skillRuntimeExtension(host: SkillRuntimeHost) {
     }),
     defineTool({
       name: "skill_state_clear",
-      description: "仅主人交互回合可用：清空指定技能的全部加密登录态文件。",
+      description: "仅主人交互回合可用：清空指定技能的全部加密登录态文件（含已删除技能的残留状态）。",
       replay: "unsafe",
       structuredOutputSchema: resultSchema,
       parameters: Type.Object({ skill: SkillNameSchema }, strict),
       execute: ({ skill }, api, context) => run(api, context, "state_clear", skill, async () => {
-        await host.registry.skillRuntimeResolveOwnerSkill(skill);
         const res = await host.sandbox("skill-state:" + skill).skillStateClear(skill);
         await host.registry.skillRuntimeAuthResolved(skill);
         return { skill, ...res };
@@ -304,7 +303,7 @@ export function skillRuntimeExtension(host: SkillRuntimeHost) {
       }),
       defineTool({
         name: "skill_run",
-        description: "在隔离的技能加密状态沙箱中运行已授权动作，自动写回更新后的登录态并将输出产物写入 r2://.tmp/...。",
+        description: "在隔离的技能加密状态沙箱中运行已授权动作，自动写回更新后的登录态并将输出产物写入 r2://.tmp/...；outputs[].path 可直接传给 send_file({ path }) 发送给用户（有编码权限的会话也可用 r2_read 读取）。",
         replay: "unsafe",
         structuredOutputSchema: resultSchema,
         parameters: Type.Object({
