@@ -29,7 +29,7 @@ export class SandboxDO extends DurableObject<Env> {
   static readonly IDLE_MS = 3 * 60 * 1000;
   private ready = false;
   private runtimeGeneration = 0;
-  private readonly objects = new ObjectFiles(this.env.ASSETS, `cs-agent/v1/object-files/${this.ctx.id}/`);
+  private readonly objects = new ObjectFiles(this.env.ASSETS, this.ctx.id.toString());
   private readonly client = nativeSandboxClient({ container: () => this.startRuntime(), backup: async () => {
     const container = await this.startRuntime();
     return new DirectoryBackup(container, this.ctx.exports.DirectoryBackupGateway, {
@@ -130,9 +130,7 @@ export class SandboxDO extends DurableObject<Env> {
   async readObject(key: string) { return this.objects.read(key); }
   async writeObject(key: string, content: string | Uint8Array) { return this.objects.write(key, content); }
   async createOutputPrefix(prefix = "output-"): Promise<string> {
-    const key = this.objects.outputPrefix(prefix);
-    this.ctx.waitUntil(this.objects.cleanupOutputs(Date.now()).catch(() => console.warn({ event: "codemode_output_cleanup_failed" })));
-    return key;
+    return this.objects.outputPrefix(prefix);
   }
   async retireAgentAttachments(messageId: string, count: number): Promise<void> {
     if (!/^agent:[0-9a-f]{64}$/.test(messageId) || !Number.isInteger(count) || count < 0 || count > 5) throw new Error("invalid_request");

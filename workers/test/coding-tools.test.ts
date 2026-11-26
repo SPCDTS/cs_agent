@@ -74,12 +74,12 @@ describe("coding tools suite", () => {
       expect(decode((await sandbox.readBlob("local.txt")).bytes)).toBe("修改副本");
     });
     it("超长文本通过同一文件环境保存全文，输出返回可继续读取的路径", async () => {
-      vi.spyOn(SandboxDO.prototype, "createOutputPrefix").mockResolvedValue("r2://.codemode/full-text");
+      vi.spyOn(SandboxDO.prototype, "createOutputPrefix").mockResolvedValue("r2://.tmp/1790000000000/codemode/full-text");
       const write = vi.spyOn(SandboxDO.prototype, "writeObject").mockResolvedValue({ bytes: 50000 });
       const seen = scriptedModel([{ name: "codemode", args: { code: 'text("完整文本".repeat(12500));' } }]);
       await env.THREAD.getByName("owner").submit(nextInput("生成完整输出", 10000001));
-      expect(write).toHaveBeenCalledWith("r2://.codemode/full-text/output.txt", "完整文本".repeat(12500));
-      expect(seen.outputs.join("\n")).toContain("Full output: r2://.codemode/full-text/output.txt");
+      expect(write).toHaveBeenCalledWith("r2://.tmp/1790000000000/codemode/full-text/output.txt", "完整文本".repeat(12500));
+      expect(seen.outputs.join("\n")).toContain("Full output: r2://.tmp/1790000000000/codemode/full-text/output.txt");
     });
     it.each(["persistence", "owner", "generation"] as const)("自动保存遇到 %s 失败时报告原因，不宣称已保存", async failure => {
       const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII=";
@@ -90,7 +90,7 @@ describe("coding tools suite", () => {
         vi.spyOn(SandboxDO.prototype, "createOutputPrefix").mockImplementation(async () => {
           if (failure === "owner") currentEnv.QQ_OWNER = "10000002";
           if (failure === "generation") await runInDurableObject(env.THREAD.getByName("owner"), (_current, currentState) => { currentState.storage.sql.exec("UPDATE session_state SET generation=generation+1 WHERE id=1"); });
-          return "r2://.codemode/test";
+          return "r2://.tmp/1790000000000/codemode/test";
         });
         await threadWithBindings(instance, state, currentEnv).submit(nextInput("截图", 10000001));
       });

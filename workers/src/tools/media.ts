@@ -7,6 +7,7 @@ import { MediaRepository, type AssetRef } from "../media/repository";
 import { ResourceIdSchema } from "../sandbox/resources";
 import { workPath } from "../sandbox/client";
 import { relativeWorkPath } from "../sandbox/workspace";
+import { temporaryFileRef } from "../sandbox/object-files";
 import { sha256 } from "../media/model";
 import { readHostMedia, type MediaLookupBridge } from "./media-host";
 
@@ -72,7 +73,7 @@ export function createMediaExtension(deps: MediaDeps) {
   }
   const recall = (imageOnly: boolean) => defineTool({
     name: imageOnly ? "qq_image" : "qq_attachment", replay: "safe",
-    description: imageOnly ? "Recall images by message_id in the current authorized chat. Returns image content directly; ordinal selects one attachment." : "Retrieve attachments from this chat. Writable sessions receive a private r2:// reference for r2_read or send_file. Set path to save under /work instead. Use ordinal to select a single attachment when specifying path. Read-only chats receive private asset references.",
+    description: imageOnly ? "Recall images by message_id in the current authorized chat. Returns image content directly; ordinal selects one attachment." : "Retrieve attachments from this chat. Writable sessions receive a private seven-day r2:// reference for r2_read or send_file. Set path to save under /work instead. Use ordinal to select a single attachment when specifying path. Read-only chats receive private asset references.",
     parameters: Type.Object({ ...recallFields, ...(imageOnly ? {} : { path: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 })) }) }, { additionalProperties: false }),
     execute: (args, api, context) => boundary("media_recall", api, context, { messageId: args.message_id, ordinal: args.ordinal }, async trace => {
       const repository = await trace.run("repository", () => deps.repository(api, context));
@@ -90,7 +91,7 @@ export function createMediaExtension(deps: MediaDeps) {
         const kind = ref?.kind ?? item.kind;
         if (writable) {
           const filename = [".", "..", ".git", ".wrangler", "node_modules"].includes(name) || pathEncoder.encode(name).length > 255 ? "attachment" : name;
-          const path = destination ?? `r2://attachments/${await sha256(bytes)}/${filename}`;
+          const path = destination ?? temporaryFileRef(`attachments/${await sha256(bytes)}/${filename}`);
           await itemTrace.run("workspace_write", () => deps.storeFile(path, bytes, api, context));
           output.push({ type: "text", text: JSON.stringify({ path, name, kind, bytes: bytes.byteLength, mime }) });
         } else {

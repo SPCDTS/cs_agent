@@ -390,7 +390,7 @@ describe("media observability and diagnostics", () => {
     if (output?.type !== "text") throw new Error("missing_ref");
     const saved = JSON.parse(output.text);
     expect(saved).toMatchObject({ name: "报告.bin", kind: "file", bytes: 3 });
-    expect(saved.path).toMatch(custom ? /^\/work\/inbox\/报告\.bin$/ : /^r2:\/\/attachments\/[a-f0-9]{64}\/报告\.bin$/);
+    expect(saved.path).toMatch(custom ? /^\/work\/inbox\/报告\.bin$/ : /^r2:\/\/\.tmp\/\d{13}\/attachments\/[a-f0-9]{64}\/报告\.bin$/);
     expect(write.mock.calls[0]?.slice(0, 2)).toEqual([saved.path, new Uint8Array([0, 255, 128])]);
     expect((await env.ASSETS.list()).objects).toHaveLength(0);
     expect(frames).toHaveLength(1);

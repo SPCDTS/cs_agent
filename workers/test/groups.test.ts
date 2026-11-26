@@ -224,7 +224,7 @@ describe("group coding", () => {
       if (step++ === 0) return fauxAssistantMessage(fauxToolCall("codemode", { code: script }), { stopReason: "toolUse" });
       if (step === 2) {
         const output = transcript.messages.flatMap(message => message.role === "toolResult" ? message.content.filter(block => block.type === "text").map(block => block.text) : []).join("\n");
-        const path = /Image saved to (r2:\/\/\.codemode\/\S+\/image-\d+\.png)/.exec(output)?.[1];
+        const path = /Image saved to (r2:\/\/[^\s]+\.png)/.exec(output)?.[1];
         expect(path, output).toBeDefined();
         if (!path) throw Error("image_not_saved");
         saved.push(path);

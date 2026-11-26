@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { SandboxReadOutput, readToolResult } from "./coding";
 import { decodeFileRead } from "../sandbox/read";
 import { sandboxFailure, workPath } from "../sandbox/client";
-import { fileKey } from "../sandbox/object-files";
+import { persistentFileKey } from "../sandbox/object-files";
 import type { SandboxDO } from "../sandbox/do";
 
 type Access = Pick<SandboxDO, "readObject" | "writeObject" | "readBlob" | "writeFile">;
@@ -32,13 +32,13 @@ export function objectFileTools(access: (api: ToolExecutionApi, context: Context
         return readToolResult(decodeFileRead(bytes, args));
       }) }),
     defineTool({ name: "r2_write", callers: ["tools"], replay: "unsafe",
-      description: "Store text under a private R2 key, or upload an existing /work file using path. Supply exactly one of content and path. The object persists independently of bash.",
+      description: "Store text under a private R2 key, or upload an existing /work file using path. Supply exactly one of content and path. The object persists independently of bash. Keys beginning with .tmp/ are reserved for temporary outputs.",
       parameters: Type.Object({ key, content: Type.Optional(Type.String()), path: Type.Optional(path) }, { additionalProperties: false }),
       execute: (args, api, context) => run(api, context, async store => {
         if ((args.content === undefined) === (args.path === undefined)) throw new Error("invalid_request");
+        const key = persistentFileKey(args.key);
         const data = args.content ?? (await store.readBlob(workPath(args.path!))).bytes;
-        const result = await store.writeObject(args.key, data);
-        const key = fileKey(args.key);
+        const result = await store.writeObject(key, data);
         return reply(JSON.stringify({ key, path: "r2://" + key, bytes: result.bytes }));
       }) }),
   ] });

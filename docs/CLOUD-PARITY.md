@@ -49,7 +49,7 @@ BridgeDO 是 QQ 唯一发送事实源，RegistryDO 保存授权、人设、技�
 - `MediaRepository`（`workers/src/media/repository.ts`）固定作用域，单资产上限 10 MiB，`AssetRef = { id, scope, sha256, bytes, mime, name, kind }`（`image | file | audio | video`）。`issueUrl` 签发 5 分钟（最长 600 秒）单对象随机票据 `/media/object?token=...`，不含管理口令或原始 scope；`/admin` 媒体上传下载要求 Bearer 鉴权。
 - 图片、音频、视频可与文字同条发送；普通文件走独立 `upload_group_file / upload_private_file` intent（成功 ACK 允许无 `messageId`）。
 - 本机 NapCat 启用 `enableLocalFile2Url: true` 后，Bridge 从 `get_file` 和 `get_image` 接收并校验文件字节，普通文件优先使用消息中的 `file_id`。单附件上限为 10 MiB。下载 HTTP(S) 链接时逐跳检查公网地址。
-- `qq_attachment` 在可写会话中默认将附件保存为私有 R2 对象 `r2://attachments/<内容哈希>/<文件名>`。传 `/work` 路径或相对路径会显式导入工作区，同名且内容不同会返回 `workspace_conflict`。一条消息有多个附件时用 `ordinal` 选择文件。
+- `qq_attachment` 在可写会话中默认将附件保存为私有 R2 对象 `r2://.tmp/<时间戳>/attachments/<内容哈希>/<文件名>`。传 `/work` 路径或相对路径会显式导入工作区，同名且内容不同会返回 `workspace_conflict`。一条消息有多个附件时用 `ordinal` 选择文件。
 - `qq_image` 返回图片内容和会话私有资产引用。仅有媒体读取权限的回合仍可通过 `qq_attachment` 获取私有引用。历史消息中已有的私有资产按原会话读取。
 - `createMediaExtension` 注册 `qq_image`、`qq_attachment`、`send_file`，由宿主 `lookupHostMedia` 校验当前 scope 与目标，每次最多解析 5 个附件。
 
@@ -70,7 +70,7 @@ BridgeDO 是 QQ 唯一发送事实源，RegistryDO 保存授权、人设、技�
 
 - `r2_write({key,content})` 保存文本；`r2_write({key,path})` 将已提交的 Linux 文件上传到该 key。
 - `r2_read({key})` 直接读取文本或图片；`r2_read({key,path:"/work/in/file.bin"})` 将原始字节复制进 Linux 工作区供 `bash` 打开。两处副本后续独立修改。
-- `image(block)` 和超长输出自动写入 `r2://.codemode/...`，不唤醒 Linux 容器。创建新输出时分批清理超过七天的临时对象；其他自选 key 长期保存。
+- `image(block)` 和超长输出自动写入 `r2://.tmp/<时间戳>/codemode/...`，不唤醒 Linux 容器。系统每小时从 R2 清理一批已超过七天的自动输出和默认 QQ 附件，每批最多 1000 个，资源退出后仍可回收。`r2_write` 写入的自选 key 长期保存；`.tmp/` 为系统保留前缀。要保留自动产物，可用 `r2_read({key,path})` 取入工作区，再用 `r2_write({key:"reports/...",path})` 存为长期对象。
 - 主 agent 可以通过 `send_file({path:"r2://..."})` 转发原始文件。子 agent 汇报其资源 ID 和引用，父 agent 按已有授权传 `sandboxId` 取用。历史 `/work/.codemode/` 文件仍按原路径保存在工作区。`agent_send` 的 `files` 接受工作区路径，转发 R2 对象前先用 `r2_read({key,path})` 取入。
 
 ### 主人向群共享登录凭证

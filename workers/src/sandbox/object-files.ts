@@ -1,7 +1,8 @@
 import { FILE_MAX_BYTES } from "../media/model";
 
 const encoder = new TextEncoder();
-const OUTPUT_PREFIX = ".codemode/";
+const TEMP = ".tmp/";
+const TEMP_ROOT = "cs-agent/v1/temporary-files/";
 const OUTPUT_LIFETIME = 7 * 86400_000;
 
 export function fileKey(value: string): string {
@@ -10,11 +11,35 @@ export function fileKey(value: string): string {
   return key;
 }
 
+export function persistentFileKey(value: string): string {
+  const key = fileKey(value);
+  if (key.startsWith(TEMP)) throw new Error("invalid_request");
+  return key;
+}
+
+export function temporaryFileRef(suffix: string, now = Date.now()): string {
+  return `r2://${TEMP}${now}/${suffix}`;
+}
+
+/** R2 按 key 排序。每轮只列最早一页，资源退役后也会被回收。 */
+export async function cleanupTemporaryObjects(bucket: R2Bucket, now: number): Promise<void> {
+  const cutoff = TEMP_ROOT + String(now - OUTPUT_LIFETIME) + "/";
+  const page = await bucket.list({ prefix: TEMP_ROOT, limit: 1000 });
+  const expired = page.objects.filter(object => object.key < cutoff);
+  if (expired.length) await bucket.delete(expired.map(object => object.key));
+}
+
 /** 前缀由宿主工作区身份决定，模型只能指定其中的对象 key。 */
 export class ObjectFiles {
-  constructor(private bucket: R2Bucket, private prefix: string) {}
-  private objectKey(key: string): string {
-    const full = this.prefix + fileKey(key);
+  constructor(private bucket: R2Bucket, private scope: string) {}
+  private objectKey(value: string): string {
+    const key = fileKey(value);
+    let full = `cs-agent/v1/object-files/${this.scope}/${key}`;
+    if (key.startsWith(TEMP)) {
+      const match = /^\.tmp\/(\d{13})\/(.+)$/s.exec(key);
+      if (!match) throw new Error("invalid_request");
+      full = `${TEMP_ROOT}${match[1]}/${this.scope}/${match[2]}`;
+    }
     if (encoder.encode(full).length > 1024) throw new Error("invalid_request");
     return full;
   }
@@ -32,14 +57,6 @@ export class ObjectFiles {
   }
   outputPrefix(prefix: string, now = Date.now()): string {
     if (!/^[a-zA-Z0-9_-]{0,64}$/.test(prefix)) throw new Error("invalid_request");
-    return `r2://${OUTPUT_PREFIX}${now}-${crypto.randomUUID()}-${prefix}`;
-  }
-  private nextCleanup = 0;
-  async cleanupOutputs(now: number): Promise<void> {
-    if (now < this.nextCleanup) return;
-    this.nextCleanup = now + 60 * 60_000;
-    const page = await this.bucket.list({ prefix: this.prefix + OUTPUT_PREFIX, limit: 100 });
-    const expired = page.objects.filter(object => object.uploaded.getTime() < now - OUTPUT_LIFETIME);
-    if (expired.length) await this.bucket.delete(expired.map(object => object.key));
+    return temporaryFileRef(`codemode/${crypto.randomUUID()}-${prefix}`, now);
   }
 }

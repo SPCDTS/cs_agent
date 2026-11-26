@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { env, evictDurableObject, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceManager, type WorkspaceManifest } from "../src/sandbox/workspace";
+import { cleanupTemporaryObjects, ObjectFiles, temporaryFileRef, persistentFileKey } from "../src/sandbox/object-files";
 import type { GcOptions } from "../src/sandbox/workspace-gc";
 import { SandboxDO } from "../src/sandbox/do";
 import { runtime } from "./sandbox-runtime-fixture";
@@ -69,6 +70,23 @@ describe("workspace persistence and gc", () => {
       });
     });
   
+    it("自动附件和子资源产物跨资源到期回收，长期文件和新产物继续可读", async () => {
+      const now = Date.now(), old = now - 8 * 86400_000;
+      const owner = new ObjectFiles(env.ASSETS, "owner"), child = new ObjectFiles(env.ASSETS, "child");
+      const attachment = temporaryFileRef("attachments/monthly.csv", old), output = child.outputPrefix("report", old) + "/output.txt";
+      const fresh = child.outputPrefix("report", now) + "/output.txt", saved = "attachments/monthly.csv";
+      await owner.write(attachment, "old");
+      await child.write(output, "old");
+      await child.write(fresh, "fresh");
+      await owner.write(persistentFileKey(saved), "saved");
+      expect(() => persistentFileKey(attachment)).toThrow("invalid_request");
+      await expect(owner.read(fresh)).rejects.toThrow("not_found");
+      await cleanupTemporaryObjects(env.ASSETS, now);
+      await expect(owner.read(attachment)).rejects.toThrow("not_found");
+      await expect(child.read(output)).rejects.toThrow("not_found");
+      expect(new TextDecoder().decode(await owner.read(saved))).toBe("saved");
+      expect(new TextDecoder().decode(await child.read(fresh))).toBe("fresh");
+    });
     it("分批GC跨重建续跑，保护两批间的新提交与新租约，完成后释放标记", async () => {
       await runInDurableObject(env.SANDBOX.getByName("gc-pages"), async (_instance, state) => {
         const host = runtime(), workspace = "workspace:gc-pages";
