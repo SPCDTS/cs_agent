@@ -16,6 +16,7 @@ function hasCacheMetric(value: unknown, keys: string[]): boolean {
 
 /** 不消费流；终态 Promise 与 Harness 的事件迭代互不争抢。认证选项不进入采集数据。 */
 export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableObjectState, "waitUntil">, scope: RequestScope, binding?: () => RequestBinding | undefined, origin?: (context: Context) => import("./context-source").ContextOrigin | undefined): MutableModels {
+  const recordedCatalogs = new Map<string, number>();
   const observe = (model: Model<Api>, context: Context, start: (notice: (event: unknown) => void, response: (res: Parameters<NonNullable<StreamOptions["onResponse"]>>[0]) => void) => AssistantMessageEventStream, purpose = scope.purpose) => {
     const startedAt = Date.now();
     let reported = false;
@@ -38,18 +39,31 @@ export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableOb
     })));
     const terminal = withAlarmWaitObserver(onAlarmWait, () => stream.result()).then(result => ({ result, endedAt: Date.now() }));
     let detail: RequestDetail;
+    let catalogToSend: import("./codemode-catalog").StoredCodemodeCatalog | undefined;
     try {
-      const captured = snapshot(context, purpose === "conversation" || purpose === "subagent" ? origin?.(context) : undefined);
+      const currentOrigin = purpose === "conversation" || purpose === "subagent" ? origin?.(context) : undefined;
+      const captured = snapshot(context, currentOrigin);
+      const catalog = captured.analysis?.metrics.codemode ? currentOrigin?.codemode : undefined;
+      if (catalog) {
+        const prev = recordedCatalogs.get(catalog.summary.digest);
+        if (prev === undefined || startedAt - prev >= 3600_000) catalogToSend = catalog;
+      }
       detail = { request: { ...scope, purpose, ...(requestBinding ? { binding: requestBinding } : {}), id: requestId, startedAt, endedAt: null, provider: model.provider, model: model.id,
         status: "running", contextWindow: model.contextWindow, inputTokens: null, outputTokens: null, cacheRead: null, cacheWrite: null,
         reasoningTokens: null, durationMs: null, contextMetrics: captured.analysis?.metrics }, context: captured };
     } catch (error) { console.error({ event: "request_capture_failed", thread: scope.thread, actor: scope.actor, turnId: requestBinding?.turnId, ...classifyError(error) }); return stream; }
     const store = env.REQUESTS.getByName("main");
-    const save = (value: RequestDetail) => store.record(value).catch(error => {
+    const save = (value: RequestDetail, codemodeCatalog?: import("./codemode-catalog").StoredCodemodeCatalog) => store.record(value, codemodeCatalog).then(() => {
+      if (codemodeCatalog) {
+        recordedCatalogs.delete(codemodeCatalog.summary.digest);
+        recordedCatalogs.set(codemodeCatalog.summary.digest, startedAt);
+        if (recordedCatalogs.size > 32) recordedCatalogs.delete(recordedCatalogs.keys().next().value!);
+      }
+    }).catch(error => {
       console.error({ event: "request_record_failed", id: value.request.id, thread: scope.thread, turnId: requestBinding?.turnId, ...classifyError(error) });
     });
     ctx.waitUntil((async () => {
-      await save(detail);
+      await save(detail, catalogToSend);
       const { result, endedAt } = await terminal, u = result.usage;
       const measured = reported || [u.input, u.output, u.cacheRead, u.cacheWrite].some(n => Number.isFinite(n) && n > 0);
       // 上游调用 ID 只用于协议回放；管理页在一次模型请求内关联搜索。

@@ -2,10 +2,15 @@ import { CompactionTask, GenerationTask, CompactionEntry, ResetEntry, defineExte
 import type { Context, Message } from "@earendil-works/pi-ai";
 import { Check } from "typebox/value";
 import { CompactionPlan, type ContextHead } from "./context-types";
+import { captureCodemodeCatalog, type StoredCodemodeCatalog } from "./codemode-catalog";
 import { messageKey, textOf } from "./snapshot";
 import { classifyError } from "../shared/diagnostics";
 
-export type ContextOrigin = { head?: ContextHead; tags: ReadonlyMap<string, { summary: boolean; phase?: "retained" | "added" }> };
+export type ContextOrigin = {
+  head?: ContextHead;
+  tags: ReadonlyMap<string, { summary: boolean; phase?: "retained" | "added" }>;
+  codemode?: StoredCodemodeCatalog;
+};
 const size = (messages: readonly Message[]) => messages.reduce((n, message) => n + (message.role === "system" ? 0 : textOf(message).length), 0);
 const count = (messages: readonly Message[]) => messages.filter(message => message.role !== "system").length;
 const PLAN_KEY = "context-monitor:compaction";
@@ -17,8 +22,8 @@ export function contextSource(storage: DurableObjectStorage, harness: () => Harn
     hook(CompactionTask, { beforeCompact: async (selected, api, context) => {
       try {
         const conversation = await harness().conversation(api.conversationId, context);
-        const view = await conversation?.context(context);
-        if (!view) return;
+        if (!conversation) return;
+        const view = await conversation.context(context);
         const retained = view.contributions.flatMap((messages, index) => {
           const entry = view.entries[index];
           return entry && entry.id >= selected.firstKept && entry.id !== view.head?.id ? [...messages] : [];
@@ -32,10 +37,19 @@ export function contextSource(storage: DurableObjectStorage, harness: () => Harn
       origin = undefined;
       try {
         const conversation = await harness().conversation(api.conversationId, context);
-        const view = await conversation?.context(context);
-        if (!view) return;
+        if (!conversation) return;
+        const view = await conversation.context(context);
         const saved = await storage.get(PLAN_KEY);
-        origin = contextOrigin(view, request.messages, Check(CompactionPlan, saved) ? saved : undefined);
+        let codemode: StoredCodemodeCatalog | undefined;
+        try {
+          codemode = captureCodemodeCatalog(await conversation.agent(context), request.messages);
+        } catch (error) {
+          console.error({ event: "context_codemode_capture_failed", ...classifyError(error) });
+        }
+        origin = {
+          ...contextOrigin(view, request.messages, Check(CompactionPlan, saved) ? saved : undefined),
+          ...(codemode ? { codemode } : {}),
+        };
       } catch (error) { console.error({ event: "context_origin_capture_failed", ...classifyError(error) }); }
     } }),
   ] });

@@ -3,6 +3,7 @@ import { PiStore } from "./pi-store";
 import type { PiSpan } from "./execution-contracts";
 import { ToolStore } from "./tool-store";
 import { ContextStore, contextMetadata } from "./context-store";
+import { MAX_CODEMODE_CATALOG_BYTES, MAX_CODEMODE_CATALOGS, type StoredCodemodeCatalog } from "./codemode-catalog";
 import { ProjectionStore, viewName, type ProjectionBatch } from "./projection";
 import { AgentReadView } from "./view";
 import { subagentName, RETENTION_MS, type SubagentMeta } from "../subagent/model";
@@ -30,6 +31,7 @@ export class RequestsDO extends DurableObject<Env> {
   contextTimeline(...args: Parameters<ContextStore["timeline"]>) { return new ContextStore(this.ctx.storage.sql).timeline(...args); }
   contextInspection(id: string) { return new ContextStore(this.ctx.storage.sql).inspect(id); }
   contextPart(id: string, part: string) { return new ContextStore(this.ctx.storage.sql).part(id, part); }
+  codemodeTools(id: string) { return new ContextStore(this.ctx.storage.sql).codemode(id); }
   private topologyCache?: AgentTopology;
   private retentionStore?: RequestRetention;
   private retention() { return this.retentionStore ??= new RequestRetention(this.ctx.storage); }
@@ -72,6 +74,10 @@ export class RequestsDO extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS turn_timings_ended ON turn_timings(thread, ended DESC);
       CREATE INDEX IF NOT EXISTS turn_timings_all_ended ON turn_timings(ended DESC);
       CREATE INDEX IF NOT EXISTS turn_timings_turn ON turn_timings(thread, turn_id);
+      CREATE TABLE IF NOT EXISTS codemode_catalogs (
+        digest TEXT PRIMARY KEY, updated INTEGER NOT NULL, bytes INTEGER NOT NULL, payload TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS codemode_catalogs_updated ON codemode_catalogs(updated);
     `);
     const columns = ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(requests)").toArray();
     if (!columns.some(c => c.name === "turn_id")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN turn_id TEXT");
@@ -161,10 +167,25 @@ export class RequestsDO extends DurableObject<Env> {
       ...(rows.length > limit ? { next: page.at(-1)!.seq } : {}),
     };
   }
-  async record(detail: RequestDetail): Promise<void> {
+  async record(detail: RequestDetail, codemodeCatalog?: StoredCodemodeCatalog): Promise<void> {
     const r = detail.request, sql = this.ctx.storage.sql;
     if (r.startedAt < Date.now() - REQUEST_RETENTION.metadataMs) return;
     const retention = this.retention();
+    const expectedDigest = r.contextMetrics?.codemode?.digest ?? detail.context.analysis?.metrics.codemode?.digest;
+    if (r.startedAt >= Date.now() - REQUEST_RETENTION.detailsMs && expectedDigest) {
+      if (codemodeCatalog && codemodeCatalog.summary.digest === expectedDigest) {
+        const catPayload = JSON.stringify(codemodeCatalog);
+        const catBytes = new TextEncoder().encode(catPayload).byteLength;
+        if (catBytes <= MAX_CODEMODE_CATALOG_BYTES) {
+          sql.exec(`INSERT INTO codemode_catalogs(digest,updated,bytes,payload) VALUES(?,?,?,?)
+            ON CONFLICT(digest) DO UPDATE SET updated=MAX(codemode_catalogs.updated,excluded.updated)`,
+            expectedDigest, r.startedAt, catBytes, catPayload);
+          sql.exec("DELETE FROM codemode_catalogs WHERE digest IN (SELECT digest FROM codemode_catalogs ORDER BY updated DESC LIMIT -1 OFFSET ?)", MAX_CODEMODE_CATALOGS);
+        }
+      } else {
+        sql.exec("UPDATE codemode_catalogs SET updated=MAX(updated,?) WHERE digest=?", r.startedAt, expectedDigest);
+      }
+    }
     // 重投与乱序开始事件不会覆盖终态。
     const previous = sql.exec<{ status: string }>("SELECT status FROM requests WHERE id = ?", r.id).toArray()[0];
     if (previous && previous.status !== "running" && (previous.status !== "interrupted" || r.status === "running")) return;
@@ -228,6 +249,7 @@ export class RequestsDO extends DurableObject<Env> {
     sql.exec("DELETE FROM turn_timings WHERE rowid IN (SELECT rowid FROM turn_timings ORDER BY ended DESC LIMIT -1 OFFSET 20000)");
     sql.exec("DELETE FROM requests WHERE started < ?", now - 30 * DAY);
     sql.exec("DELETE FROM request_details WHERE started < ? OR id NOT IN (SELECT id FROM requests)", now - 7 * DAY);
+    sql.exec("DELETE FROM codemode_catalogs WHERE updated < ?", now - 7 * DAY);
     sql.exec("DELETE FROM tool_traces WHERE started < ? OR (started < ? AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.thread=tool_traces.thread AND r.turn_id=tool_traces.turn_id))", now - 30 * DAY, now - 3600_000);
     sql.exec("UPDATE tool_traces SET payload=NULL,bytes=0 WHERE payload IS NOT NULL AND started < ?", now - 7 * DAY);
     const stale = sql.exec<{ id: string; record: string }>("SELECT id,record FROM requests WHERE status='running' AND started < ?", now - 3600_000).toArray();
@@ -258,7 +280,10 @@ export class RequestsDO extends DurableObject<Env> {
     // 主账本的保留策略由实例身份决定，即使同库意外出现 Pi 表也必须回收。
     if (!this.ctx.id.equals(this.env.REQUESTS.idFromName("main"))) return;
     const more = this.prune();
-    if (this.ctx.storage.sql.exec("SELECT 1 FROM requests UNION ALL SELECT 1 FROM tool_traces UNION ALL SELECT 1 FROM agent_activity UNION ALL SELECT 1 FROM ops_logs UNION ALL SELECT 1 FROM turn_timings LIMIT 1").toArray().length) await this.ctx.storage.setAlarm(Date.now() + (more ? 1000 : 3600_000));
+    const hasRows = this.ctx.storage.sql.exec<{ present: number }>(`SELECT
+      EXISTS(SELECT 1 FROM requests) OR EXISTS(SELECT 1 FROM tool_traces) OR EXISTS(SELECT 1 FROM agent_activity)
+      OR EXISTS(SELECT 1 FROM ops_logs) OR EXISTS(SELECT 1 FROM turn_timings) OR EXISTS(SELECT 1 FROM codemode_catalogs) AS present`).one().present;
+    if (hasRows) await this.ctx.storage.setAlarm(Date.now() + (more ? 1000 : 3600_000));
   }
   private filter(q: RequestFilters) {
     const where = ["started >= ?", "started <= ?"], args: (string | number)[] = [q.since, q.until];

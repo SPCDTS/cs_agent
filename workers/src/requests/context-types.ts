@@ -10,6 +10,43 @@ export const CompactionPlan = Type.Object({
   summarizedChars: Type.Number(), summarizedMessages: Type.Number(), retainedChars: Type.Number(), retainedMessages: Type.Number(),
 });
 export type CompactionPlan = Static<typeof CompactionPlan>;
+export const CodemodeCatalogSummary = Type.Object({
+  digest: Type.String(),
+  total: Type.Number(),
+  inlined: Type.Number(),
+  hidden: Type.Number(),
+});
+export type CodemodeCatalogSummary = Static<typeof CodemodeCatalogSummary>;
+export const CodemodeNamespaceItem = Type.Object({
+  name: Type.String(),
+  description: Type.String(),
+  instructions: Type.Optional(Type.String()),
+  total: Type.Number(),
+  inlined: Type.Number(),
+});
+export type CodemodeNamespaceItem = Static<typeof CodemodeNamespaceItem>;
+export const CodemodeToolItem = Type.Object({
+  name: Type.String(),
+  jsName: Type.String(),
+  namespace: Type.Optional(Type.String()),
+  inlined: Type.Boolean(),
+  deferred: Type.Optional(Type.Boolean()),
+  chars: Type.Number(),
+  truncated: Type.Boolean(),
+  description: Type.String(),
+  declaration: Type.String(),
+  inputSchema: Type.String(),
+  outputSchema: Type.Optional(Type.String()),
+});
+export type CodemodeToolItem = Static<typeof CodemodeToolItem>;
+export const CodemodeCatalogView = Type.Object({
+  summary: Type.Union([CodemodeCatalogSummary, Type.Null()]),
+  catalogAvailable: Type.Boolean(),
+  truncated: Type.Boolean(),
+  namespaces: Type.Array(CodemodeNamespaceItem),
+  tools: Type.Array(CodemodeToolItem),
+});
+export type CodemodeCatalogView = Static<typeof CodemodeCatalogView>;
 export const ContextHead = Type.Union([
   Type.Object({ kind: Type.Literal("reset"), id: Type.Number() }),
   Type.Object({ kind: Type.Literal("compaction"), id: Type.Number(), at: Type.Number(), reason: Type.String(),
@@ -17,7 +54,8 @@ export const ContextHead = Type.Union([
 ]);
 export type ContextHead = Static<typeof ContextHead>;
 export const ContextMetrics = Type.Object({ version: Type.Literal(1), chars: ContextTotals, messageCount: Type.Number(), toolCount: Type.Number(), imageCount: Type.Number(),
-  head: Type.Optional(ContextHead), retainedChars: Type.Optional(Type.Number()), addedChars: Type.Optional(Type.Number()) });
+  head: Type.Optional(ContextHead), retainedChars: Type.Optional(Type.Number()), addedChars: Type.Optional(Type.Number()),
+  codemode: Type.Optional(CodemodeCatalogSummary) });
 export type ContextMetrics = Static<typeof ContextMetrics>;
 export const ContextItem = Type.Object({ id: Type.String(), key: Type.String(), category: ContextCategory, chars: Type.Number(),
   label: Type.String(), images: Type.Number(), bodyAvailable: Type.Boolean(), truncated: Type.Boolean(),

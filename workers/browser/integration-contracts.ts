@@ -40,7 +40,14 @@ export const McpServerRecordSchema = Type.Object({
     tools: Type.Object({ allow: strings(), readOnly: Type.Optional(strings()) }),
   }),
   revision: Type.String(), credentialSet: Type.Boolean(),
-  discovered: Type.Union([Type.Null(), Type.Array(Type.Object({ name: Type.String(), description: Type.String() }))]),
+  discovered: Type.Union([Type.Null(), Type.Array(Type.Object({
+    name: Type.String(),
+    description: Type.String(),
+    declaration: Type.Optional(Type.String()),
+    inputSchema: Type.Optional(Type.String()),
+    outputSchema: Type.Optional(Type.String()),
+    schemaTruncated: Type.Optional(Type.Boolean()),
+  }))]),
 });
 export const McpServersSchema = Type.Object({ servers: Type.Array(McpServerRecordSchema) });
 export type McpServerRecord = Static<typeof McpServerRecordSchema>;

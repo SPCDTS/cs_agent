@@ -2,6 +2,7 @@ import { $, ApiError, api, el, fail, loadOverview, readToken, show } from "./app
 import { Check } from "typebox/value";
 import { readApi } from "./api";
 import { McpServersSchema, McpManageResultSchema, McpRejectedToolsSchema, type McpServerRecord } from "./integration-contracts";
+import { lazyBlock, structuredPart } from "./request-detail";
 import { listInputs, paginateChildren } from "./pagination";
 import { cs } from "./console";
 import { selectManagementSubtab } from "./management";
@@ -34,8 +35,14 @@ export function mcpServerRender(id:string){
     }else{
       readonly.checked=(server.tools.readOnly??[]).includes(tool.name);
     }
+    const schemaBox=(tool.declaration||tool.inputSchema||tool.outputSchema)?lazyBlock("查看参数与返回 Schema",()=>el("div",{className:"codemode-schema-body"},[
+      tool.declaration?el("pre",{className:"tool-source",text:tool.declaration}):null,
+      tool.inputSchema?el("div",{},[el("h4",{className:"codemode-subhead",text:"参数 Schema (inputSchema)"}),structuredPart({text:tool.inputSchema,truncated:tool.schemaTruncated})]):null,
+      tool.outputSchema?lazyBlock("返回结构 Schema (outputSchema)",()=>structuredPart({text:tool.outputSchema!,truncated:tool.schemaTruncated})):null,
+      !tool.inputSchema&&tool.schemaTruncated?el("p",{className:"muted small",text:"目录体积较大，该工具 Schema 已省略；可单服务重新探测查看。"}):null,
+    ])):null;
     list.append(el("div",{className:"source"},[el("div",{className:"row"},[el("label",{className:"row"},[enabled,el("strong",{text:tool.name})]),el("label",{className:"row"},[readonly,el("span",{text:label})])]),
-      el("div",{className:"muted small",text:tool.description})]));
+      el("div",{className:"muted small",text:tool.description}),schemaBox]));
   }
   paginateChildren($("mcp-server-tools"),{key:"mcp-server-tools:"+id});
 }
