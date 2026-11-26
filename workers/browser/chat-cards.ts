@@ -1,6 +1,8 @@
 import { bjTime, bytes } from "./app";
 import { el } from "./dom";
 import { eventContent, readBatch } from "./chat-events";
+import { githubLabels } from "./chat-github";
+import { icon } from "./chat-icon";
 import { chatProse } from "./chat-prose";
 import type { Asset, ChatMessage } from "./request-contracts";
 
@@ -8,28 +10,6 @@ const sources = {
   gmail: "Gmail 邮件", github: "GitHub 事件", event: "外部事件", qq: "QQ", web: "网页",
   model: "模型回答（非投递回执）", "agent-in": "Agent 收件", "agent-out": "Agent 发件", subagent: "子任务报告",
 } as const;
-
-const paths = {
-  gmail: "M3 6h18v13H3z M3 7l9 7 9-7",
-  github: "M6 8v8 M9 18h4a5 5 0 005-5V8 M6 3a2.5 2.5 0 100 5 2.5 2.5 0 000-5 M6 16a2.5 2.5 0 100 5 2.5 2.5 0 000-5 M18 3a2.5 2.5 0 100 5 2.5 2.5 0 000-5",
-  event: "M4 5h16v14H4z M7 10h3l2-3 2 7 2-4h2",
-  chat: "M4 4h16v13H9l-5 4z M8 9h8 M8 12h5",
-  agent: "M3 7h15m-4-4 4 4-4 4 M21 17H6m4-4-4 4 4 4",
-  subagent: "M4 4h6v5H4z M14 15h6v5h-6z M7 9v8h7",
-  file: "M5 3h9l5 5v13H5z M14 3v6h5 M8 14h8 M8 17h5",
-  download: "M12 3v12m-5-5 5 5 5-5 M4 16v4h16v-4",
-} as const;
-
-function icon(key: keyof typeof paths) {
-  const ns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS(ns, "path");
-  path.setAttribute("d", paths[key]);
-  svg.append(path);
-  return svg;
-}
 
 function attachment(ref: Asset, download: (asset: Asset) => void) {
   return el("button", { type: "button", className: "chat-file", onclick: () => download(ref),
@@ -66,13 +46,14 @@ export function chatCard(m: ChatMessage, status: string, download: (asset: Asset
   const source = Object.hasOwn(sources, m.source) ? m.source as keyof typeof sources : undefined;
   const external = source === "gmail" || source === "github" || source === "event";
   const system = external || source === "agent-in" || source === "agent-out" || source === "subagent";
-  const label = source ? sources[source] : "未知来源";
+  const batch = external ? readBatch(source, m.text) : undefined;
+  const kind = batch?.count === 1 && batch.items.length === 1 ? batch.items[0]?.github?.kind : undefined;
+  const label = kind ? "GitHub · " + githubLabels[kind] : source ? sources[source] : "未知来源";
   const author = m.role === "assistant" ? "助手" : m.name || "用户";
-  const mark = external ? source : source === "subagent" ? "subagent" : system ? "agent" : "chat";
+  const mark = kind && kind !== "repository" ? kind : external ? source : source === "subagent" ? "subagent" : system ? "agent" : "chat";
   const statusTone = m.status === "failed" || m.status === "error" ? " bad" :
     m.status === "waiting" || m.status === "queued" || m.status === "unconfirmed" ? " warn" : "";
   const name = !system ? author : source === "agent-in" || source === "agent-out" ? m.name : "";
-  const batch = external ? readBatch(source, m.text) : undefined;
   const recordedAt = bjTime(m.at);
   const times = batch && batch.time !== recordedAt
     ? "批次 " + batch.time + " · 记录 " + (batch.time.slice(0, 5) === recordedAt.slice(0, 5) ? recordedAt.slice(6) : recordedAt)
@@ -93,7 +74,7 @@ export function chatCard(m: ChatMessage, status: string, download: (asset: Asset
     } else content = el("div", { className: "chat-literal", text: m.text });
   }
   return el("article", { className: "chat-message " + (system ? "system" : m.role === "assistant" ? "assistant" : "user"),
-    "data-source": source ?? "unknown" }, [
+    "data-source": source ?? "unknown", "data-github-kind": kind }, [
     meta, el("div", { className: "chat-body" }, [
       content,
       m.assets.length ? el("div", { className: "chat-files" }, m.assets.map(ref => attachment(ref, download))) : null,
