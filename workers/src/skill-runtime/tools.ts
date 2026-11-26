@@ -7,13 +7,9 @@ import { workPath } from "../sandbox/client";
 import { temporaryFileRef } from "../sandbox/object-files";
 import { relativeWorkPath } from "../sandbox/workspace";
 import {
-  normalizeSkillScriptArgv,
   SKILL_STATE_FILE_MAX_BYTES,
-  SkillActionNameSchema,
   SkillGroupSchema,
   SkillNameSchema,
-  type SkillRunnerAction,
-  validateSkillActionArgs,
 } from "./manifest";
 import type { SkillRuntimeSnapshot } from "./grants";
 
@@ -22,15 +18,12 @@ export type SkillRuntimeRegistry = Pick<
   ReturnType<Env["REGISTRY"]["getByName"]>,
   | "skillRuntimeList"
   | "skillRuntimeResolve"
-  | "skillRuntimeResolveOwnerSkill"
   | "skillRuntimeGrant"
-  | "skillRuntimeAuthAlert"
   | "skillRuntimeAuthResolved"
 >;
 export type SkillRuntimeSandbox = Pick<
   ReturnType<Env["SANDBOX"]["getByName"]>,
-  | "skillRun"
-  | "skillOwnerBash"
+  | "skillBash"
   | "skillStateList"
   | "skillStateImport"
   | "skillStateClear"
@@ -49,7 +42,7 @@ export type SkillRuntimeHost = {
 
 const strict = { additionalProperties: false } as const;
 const resultSchema = Type.Record(Type.String(), Type.Unknown());
-const SAFE_ERROR = /^(skill_[a-z_]+|invalid_runner|not_found|file_too_large|too_large|path_denied|invalid_request|sandbox_unavailable|output_limit|workspace_quota|blob_corrupt|unconfigured|oauth_token|delegation_denied)$/;
+const SAFE_ERROR = /^(skill_[a-z_]+|not_found|file_too_large|too_large|path_denied|invalid_request|sandbox_unavailable|output_limit|workspace_quota|blob_corrupt|unconfigured|oauth_token|delegation_denied)$/;
 
 export function skillRuntimeErrorCode(error: unknown): string {
   const code = error instanceof Error ? error.message.split(":")[0] ?? "" : "";
@@ -78,59 +71,32 @@ export async function writeSkillOutputs(
   return saved;
 }
 
-export function formatSkillRuntimeList<
-  T extends { skill: string; description: string; actions: Array<{ name: string; description: string; timeoutSec: number; ownerOnly?: boolean; argsSchemaJson?: string }> },
->(items: readonly T[]) {
-  return items.map(({ actions, ...rest }) => ({
-    ...rest,
-    actions: actions.map(({ argsSchemaJson, ...action }) => ({
-      ...action,
-      ...(argsSchemaJson ? { argsSchema: JSON.parse(argsSchemaJson) as Record<string, unknown> } : {}),
-    })),
-  }));
-}
-
-export async function executeResolvedSkillRun(deps: {
+export async function executeResolvedSkillBash(deps: {
   scope: string;
-  origin: "qq" | "web";
   skill: string;
-  action: string;
-  args: unknown;
+  command: string;
   timeoutSec?: number;
   snapshot?: SkillRuntimeSnapshot;
-  registry: Pick<SkillRuntimeRegistry, "skillRuntimeResolve" | "skillRuntimeAuthAlert" | "skillRuntimeAuthResolved">;
-  stateSandbox: Pick<SkillRuntimeSandbox, "skillRun">;
+  registry: Pick<SkillRuntimeRegistry, "skillRuntimeResolve" | "skillRuntimeAuthResolved">;
+  stateSandbox: Pick<SkillRuntimeSandbox, "skillBash">;
   outputSandbox: Pick<SkillRuntimeSandbox, "writeObject">;
   recheckAccess(): Promise<void>;
 }) {
-  const resolved = await deps.registry.skillRuntimeResolve(deps.scope, deps.skill, deps.action, deps.snapshot);
-  const actionSpec: SkillRunnerAction = {
-    command: resolved.action.command,
-    description: resolved.action.description,
-    ownerOnly: resolved.action.ownerOnly,
-    timeoutSec: resolved.action.timeoutSec,
-    ...(resolved.action.argsSchemaJson ? { argsSchema: JSON.parse(resolved.action.argsSchemaJson) as Record<string, unknown> } : {}),
-  };
-  const validatedArgs = validateSkillActionArgs(actionSpec, deps.args);
-  const argv = normalizeSkillScriptArgv(actionSpec.command, "/opt/skill");
-  const timeoutMs = Math.min(actionSpec.timeoutSec ?? 30, deps.timeoutSec ?? 120) * 1000;
-  const outcome = await deps.stateSandbox.skillRun({
+  const resolved = await deps.registry.skillRuntimeResolve(deps.scope, deps.skill, deps.snapshot);
+  const timeoutMs = (deps.timeoutSec ?? 60) * 1000;
+  const outcome = await deps.stateSandbox.skillBash({
     skill: deps.skill,
     revision: resolved.revision,
     files: resolved.files,
     installNpmDeps: resolved.installNpmDeps,
     depsHash: resolved.depsHash,
-    argv,
-    stdin: JSON.stringify(validatedArgs),
+    command: deps.command,
     timeoutMs,
   });
   await deps.recheckAccess();
-  await deps.registry.skillRuntimeResolve(deps.scope, deps.skill, deps.action, deps.snapshot);
+  await deps.registry.skillRuntimeResolve(deps.scope, deps.skill, deps.snapshot);
   const outputs = await writeSkillOutputs(deps.outputSandbox, deps.skill, outcome.outputs);
-  const authRequired = !outcome.timedOut && outcome.code === resolved.authExitCode;
-  if (authRequired) {
-    await deps.registry.skillRuntimeAuthAlert(deps.skill, deps.origin, outcome.stateRevision || resolved.revision);
-  } else if (deps.scope === "owner" && actionSpec.ownerOnly && !outcome.timedOut && outcome.code === 0) {
+  if (deps.scope === "owner" && !outcome.timedOut && outcome.code === 0) {
     await deps.registry.skillRuntimeAuthResolved(deps.skill);
   }
   return {
@@ -141,7 +107,6 @@ export async function executeResolvedSkillRun(deps: {
     stdout: outcome.stdout,
     stderr: outcome.stderr,
     outputs,
-    ...(authRequired ? { authRequired: true } : {}),
   };
 }
 
@@ -160,7 +125,7 @@ export function skillRuntimeExtension(host: SkillRuntimeHost) {
     let code: number | null | undefined;
     try {
       const caller = await host.caller(api, context);
-      if (!caller || caller.scope !== host.namespace || (op !== "actions" && op !== "run" && caller.scope !== "owner")) {
+      if (!caller || caller.scope !== host.namespace || (op !== "list" && op !== "bash" && caller.scope !== "owner")) {
         throw new Error("skill_denied");
       }
       scope = caller.scope;
@@ -174,7 +139,7 @@ export function skillRuntimeExtension(host: SkillRuntimeHost) {
       outcome = skillRuntimeErrorCode(error);
       return { isError: true, output: [{ type: "text", text: outcome }] };
     } finally {
-      if (op !== "actions" && op !== "state_list") {
+      if (op !== "list" && op !== "state_list") {
         await host.audit(op, { skill, scope, result: outcome, ...(code !== undefined ? { code } : {}), ...extraAudit, ms: Date.now() - started })
           .catch(() => console.warn("skill_runtime_audit_failed"));
       }
@@ -188,41 +153,6 @@ export function skillRuntimeExtension(host: SkillRuntimeHost) {
 
   const ownerTools = host.namespace === "owner" ? [
     defineTool({
-      name: "skill_owner_bash",
-      description: "仅主人交互回合可用：在受控技能的专属加密状态沙箱（/opt/skill 只读代码、/work/state 持久登录态、/work/out 临时产物）中执行登录或调试命令并自动加密写回状态。",
-      replay: "unsafe",
-      structuredOutputSchema: resultSchema,
-      parameters: Type.Object({
-        skill: SkillNameSchema,
-        command: Type.String({ minLength: 1, maxLength: 16384 }),
-        timeoutSec: Type.Optional(Type.Integer({ minimum: 1, maximum: 120 })),
-      }, strict),
-      execute: ({ skill, command, timeoutSec }, api, context) => run(api, context, "owner_bash", skill, async caller => {
-        const resolved = await host.registry.skillRuntimeResolveOwnerSkill(skill);
-        const outcome = await host.sandbox("skill-state:" + skill).skillOwnerBash({
-          skill,
-          revision: resolved.revision,
-          files: resolved.files,
-          installNpmDeps: resolved.installNpmDeps,
-          depsHash: resolved.depsHash,
-          command,
-          timeoutMs: (timeoutSec ?? 60) * 1000,
-        });
-        await requireCallerScope(api, context, caller.scope);
-        const outputs = await writeSkillOutputs(host.sandbox("owner"), skill, outcome.outputs);
-        if (!outcome.timedOut && outcome.code === 0) await host.registry.skillRuntimeAuthResolved(skill);
-        return {
-          ok: outcome.code === 0 && !outcome.timedOut,
-          code: outcome.code,
-          timedOut: outcome.timedOut,
-          truncated: outcome.truncated,
-          stdout: outcome.stdout,
-          stderr: outcome.stderr,
-          outputs,
-        };
-      }),
-    }),
-    defineTool({
       name: "skill_state_import",
       description: "仅主人交互回合可用：从主人工作区（/work/...）或私有对象（r2://...）直接导入登录态文件到技能的加密状态目录，不经模型上下文传递内容。",
       replay: "unsafe",
@@ -233,7 +163,7 @@ export function skillRuntimeExtension(host: SkillRuntimeHost) {
         toPath: Type.String({ minLength: 1, maxLength: 1024 }),
       }, strict),
       execute: ({ skill, fromPath, toPath }, api, context) => run(api, context, "state_import", skill, async caller => {
-        await host.registry.skillRuntimeResolveOwnerSkill(skill);
+        await host.registry.skillRuntimeResolve("owner", skill);
         const ownerSandbox = host.sandbox("owner");
         const bytes = fromPath.startsWith("r2://")
           ? await ownerSandbox.readObject(fromPath)
@@ -255,7 +185,7 @@ export function skillRuntimeExtension(host: SkillRuntimeHost) {
       structuredOutputSchema: resultSchema,
       parameters: Type.Object({ skill: SkillNameSchema }, strict),
       execute: ({ skill }, api, context) => run(api, context, "state_list", skill, async () => {
-        await host.registry.skillRuntimeResolveOwnerSkill(skill);
+        await host.registry.skillRuntimeResolve("owner", skill);
         return host.sandbox("skill-state:" + skill).skillStateList(skill);
       }),
     }),
@@ -273,58 +203,55 @@ export function skillRuntimeExtension(host: SkillRuntimeHost) {
     }),
     defineTool({
       name: "skill_grant",
-      description: "仅主人交互回合可用：授予或撤销（actions 传空数组）指定群对受控技能非 ownerOnly 动作的执行权限。",
+      description: "仅主人交互回合可用：授予或撤销指定群使用某技能加密状态沙箱（skill_bash）的权限。",
       replay: "unsafe",
       structuredOutputSchema: resultSchema,
       parameters: Type.Object({
         skill: SkillNameSchema,
         group: SkillGroupSchema,
-        actions: Type.Array(SkillActionNameSchema, { maxItems: 32 }),
+        enabled: Type.Boolean(),
       }, strict),
-      execute: ({ skill, group, actions }, api, context) => run(api, context, "grant", skill,
-        () => host.registry.skillRuntimeGrant(skill, group, actions), { group }),
+      execute: ({ skill, group, enabled }, api, context) => run(api, context, "grant", skill,
+        () => host.registry.skillRuntimeGrant(skill, group, enabled), { group, enabled }),
     }),
   ] : [];
 
   return defineExtension({
     name: "cs.skill-runtime",
-    namespace: { name: "skills", description: "受控 Skill 执行、群授权与加密登录态管理" },
+    namespace: { name: "skills", description: "技能专属加密状态沙箱与信任群共享授权" },
     tools: [
       ...ownerTools,
       defineTool({
-        name: "skill_actions",
-        description: "列出当前会话已获授权的受控技能及可执行动作、参数要求与超时配置。",
+        name: "skill_list",
+        description: "列出当前会话已获授权可使用 skill_bash 共享状态沙箱的技能列表。",
         replay: "safe",
         structuredOutputSchema: resultSchema,
         parameters: Type.Object({}, strict),
-        execute: (_args, api, context) => run(api, context, "actions", "", async caller => ({
-          skills: formatSkillRuntimeList(await host.registry.skillRuntimeList(caller.scope)),
+        execute: (_args, api, context) => run(api, context, "list", "", async caller => ({
+          skills: await host.registry.skillRuntimeList(caller.scope),
         })),
       }),
       defineTool({
-        name: "skill_run",
-        description: "在隔离的技能加密状态沙箱中运行已授权动作，自动写回更新后的登录态并将输出产物写入 r2://.tmp/...；outputs[].path 可直接传给 send_file({ path }) 发送给用户（有编码权限的会话也可用 r2_read 读取）。",
+        name: "skill_bash",
+        description: "在技能专属加密状态沙箱中执行命令（群仅限主人已授权的技能）。/opt/skill 为只读 SKILL.md 与技能附件；/work/state（SKILL_STATE_DIR、HOME、XDG_*）保存持久登录态并在正常退出后自动加密写回 R2；/work/out（SKILL_OUT_DIR）中的产物会自动写入 r2://.tmp/...，outputs[].path 可直接传给 send_file({ path })。",
         replay: "unsafe",
         structuredOutputSchema: resultSchema,
         parameters: Type.Object({
           skill: SkillNameSchema,
-          action: SkillActionNameSchema,
-          args: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+          command: Type.String({ minLength: 1, maxLength: 16384 }),
           timeoutSec: Type.Optional(Type.Integer({ minimum: 1, maximum: 120 })),
         }, strict),
-        execute: ({ skill, action, args, timeoutSec }, api, context) => run(api, context, "run", skill, caller =>
-          executeResolvedSkillRun({
+        execute: ({ skill, command, timeoutSec }, api, context) => run(api, context, "bash", skill, caller =>
+          executeResolvedSkillBash({
             scope: caller.scope,
-            origin: caller.origin,
             skill,
-            action,
-            args,
+            command,
             timeoutSec,
             registry: host.registry,
             stateSandbox: host.sandbox("skill-state:" + skill),
             outputSandbox: host.sandbox(caller.scope),
             recheckAccess: () => requireCallerScope(api, context, caller.scope),
-          }), { action }),
+          })),
       }),
     ].map(tool => ({ ...tool, callers: ["tools"] as const })),
   });

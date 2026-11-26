@@ -150,11 +150,6 @@ export function nativeSandboxClient(deps: Dependencies): SandboxClient {
     materializeSkill: async input => {
       await helper("materializeSkill", input, Ready, 95_000);
     },
-    execSkill: input => {
-      if (!Number.isFinite(input.timeoutMs)) return Promise.reject(new SandboxError("invalid_request"));
-      const timeoutMs = Math.min(EXEC_MAX_TIMEOUT_MS, Math.max(1, Math.trunc(input.timeoutMs)));
-      return helper("execSkill", { ...input, timeoutMs }, SkillExec, timeoutMs);
-    },
     execSkillBash: input => {
       if (!Number.isFinite(input.timeoutMs)) return Promise.reject(new SandboxError("invalid_request"));
       const timeoutMs = Math.min(EXEC_MAX_TIMEOUT_MS, Math.max(1, Math.trunc(input.timeoutMs)));

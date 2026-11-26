@@ -1,78 +1,30 @@
+import { Check } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import { TokenVault } from "../src/mcp/crypto";
-import { parseSkill, SkillError } from "../src/skills";
-import { normalizeSkillScriptArgv, parseSkillRunner, validateSkillActionArgs } from "../src/skill-runtime/manifest";
+import { parseSkill } from "../src/skills";
+import { hasNpmLockFiles, SkillGroupSchema, SkillNameSchema } from "../src/skill-runtime/manifest";
 
-const VALID_RUNNER = JSON.stringify({
-  version: 1,
-  authExitCode: 41,
-  actions: {
-    login: { command: ["python3", "scripts/login.py"], description: "登录", ownerOnly: true, timeoutSec: 90 },
-    query: {
-      command: ["scripts/query.sh", "--json"],
-      description: "查询",
-      argsSchema: {
-        type: "object",
-        properties: {
-          keyword: { type: "string", minLength: 1, maxLength: 50 },
-          page: { type: "integer", minimum: 1, maximum: 10 },
-        },
-        required: ["keyword"],
-        additionalProperties: false,
-      },
-    },
-  },
-});
+describe("skill-runtime helpers & crypto", () => {
+  it("校验 Skill / 群名模式并检测 npm 锁文件", () => {
+    expect(Check(SkillNameSchema, "my-skill-1")).toBe(true);
+    expect(Check(SkillNameSchema, "../escape")).toBe(false);
+    expect(Check(SkillGroupSchema, "group:200000001")).toBe(true);
+    expect(Check(SkillGroupSchema, "owner")).toBe(false);
 
-describe("skill-runtime manifest & crypto", () => {
-  it("解析合法 runner.json，缺少时返回 undefined", () => {
-    expect(parseSkillRunner({ "scripts/query.sh": "#!/bin/sh\necho ok\n" })).toBeUndefined();
-    const runner = parseSkillRunner({
-      "runner.json": VALID_RUNNER,
-      "scripts/login.py": "print('ok')",
-      "scripts/query.sh": "#!/bin/sh\necho ok\n",
-    });
-    expect(runner?.authExitCode).toBe(41);
-    expect(runner?.actions.login?.ownerOnly).toBe(true);
-    expect(normalizeSkillScriptArgv(runner!.actions.login!.command, "/opt/skill")).toEqual(["python3", "scripts/login.py"]);
-    expect(normalizeSkillScriptArgv(runner!.actions.query!.command, "/opt/skill/")).toEqual(["/opt/skill/scripts/query.sh", "--json"]);
+    expect(hasNpmLockFiles({ "package.json": "{}" })).toBe(false);
+    expect(hasNpmLockFiles({ "package.json": "{}", "package-lock.json": "{}" })).toBe(true);
   });
 
-  it("拒绝非法 runner.json（缺失脚本、路径穿越、缺失 npm 锁文件、坏 schema）并在 parseSkill 中拦截", () => {
-    const cases: Array<Record<string, string>> = [
-      { "runner.json": "{bad json" },
-      { "runner.json": JSON.stringify({ version: 2, actions: { a: { command: ["node"], description: "x" } } }) },
-      { "runner.json": JSON.stringify({ version: 1, actions: { BadName: { command: ["node"], description: "x" } } }) },
-      { "runner.json": JSON.stringify({ version: 1, actions: { a: { command: ["../escape.sh"], description: "x" } } }) },
-      { "runner.json": JSON.stringify({ version: 1, actions: { a: { command: ["scripts/missing.sh"], description: "x" } } }) },
-      { "runner.json": JSON.stringify({ version: 1, deps: { kind: "npm" }, actions: { a: { command: ["node", "index.js"], description: "x" } } }), "package.json": "{}" },
-      { "runner.json": JSON.stringify({ version: 1, actions: { a: { command: ["node"], description: "x", argsSchema: { type: "string" } } } }) },
-    ];
-    for (const files of cases) {
-      expect(() => parseSkillRunner(files)).toThrow("invalid_runner");
-      expect(() => parseSkill("demo", "---\nname: demo\ndescription: d\n---\nbody", files)).toThrow(SkillError);
-    }
-    const withDeps = parseSkillRunner({
-      "runner.json": JSON.stringify({ version: 1, deps: { kind: "npm" }, actions: { a: { command: ["node", "index.js"], description: "x" } } }),
-      "package.json": "{}",
-      "package-lock.json": "{}",
+  it("普通 Skill 无需 runner.json，且即使附带任意 runner.json 文本也按普通附件接收", () => {
+    const plain = parseSkill("demo", "---\nname: demo\ndescription: d\n---\nbody", {
+      "scripts/run.sh": "#!/bin/sh\necho ok\n",
     });
-    expect(withDeps?.deps?.kind).toBe("npm");
-  });
+    expect(plain.name).toBe("demo");
 
-  it("严格校验 action 参数并拒绝未声明 argsSchema 时的多余字段", () => {
-    const runner = parseSkillRunner({
-      "runner.json": VALID_RUNNER,
-      "scripts/query.sh": "#!/bin/sh\necho ok\n",
-    })!;
-    expect(validateSkillActionArgs(runner.actions.login!, undefined)).toEqual({});
-    expect(validateSkillActionArgs(runner.actions.login!, {})).toEqual({});
-    expect(() => validateSkillActionArgs(runner.actions.login!, { extra: 1 })).toThrow("skill_invalid_args");
-
-    expect(validateSkillActionArgs(runner.actions.query!, { keyword: "test", page: 2 })).toEqual({ keyword: "test", page: 2 });
-    expect(() => validateSkillActionArgs(runner.actions.query!, {})).toThrow("skill_invalid_args");
-    expect(() => validateSkillActionArgs(runner.actions.query!, { keyword: "test", extra: true })).toThrow("skill_invalid_args");
-    expect(() => validateSkillActionArgs(runner.actions.query!, { keyword: "test", page: 99 })).toThrow("skill_invalid_args");
+    const withArbitraryRunner = parseSkill("demo", "---\nname: demo\ndescription: d\n---\nbody", {
+      "runner.json": "{not-validated-as-manifest",
+    });
+    expect(withArbitraryRunner.files?.["runner.json"]).toBe("{not-validated-as-manifest");
   });
 
   it("TokenVault.encryptBytes / decryptBytes 绑定 AAD 并拦截篡改", async () => {

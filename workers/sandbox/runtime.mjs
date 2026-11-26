@@ -11,7 +11,6 @@ export const OUTPUT_CAP = 64 * 1024;
 const MAX_TIMEOUT_MS = 120000;
 const SKILL_OUT_MAX_FILES = 5;
 const SKILL_OUT_MAX_BYTES = 8 * 1024 * 1024;
-const BUILTIN_SKILL_HEADS = new Set(["python3", "node"]);
 export const within = (root, file) => {
   const relative = path.relative(root, file);
   return relative === "" || (relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative));
@@ -278,21 +277,6 @@ export function createSandboxRuntime({
     return { ready: true };
   }
 
-  async function execSkill({ argv, stdin = "{}", timeoutMs = 30000 }) {
-    if (!Array.isArray(argv) || !argv.length || argv.some(arg => typeof arg !== "string" || !arg || arg.includes("\0"))
-      || typeof stdin !== "string" || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
-      fail("invalid_request");
-    }
-    const head = argv[0];
-    if (!BUILTIN_SKILL_HEADS.has(head)) {
-      await resolveInside(skillCodeRoot, head);
-    }
-    const skillEnv = await prepareSkillDirs();
-    const res = await runProcess({ command: head, args: argv.slice(1), cwd: skillCodeRoot, processEnv: skillEnv, timeoutMs, stdinText: stdin, shellMode: false });
-    const outputs = !res.timedOut && res.code !== null ? await scanSkillOut() : [];
-    return { ...res, outputs };
-  }
-
   async function execSkillBash({ command, timeoutMs = 60000 }) {
     if (typeof command !== "string" || !command.trim() || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) fail("invalid_request");
     const skillEnv = await prepareSkillDirs();
@@ -370,7 +354,7 @@ export function createSandboxRuntime({
   return {
     stageBackup, discardBackup, resolve: raw => resolveInside(root, raw), exec,
     snapshot: retainedPaths => workspace.scan(retainedPaths), restore,
-    materializeSkill, execSkill, execSkillBash, skillStateSnapshot, skillStateRestore, clearSkillOut,
+    materializeSkill, execSkillBash, skillStateSnapshot, skillStateRestore, clearSkillOut,
   };
 }
 
@@ -389,7 +373,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       case "discardBackup": result = await runtime.discardBackup(input.stage); break;
       case "restore": result = await runtime.restore(input); break;
       case "materializeSkill": result = await runtime.materializeSkill(input); break;
-      case "execSkill": result = await runtime.execSkill(input); break;
       case "execSkillBash": result = await runtime.execSkillBash(input); break;
       case "skillStateSnapshot": result = await runtime.skillStateSnapshot(); break;
       case "skillStateRestore": result = await runtime.skillStateRestore(input); break;

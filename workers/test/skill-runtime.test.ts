@@ -23,33 +23,12 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const registry = () => env.REGISTRY.getByName("main");
 
-const RUNNER_JSON = JSON.stringify({
-  version: 1,
-  authExitCode: 41,
-  actions: {
-    login: { command: ["python3", "scripts/login.py"], description: "主人登录", ownerOnly: true, timeoutSec: 60 },
-    query: {
-      command: ["python3", "scripts/query.py"],
-      description: "按关键词查询",
-      timeoutSec: 30,
-      argsSchema: {
-        type: "object",
-        properties: { q: { type: "string", minLength: 1, maxLength: 100 } },
-        required: ["q"],
-        additionalProperties: false,
-      },
-    },
-  },
-});
-
 async function seedShopSkill() {
   await registry().skillPut({
     name: "shop",
     description: "商城查询",
-    body: "---\nname: shop\ndescription: 商城查询\n---\n使用 skill_run 调用 query。",
+    body: "---\nname: shop\ndescription: 商城查询\n---\n按说明调用 scripts/query.py 查询商品。",
     files: {
-      "runner.json": RUNNER_JSON,
-      "scripts/login.py": "print('login')",
       "scripts/query.py": "print('query')",
     },
   });
@@ -58,7 +37,7 @@ async function seedShopSkill() {
 function skillSandboxFixture(onExec: (ctx: {
   stateFiles: Map<string, Uint8Array>;
   outFiles: Map<string, Uint8Array>;
-  stdin: string;
+  command: string;
 }) => Promise<SkillExecResult>) {
   let ready = false;
   let stateFiles = new Map<string, Uint8Array>();
@@ -80,13 +59,9 @@ function skillSandboxFixture(onExec: (ctx: {
     async editFile() { return { replaced: 0 }; },
     async list() { return []; },
     async materializeSkill() {},
-    async execSkill(call) {
+    async execSkillBash(call) {
       outFiles = new Map();
-      return onExec({ stateFiles, outFiles, stdin: call.stdin });
-    },
-    async execSkillBash() {
-      outFiles = new Map();
-      return onExec({ stateFiles, outFiles, stdin: "" });
+      return onExec({ stateFiles, outFiles, command: call.command });
     },
     async skillStateSnapshot() {
       const entries = await Promise.all([...stateFiles.entries()].map(async ([path, bytes]) => ({
@@ -112,8 +87,8 @@ function skillSandboxFixture(onExec: (ctx: {
   return { client, ready: () => ready, reset: async () => { ready = false; stateFiles = new Map(); outFiles = new Map(); return true; } };
 }
 
-describe("skill runtime & encrypted shared state", () => {
-  it("SkillStateManager 加密写回 R2、冷启解密恢复、超时回滚且限制并发排队", async () => {
+describe("skill state sandbox & trusted group sharing", () => {
+  it("SkillStateManager 加密写回 R2、冷启解密恢复、超时回滚、限制并发且垃圾回收孤儿 blob", async () => {
     const secretToken = "super-secret-oauth-refresh-token-12345";
     await runInDurableObject(env.SANDBOX.getByName("skill-state:shop"), async (_instance, state) => {
       const hold = gate();
@@ -127,7 +102,6 @@ describe("skill runtime & encrypted shared state", () => {
           return { stdout: "step1", stderr: "", code: 0, timedOut: false, truncated: false, outputs: [{ path: "out.json", bytes: outBytes.byteLength, sha256: await sha256(outBytes) }] };
         }
         if (step === 2) {
-          // 模拟超时前写入了脏数据，超时后应回滚不提交
           stateFiles.set("dirty.txt", encoder.encode("corrupt"));
           return { stdout: "", stderr: "timeout", code: null, timedOut: true, truncated: false, outputs: [] };
         }
@@ -150,15 +124,14 @@ describe("skill runtime & encrypted shared state", () => {
         resetRuntime: fx.reset,
       });
 
-      const run1 = await manager.runAction({
+      const run1 = await manager.runBash({
         skill: "shop", revision: "r1", files: {}, installNpmDeps: false, depsHash: "",
-        argv: ["node"], stdin: "{}", timeoutMs: 5000,
+        command: "node login.js", timeoutMs: 5000,
       });
       expect(run1.code).toBe(0);
       expect(run1.outputs).toHaveLength(1);
       expect(decoder.decode(run1.outputs[0]!.data)).toBe('{"ok":true}');
 
-      // 验证 R2 上全部对象均为密文，不包含明文密钥
       const prefix = `${await scopePrefix("skill-state:" + state.id.toString())}/skill-state/`;
       const listed = await env.ASSETS.list({ prefix });
       expect(listed.objects.length).toBeGreaterThanOrEqual(2);
@@ -172,21 +145,19 @@ describe("skill runtime & encrypted shared state", () => {
         }
       }
 
-      // 超时不写回脏文件，且重置容器
-      const run2 = await manager.runAction({
+      const run2 = await manager.runBash({
         skill: "shop", revision: "r1", files: {}, installNpmDeps: false, depsHash: "",
-        argv: ["node"], stdin: "{}", timeoutMs: 5000,
+        command: "sleep 10", timeoutMs: 5000,
       });
       expect(run2.timedOut).toBe(true);
       expect(run2.stateRevision).toBe(run1.stateRevision);
       expect(fx.ready()).toBe(false);
 
-      // 并发排队限制（最多 4 个）
-      const p1 = manager.runAction({ skill: "shop", revision: "r1", files: {}, installNpmDeps: false, depsHash: "", argv: ["node"], stdin: "{}", timeoutMs: 5000 });
-      const p2 = manager.runAction({ skill: "shop", revision: "r1", files: {}, installNpmDeps: false, depsHash: "", argv: ["node"], stdin: "{}", timeoutMs: 5000 });
-      const p3 = manager.runAction({ skill: "shop", revision: "r1", files: {}, installNpmDeps: false, depsHash: "", argv: ["node"], stdin: "{}", timeoutMs: 5000 });
-      const p4 = manager.runAction({ skill: "shop", revision: "r1", files: {}, installNpmDeps: false, depsHash: "", argv: ["node"], stdin: "{}", timeoutMs: 5000 });
-      await expect(manager.runAction({ skill: "shop", revision: "r1", files: {}, installNpmDeps: false, depsHash: "", argv: ["node"], stdin: "{}", timeoutMs: 5000 })).rejects.toThrow("skill_busy");
+      const p1 = manager.runBash({ skill: "shop", revision: "r1", files: {}, installNpmDeps: false, depsHash: "", command: "ok", timeoutMs: 5000 });
+      const p2 = manager.runBash({ skill: "shop", revision: "r1", files: {}, installNpmDeps: false, depsHash: "", command: "ok", timeoutMs: 5000 });
+      const p3 = manager.runBash({ skill: "shop", revision: "r1", files: {}, installNpmDeps: false, depsHash: "", command: "ok", timeoutMs: 5000 });
+      const p4 = manager.runBash({ skill: "shop", revision: "r1", files: {}, installNpmDeps: false, depsHash: "", command: "ok", timeoutMs: 5000 });
+      await expect(manager.runBash({ skill: "shop", revision: "r1", files: {}, installNpmDeps: false, depsHash: "", command: "ok", timeoutMs: 5000 })).rejects.toThrow("skill_busy");
       hold.open();
       const results = await Promise.all([p1, p2, p3, p4]);
       expect(results.every(r => r.stdout === "restored")).toBe(true);
@@ -212,7 +183,7 @@ describe("skill runtime & encrypted shared state", () => {
         expect(blobKeys.has(`${prefix}blobs/${liveHash}`)).toBe(true);
       }
 
-      // 路径冲突（文件与目录重叠）在写 R2 前拒绝，不留下孤儿 blob
+      // 路径冲突在写 R2 前拒绝，不留下孤儿 blob
       await manager.importFiles({ skill: "shop", files: [{ path: "dir/file.txt", bytes: encoder.encode("ok") }] });
       const beforeConflictCount = (await env.ASSETS.list({ prefix: `${prefix}blobs/` })).objects.length;
       await expect(manager.importFiles({ skill: "shop", files: [{ path: "dir", bytes: encoder.encode("conflict-blob") }] }))
@@ -224,42 +195,52 @@ describe("skill runtime & encrypted shared state", () => {
     });
   });
 
-  it("主人导入状态并授权群，群在受控沙箱执行查询与产物消费并拦截越权", async () => {
+  it("零配置普通 Skill：主人导入/登录并授权群后，群可用 skill_bash 复用状态与输出，未授权与管理越权被拦截", async () => {
     await seedShopSkill();
     const secret = "owner-cookie-secret-xyz";
     const ownerSandbox = env.SANDBOX.getByName("owner");
     await ownerSandbox.writeFile("/work/login/cookie.txt", encoder.encode("sid=" + secret), undefined, true);
     await ownerSandbox.writeObject("r2://login/extra.json", JSON.stringify({ token: secret }));
 
-    const runMock = vi.spyOn(SandboxDO.prototype, "skillRun");
+    const bashMock = vi.spyOn(SandboxDO.prototype, "skillBash");
     const code = (src: string): Parameters<typeof scriptedModel>[0] => [{ name: "codemode", args: { code: src } }, { name: "", args: {} }];
     const seen = scriptedModel([
+      ...code(`
+        text(await tools.skill_list({}));
+        try { await tools.skill_bash({ skill: 'shop', command: 'echo denied' }); } catch (e) { text(String(e)); }
+      `),
       ...code(`
         text(await tools.skill_state_import({ skill: 'shop', fromPath: '/work/login/cookie.txt', toPath: 'cookie.txt' }));
         text(await tools.skill_state_import({ skill: 'shop', fromPath: 'r2://login/extra.json', toPath: 'extra.json' }));
         text(await tools.skill_state_list({ skill: 'shop' }));
-        try { await tools.skill_grant({ skill: 'shop', group: '${group}', actions: ['login'] }); } catch (e) { text(String(e)); }
-        text(await tools.skill_grant({ skill: 'shop', group: '${group}', actions: ['query'] }));
+        text(await tools.skill_grant({ skill: 'shop', group: '${group}', enabled: true }));
       `),
       ...code(`
         text(await describeNamespace('skills'));
-        text(await tools.skill_actions({}));
-        const res = await tools.skill_run({ skill: 'shop', action: 'query', args: { q: 'keyboard' } });
+        text(await tools.skill_list({}));
+        const res = await tools.skill_bash({ skill: 'shop', command: 'python3 /opt/skill/scripts/query.py keyboard' });
         text(res);
         text(await tools.r2_read({ key: res.outputs[0].path }));
       `),
       ...code(`
-        try { await tools.skill_run({ skill: 'shop', action: 'login' }); } catch (e) { text(String(e)); }
-        try { await tools.skill_owner_bash({ skill: 'shop', command: 'cat /work/state/cookie.txt' }); } catch (e) { text(String(e)); }
+        try { await tools.skill_state_list({ skill: 'shop' }); } catch (e) { text(String(e)); }
+        try { await tools.skill_grant({ skill: 'shop', group: '${group}', enabled: false }); } catch (e) { text(String(e)); }
       `),
     ]);
 
-    await env.THREAD.getByName("owner").submit(input(1, "导入并授权", 10000001));
-    expect(seen.outputs[0]).toContain("skill_action_owner_only");
-    expect(seen.outputs[0]).toContain('"fileCount":2');
-    expect(seen.outputs[0]).not.toContain(secret);
+    // 未授权时群列表为空，且调用 skill_bash 返回 skill_denied
+    await env.THREAD.getByName(group).submit(input(1, "未授权先试", 10000004, 200000001, true));
+    expect(seen.outputs[0]).toContain('"skills":[]');
+    expect(seen.outputs[0]).toContain("skill_denied");
 
-    runMock.mockResolvedValueOnce({
+    // 主人导入登录态并授权给群
+    await env.THREAD.getByName("owner").submit(input(2, "导入并授权", 10000001));
+    expect(seen.outputs[1]).toContain('"fileCount":2');
+    expect(seen.outputs[1]).toContain('"enabled":true');
+    expect(seen.outputs[1]).not.toContain(secret);
+
+    // 群执行 skill_bash，验证挂载文件包含 SKILL.md 与附件，输出写入群 R2 临时区
+    bashMock.mockResolvedValueOnce({
       stdout: '{"items":["hhkb"]}',
       stderr: "",
       code: 0,
@@ -268,56 +249,43 @@ describe("skill runtime & encrypted shared state", () => {
       stateRevision: "rev-2",
       outputs: [{ path: "items.json", bytes: 16, data: encoder.encode('{"items":["hhkb"]}') }],
     });
-    await env.THREAD.getByName(group).submit(input(2, "查商品", 10000004, 200000001, true));
-    expect(seen.outputs[1]).toContain("hhkb");
-    expect(seen.outputs[1]).toContain("r2://.tmp/");
-    expect(seen.outputs[1]).not.toContain('"name":"login"');
+    await env.THREAD.getByName(group).submit(input(3, "查商品", 10000004, 200000001, true));
+    expect(seen.outputs[2]).toContain("hhkb");
+    expect(seen.outputs[2]).toContain("r2://.tmp/");
+    expect(bashMock).toHaveBeenCalledWith(expect.objectContaining({
+      skill: "shop",
+      command: "python3 /opt/skill/scripts/query.py keyboard",
+      files: expect.objectContaining({ "SKILL.md": expect.stringContaining("商城查询"), "scripts/query.py": "print('query')" }),
+    }));
 
-    await env.THREAD.getByName(group).submit(input(3, "越权测试", 10000004, 200000001, true));
-    expect(seen.outputs[2]).toContain("skill_denied");
-    expect(seen.outputs[2]).toContain("does not exist");
+    // 群无法调用主人管理类工具
+    await env.THREAD.getByName(group).submit(input(4, "管理越权测试", 10000004, 200000001, true));
+    expect(seen.outputs[3]).toContain("does not exist");
   });
 
-  it("群执行中途撤权丢弃输出，退出码 41 触发告警且主人重登后关闭", async () => {
+  it("群执行中途撤权丢弃输出", async () => {
     await seedShopSkill();
-    await registry().skillRuntimeGrant("shop", group, ["query"]);
-    const runMock = vi.spyOn(SandboxDO.prototype, "skillRun");
-    const bashMock = vi.spyOn(SandboxDO.prototype, "skillOwnerBash");
+    await registry().skillRuntimeGrant("shop", group, true);
+    const bashMock = vi.spyOn(SandboxDO.prototype, "skillBash");
     const code = (src: string): Parameters<typeof scriptedModel>[0] => [{ name: "codemode", args: { code: src } }, { name: "", args: {} }];
     const seen = scriptedModel([
-      ...code(`text(await tools.skill_run({ skill: 'shop', action: 'query', args: { q: 'midflight' } }));`),
-      ...code(`text(await tools.skill_run({ skill: 'shop', action: 'query', args: { q: 'expired' } }));`),
-      ...code(`text(await tools.skill_owner_bash({ skill: 'shop', command: 'echo ok' }));`),
+      ...code(`text(await tools.skill_bash({ skill: 'shop', command: 'echo midflight' }));`),
     ]);
 
-    runMock.mockImplementationOnce(async () => {
-      await registry().skillRuntimeGrant("shop", group, []);
+    bashMock.mockImplementationOnce(async () => {
+      await registry().skillRuntimeGrant("shop", group, false);
       return { stdout: "should-not-leak", stderr: "", code: 0, timedOut: false, truncated: false, stateRevision: "rev-3", outputs: [] };
     });
     await env.THREAD.getByName(group).submit(input(4, "中途撤权", 10000004, 200000001, true));
     expect(seen.outputs[0]).toContain("skill_denied");
     expect(seen.outputs[0]).not.toContain("should-not-leak");
-
-    await registry().skillRuntimeGrant("shop", group, ["query"]);
-    runMock.mockResolvedValueOnce({
-      stdout: "", stderr: "login expired", code: 41, timedOut: false, truncated: false, stateRevision: "rev-4", outputs: [],
-    });
-    await env.THREAD.getByName(group).submit(input(5, "失效测试", 10000004, 200000001, true));
-    expect(seen.outputs[1]).toContain('"authRequired":true');
-    expect(await registry().alerts()).toMatchObject([{ kind: "credential_login", scope: "skill:shop", closedAt: null }]);
-
-    bashMock.mockResolvedValueOnce({
-      stdout: "logged in", stderr: "", code: 0, timedOut: false, truncated: false, stateRevision: "rev-5", outputs: [],
-    });
-    await env.THREAD.getByName("owner").submit(input(6, "重新登录", 10000001));
-    expect((await registry().alerts())[0]?.closedAt).toEqual(expect.any(Number));
   });
 
-  it("群子任务继承 skill_run 授权，取快照与实时授权交集，撤权立即生效", async () => {
+  it("群子任务继承 skill_bash 授权，按快照 revision 与实时授权交集校验，撤权后重授不复活", async () => {
     await seedShopSkill();
-    await registry().skillRuntimeGrant("shop", group, ["query"]);
+    await registry().skillRuntimeGrant("shop", group, true);
     vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
-    const runMock = vi.spyOn(SandboxDO.prototype, "skillRun").mockResolvedValue({
+    const bashMock = vi.spyOn(SandboxDO.prototype, "skillBash").mockResolvedValue({
       stdout: "subagent-ok", stderr: "", code: 0, timedOut: false, truncated: false, stateRevision: "rev-sub", outputs: [],
     });
 
@@ -326,7 +294,7 @@ describe("skill runtime & encrypted shared state", () => {
       [
         {
           tool: "subagent",
-          args: { action: "spawn", summary: "查询商品", task: "调用 shop.query 查询鼠标" },
+          args: { action: "spawn", summary: "查询商品", task: "调用 skills.skill_bash 查询鼠标" },
         },
         { text: "已派出子任务" },
         { text: "子任务已完成" },
@@ -334,13 +302,7 @@ describe("skill runtime & encrypted shared state", () => {
       [
         {
           tool: "codemode",
-          args: { code: "text(await tools.skill_actions({})); text(await tools.skill_run({ skill: 'shop', action: 'query', args: { q: 'mouse' } }));" },
-        },
-        {
-          tool: "codemode",
-          args: {
-            code: "text(await tools.skill_run({ skill: 'shop', action: 'login' }));",
-          },
+          args: { code: "text(await tools.skill_list({})); text(await tools.skill_bash({ skill: 'shop', command: 'echo mouse' }));" },
         },
         { text: "完成", after: childDone.promise },
       ],
@@ -348,34 +310,31 @@ describe("skill runtime & encrypted shared state", () => {
 
     await env.THREAD.getByName(group).submit(input(1, "派子任务查商城", 10000004, 200000001, true));
     const sub = await onlySubagent(group);
-    await vi.waitFor(() => expect(runMock).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(bashMock).toHaveBeenCalledTimes(1));
 
-    // 子任务仍在运行时撤权并重新授予同名动作（生成新 revision）：旧子任务不得借新授权复活
-    await registry().skillRuntimeGrant("shop", group, []);
-    await registry().skillRuntimeGrant("shop", group, ["query"]);
-    const actionsAfterRegrant = await runInDurableObject(env.THREAD.getByName(group), instance => instance.subagentSkillActions(sub.id));
-    expect(JSON.parse(actionsAfterRegrant.output?.[0]?.type === "text" ? actionsAfterRegrant.output[0].text : "{}")).toEqual({ skills: [] });
-    const denied = await runInDurableObject(env.THREAD.getByName(group), instance => instance.subagentSkillRun(sub.id, {
-      skill: "shop", action: "query", args: { q: "mouse" }, operationId: "after-revoke",
+    // 子任务仍在运行时撤权并重新授权（生成新 revision）：旧子任务不得借新授权复活
+    await registry().skillRuntimeGrant("shop", group, false);
+    await registry().skillRuntimeGrant("shop", group, true);
+    const listAfterRegrant = await runInDurableObject(env.THREAD.getByName(group), instance => instance.subagentSkillList(sub.id));
+    expect(JSON.parse(listAfterRegrant.output?.[0]?.type === "text" ? listAfterRegrant.output[0].text : "{}")).toEqual({ skills: [] });
+    const denied = await runInDurableObject(env.THREAD.getByName(group), instance => instance.subagentSkillBash(sub.id, {
+      skill: "shop", command: "echo mouse", operationId: "after-revoke",
     }));
     expect(denied.isError).toBe(true);
     expect(JSON.stringify(denied)).toContain("skill_denied");
-    expect(runMock).toHaveBeenCalledTimes(1);
+    expect(bashMock).toHaveBeenCalledTimes(1);
 
     childDone.open();
     await reports(group, 1);
-
     expect(outputs.child[0]).toContain("subagent-ok");
-    expect(outputs.child[1]).toContain("denied");
   });
 
-  it("管理台 /admin/skill-runtime 接口支持列表、保存/拒绝授权、删除同步清理与删后清态", async () => {
+  it("管理台 /admin/skill-runtime 列出普通 Skill 并支持授权、撤销、删除同步清理与删后清态", async () => {
     await seedShopSkill();
     await env.SANDBOX.getByName("skill-state:shop").skillStateImport({
       skill: "shop",
       files: [{ path: "cookie.txt", bytes: encoder.encode("sid=abc") }],
     });
-    await registry().skillRuntimeAuthAlert("shop", "web", "ep-1");
 
     const call = (method: string, path: string, body?: unknown) => worker.fetch(
       new Request(`https://test${path}`, {
@@ -391,17 +350,20 @@ describe("skill runtime & encrypted shared state", () => {
     const overview = await listRes.json() as { skills: Array<{ skill: string; state: { fileCount: number } }> };
     expect(overview.skills[0]).toMatchObject({ skill: "shop", state: { fileCount: 1 } });
 
-    const badGrant = await call("PUT", "/admin/skill-runtime/shop/grants", { group, actions: ["login"] });
+    const badGrant = await call("PUT", "/admin/skill-runtime/shop/grants", { group: "owner", enabled: true });
     expect(badGrant.status).toBe(400);
 
-    const okGrant = await call("PUT", "/admin/skill-runtime/shop/grants", { group, actions: ["query"] });
+    const okGrant = await call("PUT", "/admin/skill-runtime/shop/grants", { group, enabled: true });
     expect(okGrant.status).toBe(200);
-    expect(await okGrant.json()).toMatchObject({ skill: "shop", group, actions: ["query"] });
+    expect(await okGrant.json()).toMatchObject({ skill: "shop", group, enabled: true });
+
+    const revokeGrant = await call("PUT", "/admin/skill-runtime/shop/grants", { group, enabled: false });
+    expect(revokeGrant.status).toBe(200);
+    expect(await revokeGrant.json()).toEqual({ skill: "shop", group, enabled: false, revision: "" });
 
     // 删除技能自动清理加密登录态，之后新建同名技能不会静默继承旧登录态
     expect(await registry().skillDelete("shop")).toBe(true);
     expect((await env.SANDBOX.getByName("skill-state:shop").skillStateList("shop")).fileCount).toBe(0);
-    expect((await registry().alerts())[0]?.closedAt).toEqual(expect.any(Number));
 
     // 对已删除技能的残留状态直接调用清理接口仍允许成功
     await env.SANDBOX.getByName("skill-state:shop").skillStateImport({

@@ -56,18 +56,7 @@ export type SkillRunOutcome = {
   outputs: SkillRunOutputFile[];
 };
 
-export type SkillRunInput = {
-  skill: string;
-  revision: string;
-  files: Record<string, string>;
-  installNpmDeps: boolean;
-  depsHash: string;
-  argv: string[];
-  stdin: string;
-  timeoutMs: number;
-};
-
-export type SkillOwnerBashInput = {
+export type SkillBashInput = {
   skill: string;
   revision: string;
   files: Record<string, string>;
@@ -299,15 +288,7 @@ export class SkillStateManager {
     }
   }
 
-  runAction(input: SkillRunInput): Promise<SkillRunOutcome> {
-    return this.serial(() => {
-      if (!this.deps.runtime.execSkill) throw new Error("sandbox_unavailable");
-      const execSkill = this.deps.runtime.execSkill.bind(this.deps.runtime);
-      return this.executeInState(input.skill, input, () => execSkill({ argv: input.argv, stdin: input.stdin, timeoutMs: input.timeoutMs }));
-    });
-  }
-
-  runOwnerBash(input: SkillOwnerBashInput): Promise<SkillRunOutcome> {
+  runBash(input: SkillBashInput): Promise<SkillRunOutcome> {
     return this.serial(() => {
       if (!this.deps.runtime.execSkillBash) throw new Error("sandbox_unavailable");
       const execSkillBash = this.deps.runtime.execSkillBash.bind(this.deps.runtime);
