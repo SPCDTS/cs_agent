@@ -50,6 +50,7 @@ export function renderChatHeader(){
   $("chat-older").hidden=!child;$("chat-parent").hidden=!child;
 }
 function selectChat(target:C.ChatTarget){
+  $("chat-switcher").setAttribute("aria-expanded", "false");
   if(cs.chat.kind==="thread"&&!cs.pending)chatDrafts.set(cs.chat.thread,$("chat-input").value);
   clearTimeout(cs.timer);cs.chat=target;cs.chatVersion++;resetChatTrace();resetContextMonitor();expandChatThread(target.thread);
   $("chat-messages").replaceChildren(el("div",{className:"empty-state",text:"正在载入对话…"}));$("chat-state").textContent="正在载入…";
@@ -197,6 +198,10 @@ export async function sendChat(event: Event){
 }
 
 export function initConsole() {
+  for (const id of ["chat-switcher", "chat-tools-toggle"]) {
+    const toggle = $(id);
+    toggle.addEventListener("click", () => toggle.setAttribute("aria-expanded", String(toggle.getAttribute("aria-expanded") !== "true")));
+  }
   window.addEventListener("resize",()=>{clearTimeout(cs.resizeTimer);cs.resizeTimer=setTimeout(()=>{if(cs.chart&&cs.view==="usage")drawTokens(cs.chart.u,cs.chart.since,cs.chart.until);},100);});
   document.querySelectorAll<HTMLElement>("[data-view]").forEach(b=>b.addEventListener("click",()=>{if(b.dataset.view)consoleView(b.dataset.view);}));
   ["req-range","req-thread","req-model","req-purpose","req-status"].forEach(id=>$(id).addEventListener("change",refreshUsage));
