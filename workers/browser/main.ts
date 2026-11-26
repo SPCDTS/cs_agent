@@ -11,6 +11,7 @@ import { initAccess } from "./access";
 import { initWorkspace } from "./workspace";
 import { initMcp } from "./mcp";
 import { initCuaGrants } from './cua-grants';
+import { initSkillRuntime } from "./skill-runtime";
 import { completeCloudflareLogin, initCloudflare } from './cloudflare';
 import { initMcpServers } from "./mcp-servers";
 
@@ -26,6 +27,7 @@ initAccess();
 initWorkspace();
 initMcp();
 initCuaGrants();
+initSkillRuntime();
 initMcpServers();
 initCloudflare();
 initApp();

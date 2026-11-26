@@ -1,7 +1,7 @@
 import { test, before, after } from "node:test";
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, realpathSync, existsSync, statSync, promises as fs } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, realpathSync, existsSync, statSync, chmodSync, readdirSync, lstatSync, promises as fs } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { createSandboxRuntime, resolveInside, tailCollector, OUTPUT_CAP } from "../sandbox/runtime.mjs";
@@ -123,5 +123,91 @@ await writeFile("out/jersey.png", new Uint8Array(await image.arrayBuffer()));`;
   } finally {
     server.closeAllConnections();
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
+
+test("受控 Skill 运行时：只读物化代码、shell:false 防注入、状态写回与 /work/out 软链拦截", async () => {
+  const skillBase = path.join(base, "skill-env");
+  const skillRoot = path.join(skillBase, "work");
+  const skillCodeRoot = path.join(skillBase, "opt-skill");
+  const skillDepsRoot = path.join(skillBase, "opt-skill-deps");
+  const cacheRoot = path.join(skillBase, "cache");
+  mkdirSync(skillRoot, { recursive: true });
+  const envPath = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  const skillRuntime = createSandboxRuntime({
+    root: skillRoot,
+    shell,
+    env: { PATH: envPath },
+    skillCodeRoot,
+    skillDepsRoot,
+    cacheRoot,
+  });
+
+  const script = [
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const input = JSON.parse(fs.readFileSync(0, 'utf8'));",
+    "const stateFile = path.join(process.env.SKILL_STATE_DIR, 'session.json');",
+    "const prev = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : { count: 0 };",
+    "prev.count += 1;",
+    "prev.lastArg = input.q;",
+    "fs.writeFileSync(stateFile, JSON.stringify(prev));",
+    "fs.writeFileSync(path.join(process.env.SKILL_OUT_DIR, 'result.json'), JSON.stringify({ count: prev.count, q: input.q }));",
+    "if (input.symlink) fs.symlinkSync(stateFile, path.join(process.env.SKILL_OUT_DIR, 'leak.txt'));",
+    "console.log('COUNT=' + prev.count);",
+  ].join("\n");
+
+  const makeWritable = target => {
+    if (!existsSync(target)) return;
+    const stat = lstatSync(target);
+    if (stat.isSymbolicLink()) return;
+    if (stat.isDirectory()) {
+      chmodSync(target, 0o755);
+      for (const name of readdirSync(target)) makeWritable(path.join(target, name));
+    } else {
+      chmodSync(target, 0o644);
+    }
+  };
+
+  try {
+    await skillRuntime.materializeSkill({
+      revision: "rev-1",
+      files: {
+        "scripts/run.js": script,
+        "runner.json": "{}",
+      },
+    });
+    const first = await skillRuntime.execSkill({
+      argv: ["node", "scripts/run.js"],
+      stdin: JSON.stringify({ q: "$(echo INJECTED); touch /tmp/bad" }),
+      timeoutMs: 10_000,
+    });
+    assert.equal(first.code, 0, first.stderr);
+    assert.equal(first.stdout.trim(), "COUNT=1");
+    assert.equal(first.outputs.length, 1);
+    assert.equal(first.outputs[0].path, "result.json");
+    const snap = await skillRuntime.skillStateSnapshot();
+    assert.ok(snap.files.some(f => f.path === "session.json"));
+    assert.ok(!snap.files.some(f => f.path === "result.json"));
+
+    const bashRes = await skillRuntime.execSkillBash({
+      command: "cat \"$SKILL_STATE_DIR/session.json\"",
+      timeoutMs: 10_000,
+    });
+    assert.equal(bashRes.code, 0);
+    assert.equal(JSON.parse(bashRes.stdout).lastArg, "$(echo INJECTED); touch /tmp/bad");
+
+    await assert.rejects(
+      skillRuntime.execSkill({
+        argv: ["node", "scripts/run.js"],
+        stdin: JSON.stringify({ q: "leak", symlink: true }),
+        timeoutMs: 10_000,
+      }),
+      /path_denied/,
+    );
+    await skillRuntime.clearSkillOut();
+  } finally {
+    makeWritable(skillBase);
+    rmSync(skillBase, { recursive: true, force: true });
   }
 });

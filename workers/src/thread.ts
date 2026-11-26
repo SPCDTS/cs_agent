@@ -42,6 +42,7 @@ import type { ScheduleAccess } from "./schedule/tools";
 import { parseScheduleInputKey } from "./schedule/run";
 import type { EventRunStatus } from "./events/model";
 import { SkillCatalog } from "./skills";
+import { executeResolvedSkillRun, formatSkillRuntimeList, jsonToolResult, skillRuntimeErrorCode } from "./skill-runtime/tools";
 import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentOrigin } from "./subagent/parent";
 import { subagentName, RETENTION_MS, type SubagentIdentity, type ParentSubagentStatus, type SubagentReport } from "./subagent/model";
 import { SandboxTasks, SANDBOX_TASK_SCHEMA, type SandboxTask, type SandboxSubject } from "./sandbox/task-access";
@@ -859,8 +860,14 @@ export class ThreadDO extends DurableObject<Env> {
     const access = await this.subagents.access(id,completed), as = access?.identity.as;
     if (!access || !as || access.origin.generation === undefined || access.origin.generation !== await this.sessionGeneration()) return;
     const scope = await this.namespace();
-    const { sandboxId, sandboxTask, coding, mcp } = access.origin.capabilities ?? {};
-    const capabilities = { ...(sandboxId === undefined ? {} : { sandboxId }), ...(sandboxTask ? { sandboxTask } : {}), ...(mcp ? { mcp } : {}), coding: !!coding };
+    const { sandboxId, sandboxTask, coding, mcp, skillRuntime } = access.origin.capabilities ?? {};
+    const capabilities = {
+      ...(sandboxId === undefined ? {} : { sandboxId }),
+      ...(sandboxTask ? { sandboxTask } : {}),
+      ...(mcp ? { mcp } : {}),
+      ...(skillRuntime ? { skillRuntime } : {}),
+      coding: !!coding,
+    };
     const subject = { scope, actor: as.userId, owner: as.owner, generation: access.origin.generation, replyChannel: access.origin.replyChannel ?? "qq" } satisfies SandboxSubject;
     // 兼容旧子任务：只从宿主保存且当前仍有效的身份和能力迁移一次授权。
     if (!capabilities.sandboxTask && capabilities.coding) {
@@ -885,6 +892,71 @@ export class ThreadDO extends DurableObject<Env> {
   async subagentSkill(id: string, input: { name: string; path?: string }): ReturnType<SubagentCapabilityHost["subagentSkill"]> {
     if (!await this.validateSubagentAccess(id)) return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
     return { output: [{ type: "text", text: await this.skills.read(input.name, input.path) }] };
+  }
+  async subagentSkillActions(id: string): ReturnType<SubagentCapabilityHost["subagentSkillActions"]> {
+    const access = await this.validateSubagentAccess(id);
+    const snapshot = access?.capabilities.skillRuntime;
+    if (!access || !snapshot || snapshot.scope !== access.authority.scope) {
+      return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
+    }
+    const current = formatSkillRuntimeList(await this.env.REGISTRY.getByName("main").skillRuntimeList(access.authority.scope));
+    const bySkill = new Map(snapshot.grants.map(grant => [grant.skill, new Set(grant.actions)]));
+    const skills = current
+      .map(item => {
+        const allowed = bySkill.get(item.skill);
+        if (!allowed) return;
+        const actions = item.actions.filter(action => allowed.has(action.name) && !("ownerOnly" in action && action.ownerOnly));
+        return actions.length ? { skill: item.skill, description: item.description, actions } : undefined;
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+    return jsonToolResult({ skills });
+  }
+  async subagentSkillRun(id: string, call: { skill: string; action: string; args?: unknown; timeoutSec?: number; operationId: string }): ReturnType<SubagentCapabilityHost["subagentSkillRun"]> {
+    const started = Date.now();
+    const access = await this.validateSubagentAccess(id);
+    const snapshot = access?.capabilities.skillRuntime;
+    if (!access || !snapshot || snapshot.scope !== access.authority.scope) {
+      return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
+    }
+    let outcome = "error";
+    let code: number | null | undefined;
+    try {
+      const result = await executeResolvedSkillRun({
+        scope: access.authority.scope,
+        origin: access.authority.replyChannel,
+        skill: call.skill,
+        action: call.action,
+        args: call.args,
+        timeoutSec: call.timeoutSec,
+        snapshot,
+        registry: this.env.REGISTRY.getByName("main"),
+        stateSandbox: this.env.SANDBOX.getByName("skill-state:" + call.skill),
+        outputSandbox: this.env.SANDBOX.getByName(access.sandbox?.name ?? access.authority.scope),
+        recheckAccess: async () => {
+          const after = await this.validateSubagentAccess(id);
+          if (!after?.capabilities.skillRuntime || after.capabilities.skillRuntime.scope !== after.authority.scope) {
+            throw new Error("delegation_denied");
+          }
+        },
+      });
+      code = result.code;
+      outcome = "ok";
+      return jsonToolResult(result);
+    } catch (error) {
+      outcome = skillRuntimeErrorCode(error);
+      return { isError: true, output: [{ type: "text", text: outcome }] };
+    } finally {
+      await this.audit("skill_runtime", {
+        op: "subagent_run",
+        subagentId: id,
+        skill: call.skill,
+        action: call.action,
+        scope: access.authority.scope,
+        result: outcome,
+        ...(code !== undefined ? { code } : {}),
+        ms: Date.now() - started,
+      }).catch(() => {});
+    }
   }
   async subagentCoding(id: string, operation: SubagentCodingOperation): ReturnType<SubagentCapabilityHost["subagentCoding"]> {
     const access = await this.validateSubagentAccess(id);
@@ -959,15 +1031,24 @@ export class ThreadDO extends DurableObject<Env> {
     if (spawn) {
       const authority = await this.mcpAuthority(input), { mcp } = await this.open();
       const task = await this.sandboxTaskForInput(input), coding = !!task?.permissions.coding && authority?.scope === "owner";
+      const scope = await this.namespace();
       let resource;
       if (coding) {
         const resources = this.env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner");
-        const scope = await this.namespace();
         const id = sandboxId ?? (await resources.list(scope)).assignedSandboxId;
         resource = await resources.get(scope, id);
         if (!resource) throw new Error("sandbox_not_assigned");
       } else if (sandboxId) throw new Error("permission_denied");
-      capabilities = { coding, ...(resource ? { sandboxId: resource.id } : {}), ...(task ? { sandboxTask: task.id } : {}), ...(authority && mcp ? { mcp: await mcp.captureCapabilities(authority, mcpTools) } : {}) };
+      const skillRuntime = scope === "owner" || scope.startsWith("group:")
+        ? await this.env.REGISTRY.getByName("main").skillRuntimeSnapshot(scope)
+        : undefined;
+      capabilities = {
+        coding,
+        ...(resource ? { sandboxId: resource.id } : {}),
+        ...(task ? { sandboxTask: task.id } : {}),
+        ...(authority && mcp ? { mcp: await mcp.captureCapabilities(authority, mcpTools) } : {}),
+        ...(skillRuntime?.grants.length ? { skillRuntime } : {}),
+      };
     }
     return { identity: { turn: "message", as: { userId: input.user_id, nickname: input.nickname, owner, ...(isWebAdmin(input) ? { admin: true as const } : {}) } },
       origin: { capabilities, generation: input.session_generation, target: targetOf(input), selfId: input.self_id, scopeName: input.scope_name, ...(isWeb(input) ? { replyChannel: "web" as const } : {}) } };
