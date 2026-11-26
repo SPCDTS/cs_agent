@@ -1,6 +1,5 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
-import {createHmac} from "node:crypto";
 import {ADMIN_PAGE_HTML} from "../src/admin/app.generated.ts";
 import {bundleModule,mountDom} from "./browser-harness.mjs";
 
@@ -98,61 +97,10 @@ test("会话卡片直接呈现消息内容，合批展开状态随刷新保留",
   inbox.querySelector(".event-more").setAttribute("open", "");
   renderChatMessages(rows);
   assert.ok(cards()[0].querySelector(".event-more[open]"));
-});
-
-test("从 GitHub Webhook 到混合批次，八种事件版式保留各自的目标和内容", async () => {
-  const { document } = mountDom(ADMIN_PAGE_HTML);
-  const { renderChatMessages, renderEventInput, readWebhook } = await bundleModule({ contents:
-    'export {renderChatMessages} from "./browser/trace";export {renderEventInput} from "./src/events/model";export {readWebhook} from "./src/github/model";' });
-  const subject = { number: 12, title: "键盘导航" };
-  const comment = { id: 34, user: { id: 3, type: "User" }, body: "第一处: 处理空值 <code>" };
-  const sha = "aB".repeat(32);
-  const examples = [
-    ["issues", { action: "reopened", issue: subject }, ".gh-ticket a", "#12"],
-    ["pull_request", { action: "opened", pull_request: subject }, ".gh-pull h4", subject.title],
-    ["workflow_run", { action: "completed", workflow_run: { id: 8, name: "workers check", conclusion: "failure" } }, ".gh-run[data-tone=bad] strong", "运行失败"],
-    ["push", { ref: "refs/tags/v1", after: sha }, ".gh-commit-line code", "v1"],
-    ["release", { action: "published", release: { id: 4, name: "秋季更新", tag_name: "v1" } }, ".gh-release a", "v1"],
-    ["issue_comment", { action: "created", issue: subject, comment }, ".gh-comment blockquote", comment.body],
-    ["issue_comment", { action: "edited", issue: { ...subject, pull_request: {} }, comment }, ".gh-comment .gh-subject a", "PR #12"],
-    ["pull_request_review", { action: "submitted", pull_request: subject, review: { ...comment, state: "changes_requested" } }, ".gh-verdict[data-tone=bad] strong", "请求修改"],
-    ["pull_request_review_comment", { action: "created", pull_request: subject, comment }, ".gh-annotation blockquote", comment.body],
-    ["milestone", { action: "closed" }, ".gh-row h4", "milestone"],
-    ["workflow_run", { action: "completed", workflow_run: { id: 9, name: "other", conclusion: "new_result" } }, ".gh-run strong", "已完成 · new_result"],
-    ["pull_request_review", { action: "submitted", pull_request: subject, review: { ...comment, state: "pending", body: null } }, ".gh-verdict strong", "pending"],
-  ];
-  const events = [];
-  for (const [kind, payload] of examples) {
-    const body = JSON.stringify({ repository: { full_name: "demo/console", id: 7 }, installation: { id: 1 }, sender: { login: "mira" }, ...payload });
-    const key = "synthetic-layout-test";
-    const delivery = await readWebhook(new Request("https://example.test", { method: "POST", body, headers: {
-      "content-type": "application/json", "x-github-delivery": "fixture", "x-github-event": kind,
-      "x-hub-signature-256": "sha256=" + createHmac("sha256", key).update(body).digest("hex"),
-    } }), key);
-    events.push(delivery.normalized);
-  }
-  const at = Date.UTC(2026, 10, 26);
-  const message = items => ({ id: "batch", source: "github", role: "user", name: "", at, status: null, turnId: null, assets: [],
-    text: renderEventInput("github", items, 0, at).split("\n[说明]")[0] });
-  renderChatMessages([message(events)]);
-  const card = document.querySelector("#chat-messages article");
-  const items = [...card.querySelectorAll(".event-item")];
-  assert.equal(items.length, examples.length);
-  assert.equal(card.querySelector("details").querySelectorAll(".event-item").length, examples.length - 2);
-  assert.equal(card.getAttribute("data-github-kind"), null);
-  for (const [i, [kind, , selector, expected]] of examples.entries()) {
-    assert.equal(items[i].dataset.githubKind, kind === "milestone" ? "repository" : kind);
-    assert.equal(items[i].querySelector(selector)?.textContent, expected);
-    assert.equal(items[i].querySelector("a").getAttribute("href"), events[i].ref);
-    assert.match(items[i].querySelector("footer").textContent, /demo\/console.*mira/);
-    assert.ok(items[i].querySelector(".gh-kind").textContent);
-  }
-  assert.equal(items[3].querySelector("a").title, sha);
-  assert.equal(items[3].querySelector("code").title, "refs/tags/v1");
-  assert.equal(items[7].querySelector("p").textContent, comment.body);
-  assert.equal(items[11].querySelector("p"), null);
-  renderChatMessages([message([events[8]])]);
-  assert.equal(document.querySelector("#chat-messages article .message-source").textContent, "GitHub · 行内评论");
+  const anchors = ["issuecomment-11", "pullrequestreview-12", "discussion_r13"];
+  renderChatMessages(anchors.map(anchor => row(anchor, "github", github.replace("/pull/42", "/pull/42#" + anchor))));
+  assert.deepEqual(cards().map(card => card.querySelector(".event-item a").textContent),
+    ["example/project · PR #42 · 讨论评论", "example/project · PR #42 · 评审", "example/project · PR #42 · 行内评论"]);
 });
 
 test("子会话的格式化回复只展示一次，工具参数仍可展开", async () => {

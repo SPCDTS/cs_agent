@@ -1,8 +1,7 @@
 import { el } from "./dom";
-import { githubTarget, githubItem, type GitHubTarget } from "./chat-github";
 
 // 旧会话只保留 renderEventInput 生成的可展示文本，可能止于单条事件中途。
-export type EventItem = { ref: string; actor: string; title: string; time: string; summary: string; github?: GitHubTarget };
+type EventItem = { ref: string; actor: string; title: string; time: string; summary: string };
 type EventBatch = { source: string; count: number; time: string; items: EventItem[]; extra: number; tail: string };
 
 export function readBatch(source: string, text: string): EventBatch | undefined {
@@ -27,25 +26,59 @@ export function readBatch(source: string, text: string): EventBatch | undefined 
       break;
     }
     const [ref = "", ...sender] = row[2]!.split(" · ");
-    batch.items.push({ ref, actor: sender.join(" · "), title: row[3]!, time: row[4]!, summary: snippet.slice(3),
-      github: batch.source === "github" ? githubTarget(ref) : undefined });
+    batch.items.push({ ref, actor: sender.join(" · "), title: row[3]!, time: row[4]!, summary: snippet.slice(3) });
     index += 2;
   }
   return batch;
 }
 
+function githubRef(ref: string) {
+  // 只为 Webhook 生成的 GitHub 仓库地址建立外链。其他引用按文本保留。
+  const match = /^https:\/\/github\.com\/([A-Za-z0-9-]+\/[\w.-]+)(?:\/(pull|issues|actions\/runs|commit|releases)(?:\/([a-zA-Z0-9]+))?)?(?:#([\w-]+))?$/.exec(ref);
+  if (!match || match[1]!.split("/").some(part => part === "." || part === "..")) return;
+  const [, repo, type, id, anchor] = match;
+  const labels: Record<string, string> = { pull: "PR #", issues: "Issue #", "actions/runs": "Run #", commit: "Commit ", releases: "Releases" };
+  const label = type ? labels[type] + (type === "commit" ? id?.slice(0, 7) ?? "" : id ?? "") : "";
+  // 同一 PR 的讨论、评审与行内评论共享条目编号，用链接文字标明区别。
+  const comment = /^(issuecomment-|pullrequestreview-|discussion_r)\d+$/.exec(anchor ?? "")?.[1];
+  const commentLabels: Record<string, string> = { "issuecomment-": "讨论评论", "pullrequestreview-": "评审", discussion_r: "行内评论" };
+  return { repo: repo!, link: el("a", { href: ref, target: "_blank", rel: "noopener noreferrer", text: [repo, label, comment && commentLabels[comment]].filter(Boolean).join(" · ") }) };
+}
+
 function eventItem(source: string, item: EventItem) {
-  if (item.github) return githubItem(item, item.github);
-  const context = source === "gmail" ? item.actor : item.ref;
+  const target = source === "github" ? githubRef(item.ref) : undefined;
+  const title = target && item.title.startsWith(target.repo + ": ") ? item.title.slice(target.repo.length + 2) : item.title;
+  const context = source === "gmail" ? item.actor : target?.link ?? item.ref;
+  const action = source === "github" ? githubAction(item.summary) : undefined;
+  const excerpt = action ? action.excerpt : item.summary;
   return el("li", { className: "event-item" }, [
     el("div", { className: "event-byline" }, [
       el("span", {}, [context, source === "gmail" && item.ref ? el("small", { text: (context ? " · " : "") + "邮件 ID " + item.ref }) : null]),
       el("time", { title: "事件时间（北京时间）", text: item.time }),
     ]),
-    el("h4", { text: item.title || (source === "gmail" ? "（无主题）" : "（无标题）") }),
-    item.summary ? el("p", { text: item.summary }) : null,
-    source !== "gmail" && item.actor ? el("small", { text: item.actor }) : null,
+    el("h4", { text: title || (source === "gmail" ? "（无主题）" : "（无标题）") }),
+    excerpt ? el("p", { text: excerpt }) : null,
+    action || source !== "gmail" && item.actor ? el("div", { className: "event-activity" }, [
+      action ? el("span", { className: "event-action " + action.tone, text: action.label }) : null,
+      item.actor ? el("small", { text: item.actor }) : null,
+    ]) : null,
   ]);
+}
+
+// 这些动作由 GitHub 来源放在摘要开头。未知动作或结论继续显示原文。
+const actionLabels = new Map([["opened", "已打开"], ["reopened", "已重新打开"], ["closed", "已关闭"], ["published", "已发布"],
+  ["created", "已创建"], ["submitted", "已提交"], ["edited", "已编辑"], ["completed", "已完成"], ["ready_for_review", "待评审"]]);
+function githubAction(summary: string) {
+  if (summary === "Repository push") return { label: "已推送", excerpt: "", tone: "" };
+  const [prefix, ...rest] = summary.split(": ");
+  const [verb, ...detail] = prefix!.split(" ");
+  const label = actionLabels.get(verb!);
+  if (!label) return;
+  const result = detail.join(" ");
+  if (verb === "completed" && (result === "success" || result === "failure")) {
+    return { label: result === "success" ? "运行成功" : "运行失败", tone: result === "success" ? "ok" : "bad", excerpt: rest.join(": ") };
+  }
+  return { label: [label, result].filter(Boolean).join(" · "), tone: "", excerpt: rest.join(": ") };
 }
 
 export function eventContent(source: string, batch: EventBatch, key: string, open: boolean): HTMLElement {
