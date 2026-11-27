@@ -142,7 +142,7 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: workers
-          command: deploy --config wrangler.deploy.json --var CS_AGENT_COMMIT:${{ github.sha }}
+          command: deploy --config wrangler.deploy.json --var JOULE_COMMIT:${{ github.sha }}
 
   deploy-vps:
     name: deploy Cua VPS

@@ -25,7 +25,7 @@ export async function healthReport(env: Env) {
   const { threads, sendRules, ...connection } = bridge ?? { threads: null, sendRules: null, error: "unavailable" };
   return {
     overall: components.bridge === "ready" && components.model === "ready" ? "ready" : "degraded",
-    components, commit: env.CS_AGENT_COMMIT, bridge: connection, model, thread, threads, sendRules,
+    components, commit: env.JOULE_COMMIT, bridge: connection, model, thread, threads, sendRules,
     mcp: accounts?.map(account => ({
       ...account,
       tools: counts === null ? null : counts[account.server] ?? 0,

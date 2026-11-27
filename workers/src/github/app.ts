@@ -52,7 +52,7 @@ export class GitHubAppClient {
     this.authorizationUrl("configuration-check", "x".repeat(43));
     if (!/^[A-Za-z0-9_-]{1,512}$/.test(code) || !/^[A-Za-z0-9_-]{43}$/.test(verifier)) throw new GitHubAppError("unauthorized");
     const token = object(await this.requestJson("https://github.com/login/oauth/access_token", { method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "cs-agent-events" },
+      headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "joule-events" },
       body: new URLSearchParams({ client_id: this.secrets.GITHUB_APP_CLIENT_ID!, client_secret: this.secrets.GITHUB_APP_CLIENT_SECRET!, code, code_verifier: verifier, redirect_uri: this.callbackUrl() }),
     }));
     return this.tokens(token);
@@ -69,7 +69,7 @@ export class GitHubAppClient {
   async refresh(tokens: UserTokens): Promise<UserTokens> {
     if (!tokens.refresh || tokens.refreshUntil <= Date.now()) throw new GitHubAppError("reauthorization_required");
     return this.tokens(object(await this.requestJson("https://github.com/login/oauth/access_token", { method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "cs-agent-events" },
+      headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "joule-events" },
       body: new URLSearchParams({ client_id: this.secrets.GITHUB_APP_CLIENT_ID ?? "", client_secret: this.secrets.GITHUB_APP_CLIENT_SECRET ?? "",
         grant_type: "refresh_token", refresh_token: tokens.refresh }) })));
   }
@@ -140,7 +140,7 @@ export class GitHubAppClient {
   }
   private async request(path: string, token: string, method = "GET"): Promise<unknown> {
     return this.requestJson("https://api.github.com" + path, { method,
-      headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "cs-agent-events" } });
+      headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "joule-events" } });
   }
   private async requestJson(url: string, init: RequestInit): Promise<unknown> {
     // Only fixed GitHub origins and internally constructed paths. Never follow redirects or Link.

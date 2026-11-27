@@ -67,4 +67,4 @@
 
 主、子 Harness 通过 Pi telemetry 记录提交、阶段、恢复、重试、模型调用和事件。节点按需加载运行时数据，已结束的原生 span 每个根会话最多保留 2,048 条、最长 7 天。批量写入失败或超出采集额度时，部分明细可能缺失。原生记录只收白名单元数据。模型计量仍取请求账本，原生 span 不重复计费。
 
-「导出执行链路 · OTLP JSON」会读取整次执行仍在保留期内的所有分页，包含调用树和对应的 Pi 原生阶段。原生 span 保留自己的 trace ID、父子关系、事件与跨 span 链接，通过 span link 关联到执行树中的模型调用或 agent。进行中的节点标记为快照。导出复用 GenAI 的操作、模型、工具与 token 字段，本地回合、首流事件和调度等待等扩展放在 `cs_agent.*` 属性中。消息与工具正文仅在管理台按需读取。[OTLP 规范](https://opentelemetry.io/docs/specs/otlp/)
+「导出执行链路 · OTLP JSON」会读取整次执行仍在保留期内的所有分页，包含调用树和对应的 Pi 原生阶段。原生 span 保留自己的 trace ID、父子关系、事件与跨 span 链接，通过 span link 关联到执行树中的模型调用或 agent。进行中的节点标记为快照。导出复用 GenAI 的操作、模型、工具与 token 字段，本地回合、首流事件和调度等待等扩展放在 `joule.*` 属性中。消息与工具正文仅在管理台按需读取。[OTLP 规范](https://opentelemetry.io/docs/specs/otlp/)

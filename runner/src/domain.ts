@@ -33,4 +33,4 @@ export interface ServerConfig {
   principals: Array<{ id: string; tokenEnv: string }>;
   targets: Target[];
 }
-export const CALLER_META_KEY = 'cs-agent/caller';
+export const CALLER_META_KEY = 'joule/caller';

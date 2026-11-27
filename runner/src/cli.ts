@@ -15,7 +15,7 @@ function option(name: string, fallback: string) {
   const value = args[at + 1]; if (!value || value.startsWith('--')) throw new Error('missing_' + name);
   args.splice(at, 2); return value;
 }
-const defaultDir = path.join(os.homedir(), '.cs-agent-windows-mcp');
+const defaultDir = path.join(os.homedir(), '.joule-windows-mcp');
 async function prepareState(dir: string) {
   const marker = path.join(dir, 'windows-mcp-state.json');
   await fs.mkdir(dir, { recursive: true });
@@ -40,7 +40,7 @@ async function main() {
     if (state === path.parse(state).root) throw new Error('dedicated_state_directory_required');
     await prepareState(state);
     const file = path.join(state, 'config.json'); if (await exists(file)) throw new Error('config_already_exists');
-    await atomicJson(file, { stateDir: state, host: '127.0.0.1', port: 7791, principals: [{ id: 'cs_agent', tokenEnv: 'WINDOWS_MCP_TOKEN' }], targets: [{ kind: 'wsb', id: 'temp', memoryMb: 6144, idleTimeoutMs: 600000, maxLifetimeMs: 3600000 }] });
+    await atomicJson(file, { stateDir: state, host: '127.0.0.1', port: 7791, principals: [{ id: 'joule', tokenEnv: 'WINDOWS_MCP_TOKEN' }], targets: [{ kind: 'wsb', id: 'temp', memoryMb: 6144, idleTimeoutMs: 600000, maxLifetimeMs: 3600000 }] });
     console.log('配置已生成：' + file + '\n此配置用于临时 Windows Sandbox。请按 docs/WINDOWS-MCP.md 设置 token，再运行 run。');
   } else if (action === 'run' || action === 'inspect') {
     const file = path.resolve(option('config', path.join(defaultDir, 'config.json'))); if (args.length) throw new Error('unknown_arguments');

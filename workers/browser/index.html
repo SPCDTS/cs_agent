@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>cs-agent 管理台</title>
+<link rel="icon" type="image/png" href="/joule.png">
+<title>Joule 管理台</title>
 <style>/*__ADMIN_CSS__*/</style>
 </head>
 <body>
@@ -59,7 +60,7 @@
 <div id="login" class="login" hidden>
   <form id="login-form" class="card login-card" autocomplete="off">
     <div class="login-brand">
-      <div class="wordmark"><span class="mark" aria-hidden="true"></span>cs<span> / </span>agent</div>
+      <div class="wordmark"><img class="mark" src="/joule.png" alt="Joule">Joule</div>
       <span class="env-badge">ADMIN</span>
     </div>
     <div class="login-title">
@@ -78,7 +79,7 @@
 <div id="app" hidden>
 <aside class="sidebar">
   <div class="brand-row">
-    <div class="wordmark"><span class="mark" aria-hidden="true"></span>cs<span> / </span>agent</div>
+    <div class="wordmark"><img class="mark" src="/joule.png" alt="Joule">Joule</div>
     <span class="env-badge">ADMIN</span>
   </div>
   <nav aria-label="管理台导航">
@@ -438,7 +439,7 @@
     </div>
     <div class="stack">
       <form id="cua-setup-form" class="cua-setup-card stack" hidden>
-        <p class="muted small">首次启用后，cs-agent 将在 VPS 桥连接时检测并启用设备目录、Shell、后台任务、文件写入和桌面工具。</p>
+        <p class="muted small">首次启用后，Joule 将在 VPS 桥连接时检测并启用设备目录、Shell、后台任务、文件写入和桌面工具。</p>
         <div class="row"><label for="cua-setup-token">VPS 桥令牌</label><input id="cua-setup-token" type="password" required minlength="32" maxlength="256" autocomplete="new-password" spellcheck="false">
           <button id="cua-setup-enable" type="submit" class="btn primary">启用 Cua</button></div>
       </form>

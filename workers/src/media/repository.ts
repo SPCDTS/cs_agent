@@ -1,9 +1,10 @@
-import { ASSET_PREFIX, FILE_MAX_BYTES, cleanFileName, imageMime, parseAssetRef, safeMime, sha256, validScope, type AssetKind, type AssetRef } from "./model";
+import { ASSET_PREFIX, FILE_MAX_BYTES, LEGACY_ASSET_PREFIX, cleanFileName, imageMime, parseAssetRef, safeMime, sha256, validScope, type AssetKind, type AssetRef } from "./model";
 import { downloadMedia, type DownloadDeps } from "./download";
 import { mediaStage } from "./diagnostics";
 export type { AssetRef, AssetKind } from "./model";
 
 export async function scopePrefix(scope: string): Promise<string> { return `${ASSET_PREFIX}/scopes/${await sha256(validScope(scope))}`; }
+export async function legacyScopePrefix(scope: string): Promise<string> { return `${LEGACY_ASSET_PREFIX}/scopes/${await sha256(validScope(scope))}`; }
 export class MediaRepository {
   readonly scope: string;
   private readonly bucket: R2Bucket;
@@ -24,7 +25,8 @@ export class MediaRepository {
     return asset;
   }
   async get(id: string): Promise<{ ref: AssetRef; bytes: Uint8Array }> {
-    const object = await this.bucket.get(await this.key(id));
+    const object = await this.bucket.get(await this.key(id))
+      ?? await this.bucket.get(`${await legacyScopePrefix(this.scope)}/assets/${id}`);
     if (!object || !object.customMetadata?.ref) throw new Error("asset_not_found");
     const ref = parseAssetRef(JSON.parse(object.customMetadata.ref));
     if (ref.scope !== this.scope || ref.id !== id) throw new Error("asset_scope_denied");
@@ -53,7 +55,9 @@ export class MediaRepository {
 }
 export async function readMediaToken(bucket: R2Bucket, token: string): Promise<{ ref: AssetRef; bytes: Uint8Array }> {
   if (!/^[a-f0-9]{64}$/.test(token)) throw new Error("invalid_media_token");
-  const object = await bucket.get(`${ASSET_PREFIX}/tickets/${await sha256(token)}`);
+  const tokenHash = await sha256(token);
+  const object = await bucket.get(`${ASSET_PREFIX}/tickets/${tokenHash}`)
+    ?? await bucket.get(`${LEGACY_ASSET_PREFIX}/tickets/${tokenHash}`);
   if (!object) throw new Error("invalid_media_token");
   const value: unknown = await object.json();
   if (!value || typeof value !== "object" || !("expires" in value) || typeof value.expires !== "number" ||
@@ -62,10 +66,28 @@ export async function readMediaToken(bucket: R2Bucket, token: string): Promise<{
   return new MediaRepository({ bucket, scope: ref.scope }).get(ref.id);
 }
 
+const LEGACY_CURSOR_PREFIX = "legacy:";
+
 /** 独立于模型回合的维护入口；游标推进防止大量未过期票据阻塞后续对象。 */
 export async function gcMediaTickets(bucket: R2Bucket, options: { limit?: number; cursor?: string; dryRun?: boolean } = {}): Promise<{ scanned: number; deleted: number; cursor?: string }> {
-  const listing = await bucket.list({ prefix: `${ASSET_PREFIX}/tickets/`, limit: Math.max(1, Math.min(1000, options.limit ?? 100)), cursor: options.cursor, include: ["customMetadata"] });
+  const limit = Math.max(1, Math.min(1000, options.limit ?? 100));
+  const useLegacy = options.cursor?.startsWith(LEGACY_CURSOR_PREFIX) ?? false;
+  const cursor = useLegacy ? options.cursor!.slice(LEGACY_CURSOR_PREFIX.length) || undefined : options.cursor;
+  const listing = await bucket.list({ prefix: `${useLegacy ? LEGACY_ASSET_PREFIX : ASSET_PREFIX}/tickets/`, limit, cursor, include: ["customMetadata"] });
+  let scanned = listing.objects.length;
   const expired = listing.objects.filter(object => Number(object.customMetadata?.expires) <= Date.now()).map(object => object.key);
+  let nextCursor = listing.truncated ? (useLegacy ? LEGACY_CURSOR_PREFIX + (listing.cursor ?? "") : listing.cursor) : undefined;
+  if (!useLegacy && !listing.truncated) {
+    const remaining = limit - scanned;
+    if (remaining > 0) {
+      const legacyListing = await bucket.list({ prefix: `${LEGACY_ASSET_PREFIX}/tickets/`, limit: remaining, include: ["customMetadata"] });
+      scanned += legacyListing.objects.length;
+      expired.push(...legacyListing.objects.filter(object => Number(object.customMetadata?.expires) <= Date.now()).map(object => object.key));
+      if (legacyListing.truncated) nextCursor = LEGACY_CURSOR_PREFIX + (legacyListing.cursor ?? "");
+    } else {
+      nextCursor = LEGACY_CURSOR_PREFIX;
+    }
+  }
   if (!options.dryRun && expired.length) await bucket.delete(expired);
-  return { scanned: listing.objects.length, deleted: options.dryRun ? 0 : expired.length, ...(listing.truncated ? { cursor: listing.cursor } : {}) };
+  return { scanned, deleted: options.dryRun ? 0 : expired.length, ...(nextCursor ? { cursor: nextCursor } : {}) };
 }

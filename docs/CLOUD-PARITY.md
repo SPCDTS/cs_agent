@@ -42,7 +42,7 @@ BridgeDO 是 QQ 唯一发送事实源，RegistryDO 保存授权、人设、技�
 
 ## 3. 私有媒体、持久工作区与 Code Mode 文件环境
 
-所有对象位于私有 R2 绑定 `ASSETS` 的 `cs-agent/v1/` 前缀，作用域完全由宿主授权层决定，模型不能指定任意 R2 key 或 namespace。
+所有对象位于私有 R2 绑定 `ASSETS` 的 `joule/v1/` 前缀，作用域完全由宿主授权层决定，模型不能指定任意 R2 key 或 namespace。
 
 ### 3.1 私有媒体与 NapCat 附件回传
 
@@ -88,7 +88,7 @@ BridgeDO 是 QQ 唯一发送事实源，RegistryDO 保存授权、人设、技�
 
 - 主线程复用 `ThreadMcp` 连接、目录缓存与队列；子 agent 只保存派出时的有界目录快照（`catalogJson`），所有 MCP 调用经父线程 `SubagentCapabilityHost`（`workers/src/mcp/delegated.ts`）代理并重核父 scope、当前 `generation`、取消状态与当前授权。目录快照只能缩小权限，不能扩大。
 - 派出参数支持可选 `mcpTools: [{ server, tools }]` 收窄原始工具名，可选 `sandboxId`（来自 `sandbox_list` / `sandbox_create`，省略继承父默认工作区；同一 ID 共享 `/work`）。子 agent 没有发送、鉴权、技能发布、记忆写入或继续派出子 agent 的工具。
-- 宿主在 `tools/call` 的 `params._meta["cs-agent/caller"]` 注入不可伪造的调用 scope（以及 Windows MCP 的授权环境范围 `environments`），模型工具参数不能覆盖。
+- 宿主在 `tools/call` 的 `params._meta["joule/caller"]` 注入不可伪造的调用 scope（以及 Windows MCP 的授权环境范围 `environments`），模型工具参数不能覆盖。
 - 自托管 Cua 通过 `list_spaces` 和 `list_tools`（`service=driver`）展示获准设备及其 Driver 工具契约。主人通过管理台按会话分配设备，子任务只可查看派出时清单与当前分配的交集。已启用的 `space_bash`、`space_job`（仅限 Linux/macOS；Windows 不支持）、`space_write` 与完整 `call_tool(service=driver)` 按只读/写分类执行：目录与只读工具免批直通，`call_tool` 与 `space_job` 支持管理台可选收紧为只读模式；所有写操作经宿主持久防重放回执保护、无需人工审批弹窗。`call_tool` 返回的合法截图写入调用方私有 R2 并给出 `structuredContent.imageId` / `imageIds`，可用于 `send_message.images`。
 - Cloudflare 编码沙箱和独立 Windows Sandbox MCP 依据各自的执行权限运行任务。R2 快照属于会话的 Cloudflare 编码沙箱。停止子任务后仍需对已经提交的 WSB 命令显式取消并等待确认。
 

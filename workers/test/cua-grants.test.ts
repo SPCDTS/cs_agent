@@ -847,7 +847,7 @@ it('管理台签发并通过真实反向连接兑换，未授权、过期、伪�
   const claims: Record<string,string>[] = [];
   ws.addEventListener('message',ev => {
     const frame = JSON.parse(String(ev.data));
-    if (frame.close || frame.message.method !== 'cs-agent/cua/pair') return;
+    if (frame.close || frame.message.method !== 'joule/cua/pair') return;
     const {params,id} = frame.message;
     if (params.action === 'claim') claims.push(params);
     const result = params.action === 'ready' ? {status:'ready'} :
@@ -875,6 +875,37 @@ it('管理台签发并通过真实反向连接兑换，未授权、过期、伪�
     await node.registry.mcpCredentialPut(id,node.ready.revision,{Authorization:'Bearer '+'q'.repeat(43)});
     expect((await redeem(ticket)).status).not.toBe(200);
     expect(claims).toHaveLength(1);
+  } finally { ws.close(); node.ws.close(); }
+});
+
+it('旧版反向桥不支持 joule/cua/pair 时自动回退到 cs-agent/cua/pair',async () => {
+  const post = (path:string,headers:Record<string,string>={}) => worker.fetch(new Request(env.PUBLIC_ORIGIN+path,{method:'POST',headers}),adminEnv());
+  const node = await directoryNode();
+  const ws = (await worker.fetch(new Request(env.PUBLIC_ORIGIN+'/mcp/reverse/cua',{headers:{Upgrade:'websocket',Authorization:bearer}}),env)).webSocket!;
+  const methods: string[] = [];
+  ws.addEventListener('message',ev => {
+    const frame = JSON.parse(String(ev.data));
+    if (frame.close || !frame.message?.method) return;
+    methods.push(frame.message.method);
+    const {params,id} = frame.message;
+    if (frame.message.method === 'joule/cua/pair') {
+      ws.send(JSON.stringify({session:frame.session,message:{jsonrpc:'2.0',id,error:{code:-32601,message:'Method not found'}}}));
+      return;
+    }
+    if (frame.message.method === 'cs-agent/cua/pair') {
+      const result = params.action === 'ready' ? {status:'ready'} :
+        {status:'ok',machineId:'paired-1',relay:'wss://relay.example.test',registration:'a'.repeat(64),deviceToken:'b'.repeat(64)};
+      ws.send(JSON.stringify({session:frame.session,message:{jsonrpc:'2.0',id,result}}));
+    }
+  });
+  ws.accept();
+  try {
+    const issued = await post('/admin/cua/pair',{Authorization:'Bearer synthetic-admin'});
+    expect(issued.status).toBe(200);
+    const {ticket} = await issued.json<{ticket:string}>();
+    const claimed = await post('/cua/join/claim',{Authorization:'Bearer '+ticket,'X-Cua-Client':'c'.repeat(64)});
+    expect(claimed.status).toBe(200);
+    expect(methods).toEqual(['joule/cua/pair','cs-agent/cua/pair','joule/cua/pair','cs-agent/cua/pair']);
   } finally { ws.close(); node.ws.close(); }
 });
 

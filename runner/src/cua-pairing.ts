@@ -16,7 +16,7 @@ function slotsFor(capacity = '8'): Slot[] {
 const secret = () => randomBytes(32).toString('hex');
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 type Identity = { invitation:string; client:string; deviceToken:string };
-export const pairMethod = 'cs-agent/cua/pair';
+export const pairMethod = 'joule/cua/pair';
 
 export function pairingCaddy(section: string, capacity?: string) {
   const slots = slotsFor(capacity);

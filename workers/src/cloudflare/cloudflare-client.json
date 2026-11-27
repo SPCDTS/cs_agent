@@ -1,5 +1,5 @@
 {
-  "name": "cs-agent Cloudflare",
+  "name": "Joule Cloudflare",
   "callback": "/admin/devices/cloudflare/callback",
   "optionalScopes": ["cache.purge", "workers-r2.write", "workers-scripts.metadata_read"],
   "scopes": [

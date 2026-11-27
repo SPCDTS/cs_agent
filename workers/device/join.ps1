@@ -1,6 +1,6 @@
 param([Parameter(Mandatory=$true)][string]$Origin,[string]$Ticket)
 $ErrorActionPreference = 'Stop'
-if ($Origin -cnotmatch '^https://[a-zA-Z0-9.-]+(:[0-9]+)?$') { throw 'Invalid cs-agent origin.' }
+if ($Origin -cnotmatch '^https://[a-zA-Z0-9.-]+(:[0-9]+)?$') { throw 'Invalid Joule origin.' }
 $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 if ($arch -ne 'AMD64') { throw 'This Cua release requires Windows x64.' }
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -11,7 +11,12 @@ function FileDigest([string]$Path) {
   try { Hex ($sha.ComputeHash($stream)) } finally { $stream.Dispose() }
 }
 $prefix = (Hex ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Origin)))).Substring(0,16)
-$base = Join-Path $env:LOCALAPPDATA "cs-agent\cua\$prefix"
+$base = Join-Path $env:LOCALAPPDATA "joule\cua\$prefix"
+$legacyBase = Join-Path $env:LOCALAPPDATA "cs-agent\cua\$prefix"
+if (!(Test-Path -LiteralPath $base) -and (Test-Path -LiteralPath $legacyBase)) {
+  [void][IO.Directory]::CreateDirectory((Split-Path -Parent $base))
+  try { Move-Item -LiteralPath $legacyBase -Destination $base -ErrorAction Stop } catch { $base = $legacyBase }
+}
 [void][IO.Directory]::CreateDirectory($base)
 $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
 $acl = [Security.AccessControl.DirectorySecurity]::new()
@@ -47,7 +52,7 @@ try {
       Move-Item -LiteralPath $file -Destination $bin -Force
     }
     if (!(Test-Path -LiteralPath $profileDir)) {
-      if (!$Ticket) { throw 'Generate a pairing command in the cs-agent console.' }
+      if (!$Ticket) { throw 'Generate a pairing command in the Joule console.' }
       $key = Join-Path $base 'client.key'
       if (!(Test-Path -LiteralPath $key)) {
         $rng = [Security.Cryptography.RandomNumberGenerator]::Create()

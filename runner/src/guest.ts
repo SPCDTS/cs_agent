@@ -19,7 +19,7 @@ async function run() {
   if (!(await fs.stat(cwd)).isDirectory()) throw new Error("not_a_directory");
   const script = "$ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); " +
     "$OutputEncoding = [Console]::OutputEncoding; $ErrorActionPreference='Stop'; $global:LASTEXITCODE=0;\r\n" + job.script + "\r\nexit $LASTEXITCODE\r\n";
-  const file = path.join("C:\\Windows\\Temp", "cs-agent-" + randomUUID() + ".ps1");
+  const file = path.join("C:\\Windows\\Temp", "joule-" + randomUUID() + ".ps1");
   await fs.writeFile(file, "\uFEFF" + script, { encoding: "utf8", flag: "wx" });
   try {
     return await new Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean }>((resolve, reject) => {

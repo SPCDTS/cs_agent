@@ -1,4 +1,4 @@
-# cs_agent 协作约定
+# Joule 协作约定
 
 项目统一部署在 Cloudflare Workers，应用代码、依赖和测试位于 `workers/`。`runner/` 提供 Windows 宿主机的临时 WSB 管理服务。个人计算机和持久 VM 的 Cua 迁移边界见 [设备接入](docs/DEVICE-MCP.md)。根目录 npm 命令统一检查这两个包；没有旧 Node 主服务或 Docker Compose 部署。
 

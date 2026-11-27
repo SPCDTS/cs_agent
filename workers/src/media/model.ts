@@ -4,7 +4,8 @@ import { sha256Hex } from "../shared/hash";
 
 export const FILE_MAX_BYTES = 10 * 1024 * 1024;
 export const WORKSPACE_MAX_BYTES = 50 * 1024 * 1024;
-export const ASSET_PREFIX = "cs-agent/v1";
+export const ASSET_PREFIX = "joule/v1";
+export const LEGACY_ASSET_PREFIX = "cs-agent/v1";
 export const AssetKindSchema = Type.Union([Type.Literal("image"), Type.Literal("file"), Type.Literal("audio"), Type.Literal("video")]);
 export const AssetRefSchema = Type.Object({
   id: Type.String({ pattern: "^[a-f0-9]{64}$" }), scope: Type.String({ minLength: 1, maxLength: 240 }),

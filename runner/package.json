@@ -1,5 +1,5 @@
 {
-  "name": "cs-agent-windows-mcp",
+  "name": "joule-windows-mcp",
   "version": "0.1.0",
   "private": true,
   "type": "module",

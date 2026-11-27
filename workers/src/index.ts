@@ -3,7 +3,19 @@ import { finishCuaSetup } from "./cua/setup";
 import { registerReverse } from "./mcp/reverse-route";
 import { handleMediaRequest } from "./media/routes";
 import { authenticated } from "./auth";
+import { ICON_SVG, JOULE_PNG_BASE64, LANDING_APP_JS, LANDING_PAGE_HTML } from "./admin/app.generated";
+import { API_HEADERS } from "./admin/http";
 import { handleAdmin } from "./admin/routes";
+
+let joulePngBytes: Uint8Array | undefined;
+function getJoulePng(): Uint8Array {
+  if (joulePngBytes) return joulePngBytes;
+  const bin = atob(JOULE_PNG_BASE64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  joulePngBytes = bytes;
+  return bytes;
+}
 import { publicOrigin } from "./mcp/config";
 import { oauthErrorCode } from "./mcp/oauth-fetch";
 import type { Env } from "./env";
@@ -46,6 +58,36 @@ export default {
         "Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store","Referrer-Policy":"no-referrer",
         "Content-Security-Policy":"default-src 'none'; script-src 'nonce-"+nonce+"'; base-uri 'none'; frame-ancestors 'none'"}});
     }
+    if (request.method === "GET" && (path === "/" || path === "/landing.js")) {
+      const csp = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+      const commit = (env.JOULE_COMMIT || "dev").replace(/[^A-Za-z0-9._-]/g, "").slice(0, 7) || "dev";
+      const body = path === "/" ? LANDING_PAGE_HTML.replaceAll("__JOULE_COMMIT__", commit) : LANDING_APP_JS;
+      return new Response(body, {
+        headers: {
+          ...API_HEADERS,
+          "Content-Security-Policy": csp,
+          "Content-Type": path === "/" ? "text/html; charset=utf-8" : "text/javascript; charset=utf-8",
+        },
+      });
+    }
+    if (request.method === "GET" && (path === "/joule.png" || path === "/favicon.ico")) {
+      return new Response(getJoulePng(), {
+        headers: {
+          "Content-Type": "image/png",
+          "Cache-Control": "public, max-age=3600",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
+    if (request.method === "GET" && (path === "/icon.svg" || path === "/favicon.svg")) {
+      return new Response(ICON_SVG, {
+        headers: {
+          "Content-Type": "image/svg+xml; charset=utf-8",
+          "Cache-Control": "public, max-age=300",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
     if (request.method === "GET" && path === "/healthz") return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
     if (path.startsWith("/cua/join/")) return devicePairing(request,env);
     const media = await handleMediaRequest(request, { bucket: env.ASSETS, authenticateAdmin: req => authenticated(req, env.ADMIN_TOKEN) });
@@ -79,7 +121,7 @@ export default {
     }
     if (request.method === "GET" && path === "/oauth/client-metadata.json") {
       const origin = publicOrigin(env.PUBLIC_ORIGIN);
-      return Response.json({ client_id: origin + "/oauth/client-metadata.json", client_name: "cs-agent", client_uri: origin,
+      return Response.json({ client_id: origin + "/oauth/client-metadata.json", client_name: "joule", client_uri: origin,
         redirect_uris: [origin + "/mcp/oauth/callback"], grant_types: ["authorization_code", "refresh_token"],
         response_types: ["code"], token_endpoint_auth_method: "none" }, { headers: { "Cache-Control": "public, max-age=300" } });
     }

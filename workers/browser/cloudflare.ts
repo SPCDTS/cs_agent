@@ -41,7 +41,7 @@ export async function loadCloudflare() {
   changes.hidden = rows.length === 0;
 }
 const callbackPrefix = '#cloudflare?';
-const loginKey = 'cs-agent-cloudflare-state';
+const loginKey = 'joule-cloudflare-state';
 export function initCloudflare() {
   $('cloudflare-login').addEventListener('click', async () => {
     const button = $('cloudflare-login'); button.disabled = true;

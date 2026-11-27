@@ -1,6 +1,6 @@
 # Windows Sandbox 宿主机接入
 
-Windows runner 只负责宿主机上的临时 Windows Sandbox（WSB）。同一 session 中的命令可复用临时磁盘，关闭或到期后销毁它。持久 Windows VM 由来宾内的 Cua 设备服务登记。cs-agent 可查询登记后的设备卡片和 Driver 工具说明，工作区仍在 VM 磁盘上。[个人设备接入与切换](DEVICE-MCP.md)
+Windows runner 只负责宿主机上的临时 Windows Sandbox（WSB）。同一 session 中的命令可复用临时磁盘，关闭或到期后销毁它。持久 Windows VM 由来宾内的 Cua 设备服务登记。Joule 可查询登记后的设备卡片和 Driver 工具说明，工作区仍在 VM 磁盘上。[个人设备接入与切换](DEVICE-MCP.md)
 
 ## 从混合环境配置升级
 
@@ -25,7 +25,7 @@ npm --prefix runner start -- init --state D:\windows-mcp-state
   "stateDir": "D:\\windows-mcp-state",
   "host": "127.0.0.1",
   "port": 7791,
-  "principals": [{ "id": "cs_agent", "tokenEnv": "WINDOWS_MCP_TOKEN" }],
+  "principals": [{ "id": "joule", "tokenEnv": "WINDOWS_MCP_TOKEN" }],
   "targets": [
     {
       "kind": "wsb",

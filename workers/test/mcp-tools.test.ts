@@ -416,7 +416,7 @@ describe("mcp resources and delegation", () => {
         expect((await mcp.invoke({ name: "mcp_resources_list", args: { server: "notion" }, operationId: "outside", snapshot }, async () => child)).isError).toBe(true);
         expect((await mcp.captureCapabilities({ ...authority, kind: "event" }, [{ server: "notion", tools: ["notion-create-pages"] }])).tools).toEqual([]);
   
-        const args = { _meta: { "cs-agent/caller": { scope: "model-supplied" } } };
+        const args = { _meta: { "joule/caller": { scope: "model-supplied" } } };
         const call = { name: tool, args, operationId: "submit" };
         const direct = await mcp.invoke(call, async () => authority);
         expect(direct).toMatchObject({ structuredOutput: payload, output: expect.arrayContaining([image]) });
@@ -431,9 +431,16 @@ describe("mcp resources and delegation", () => {
         const calls = remote.requests.flatMap(request => request.body.includes('"method":"tools/call"') ? [JSON.parse(request.body).params] : []);
         expect(calls).toHaveLength(6);
         for (const params of calls) {
-          expect(params).toMatchObject({ arguments: args, _meta: { "cs-agent/caller": { scope: expect.stringMatching(/^[a-f0-9]{64}$/) } } });
+          expect(params).toMatchObject({
+            arguments: args,
+            _meta: {
+              "joule/caller": { scope: expect.stringMatching(/^[a-f0-9]{64}$/) },
+              "cs-agent/caller": { scope: expect.stringMatching(/^[a-f0-9]{64}$/) },
+            },
+          });
+          expect(params._meta["cs-agent/caller"]).toEqual(params._meta["joule/caller"]);
         }
-        const scopes = calls.map(params => params._meta["cs-agent/caller"].scope);
+        const scopes = calls.map(params => params._meta["joule/caller"].scope);
         expect(scopes[0]).toBe(scopes[1]);
         expect(new Set(scopes)).toHaveLength(5);
         await mcp.close();

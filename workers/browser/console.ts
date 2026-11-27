@@ -161,7 +161,7 @@ export function drawTokens(u: C.Usage, since: number, until: number){
   if(!u.summary.measured)svg.append(sv("text",{x:left+width/2,y:85,"text-anchor":"middle"},"暂无已返回的 token 用量"));
   $("chart-note").textContent="北京时间 · "+(step===3600000?"每小时":"每天")+"汇总 · "+(u.summary.requests-u.summary.measured)+" 条请求未返回用量";
 }
-export const pendingKey=()=>"cs-agent:web-pending:"+cs.chat.thread;
+export const pendingKey=()=>"joule:web-pending:"+cs.chat.thread;
 export function restorePending(){
   try{const value: unknown=JSON.parse(sessionStorage.getItem(pendingKey())||"null");cs.pending=Check(C.PendingChat,value)?value:null;}catch{cs.pending=null;}
   if(cs.pending&&typeof cs.pending.text==="string")$("chat-input").value=cs.pending.text;else cs.pending=null;
@@ -185,7 +185,7 @@ export async function sendChat(event: Event){
     await api("POST","/admin/threads/"+encodeURIComponent(thread)+"/chat",pending);
     if(current()){cs.awaitingInput="web:"+pending.requestId;cs.chatActive=true;}
     chatDrafts.delete(thread);
-    try{sessionStorage.removeItem("cs-agent:web-pending:"+thread);}catch{}
+    try{sessionStorage.removeItem("joule:web-pending:"+thread);}catch{}
     if(current()){cs.pending=null;$("chat-input").value="";$("chat-input").readOnly=false;$("chat-send").textContent="发送消息";await loadChat();if(current())$("chat-input").focus();}
   }catch(error){
     if(current()){

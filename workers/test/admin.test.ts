@@ -47,7 +47,7 @@ describe("admin routes and data views", () => {
       expect((await admin("GET", "/admin/events?access_token=" + TOKEN, undefined, null)).status).toBe(401);
       expect((await admin("GET", "/admin/unknown")).status).toBe(404);
   
-      for (const path of ["/admin/", "/admin/app.js"]) {
+      for (const path of ["/", "/landing.js", "/admin/", "/admin/app.js"]) {
         const response = await admin("GET", path, undefined, null);
         expect(response.status).toBe(200);
         expect(response.headers.get("content-security-policy")).toBe("default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
@@ -55,6 +55,31 @@ describe("admin routes and data views", () => {
         expect(response.headers.get("cache-control")).toBe("no-store");
         expect(response.headers.get("x-content-type-options")).toBe("nosniff");
       }
+      for (const iconPath of ["/icon.svg", "/favicon.svg"]) {
+        const iconRes = await admin("GET", iconPath, undefined, null);
+        expect(iconRes.status).toBe(200);
+        expect(iconRes.headers.get("content-type")).toBe("image/svg+xml; charset=utf-8");
+        expect(await iconRes.text()).toContain("<svg");
+      }
+      for (const pngPath of ["/joule.png", "/favicon.ico"]) {
+        const pngRes = await admin("GET", pngPath, undefined, null);
+        expect(pngRes.status).toBe(200);
+        expect(pngRes.headers.get("content-type")).toBe("image/png");
+        expect((await pngRes.arrayBuffer()).byteLength).toBeGreaterThan(1000);
+      }
+      const landingHtml = await (await admin("GET", "/", undefined, null)).text();
+      expect(landingHtml).toContain('id="overview"');
+      expect(landingHtml).toContain('id="arch"');
+      expect(landingHtml).toContain('id="sequence"');
+      expect(landingHtml).toContain('src="/joule.png"');
+      expect(landingHtml.match(/<script[^>]*>/g)).toEqual(['<script src="/landing.js" defer>']);
+      const landingScript = await (await admin("GET", "/landing.js", undefined, null)).text();
+      expect(() => new Function(landingScript)).not.toThrow();
+      for (const sink of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "localStorage", "document.cookie"]) expect(landingScript).not.toContain(sink);
+      const landingDefined = new Set([...landingHtml.matchAll(/\sid="([^"]+)"/g)].map(match => match[1]));
+      const landingUsed = [...landingScript.matchAll(/\$\("([^"]+)"\)/g)].map(match => match[1]!);
+      expect(landingUsed.filter(id => !landingDefined.has(id))).toEqual([]);
+
       const html = await (await admin("GET", "/admin/", undefined, null)).text();
       expect(html).toContain('data-view="workspace"');
       expect(html).toContain('id="workspace-panel"');

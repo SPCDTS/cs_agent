@@ -1,8 +1,8 @@
-# cs-agent
+# Joule
 
 基于 Cloudflare Workers 与 Durable Objects 构建的**全栈个人智能体（Personal Agent）**。
 
-`cs-agent` 面向单一主人（Single-Owner）打造，而非多租户 SaaS 平台。它以日常高频使用的 **QQ（私聊与群聊）** 和 **专属管理台网页** 为交互入口，由云端 Durable Objects 全天候托管你的个人长期记忆、日程提醒、外部事件（Gmail / GitHub）与异步子任务；同时可使用 Cloudflare 编码沙箱、Windows Sandbox 临时环境与经授权的远程 MCP 服务。
+`Joule` 面向单一主人（Single-Owner）打造，而非多租户 SaaS 平台。它以日常高频使用的 **QQ（私聊与群聊）** 和 **专属管理台网页** 为交互入口，由云端 Durable Objects 全天候托管你的个人长期记忆、日程提醒、外部事件（Gmail / GitHub）与异步子任务；同时可使用 Cloudflare 编码沙箱、Windows Sandbox 临时环境与经授权的远程 MCP 服务。
 
 应用主代码位于 `workers/`，Windows Sandbox（WSB）由宿主机的 `runner/` 管理。个人设备和持久 VM 的迁移目标是一个自托管的 Cua Spaces MCP。
 

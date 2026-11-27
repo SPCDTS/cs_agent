@@ -11,7 +11,7 @@ import { createWsbBackend } from "../src/wsb.ts";
 
 if (process.platform !== "win32") throw new Error("Windows required");
 const before = await nativeWsb.list();
-const state = await fs.mkdtemp(path.join(os.tmpdir(), "cs-agent-wsb-mcp-smoke-"));
+const state = await fs.mkdtemp(path.join(os.tmpdir(), "joule-wsb-mcp-smoke-"));
 const sessions = [randomUUID(), randomUUID(), randomUUID()];
 const target: Target = { kind: "wsb", id: "wsb", memoryMb: 4096, idleTimeoutMs: 60000, maxLifetimeMs: 480000 };
 let backend = createWsbBackend(state);

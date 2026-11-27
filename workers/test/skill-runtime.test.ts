@@ -7,7 +7,7 @@ import { sha256 } from "../src/media/model";
 import { RegistryDO } from "../src/registry";
 import type { SandboxClient, SkillExecResult } from "../src/sandbox/client";
 import { SandboxDO } from "../src/sandbox/do";
-import { scopePrefix } from "../src/media/repository";
+import { legacyScopePrefix, scopePrefix } from "../src/media/repository";
 import { SkillStateManager } from "../src/skill-runtime/state";
 import { scriptedModel } from "./events-helpers";
 import { input } from "./helpers";
@@ -374,5 +374,58 @@ describe("skill state sandbox & trusted group sharing", () => {
     expect(clearRes.status).toBe(200);
     expect(await clearRes.json()).toEqual({ skill: "shop", cleared: true });
     expect((await env.SANDBOX.getByName("skill-state:shop").skillStateList("shop")).fileCount).toBe(0);
+  });
+
+  it("SkillStateManager 可无缝读取并清理 legacy cs-agent/v1 前缀下的加密状态", async () => {
+    const key = "01".repeat(32);
+    const vault = new TokenVault(key);
+    await runInDurableObject(env.SANDBOX.getByName("skill-state:legacy-shop"), async (_instance, state) => {
+      const fx = skillSandboxFixture(async ({ stateFiles }) => {
+        expect(decoder.decode(stateFiles.get("cookie.txt") ?? new Uint8Array())).toBe("legacy-sid");
+        return { stdout: "legacy-ok", stderr: "", code: 0, timedOut: false, truncated: false, outputs: [] };
+      });
+      const manager = new SkillStateManager({
+        workspaceId: state.id.toString(),
+        bucket: env.ASSETS,
+        storage: state.storage,
+        vault,
+        runtime: fx.client,
+        runtimeReady: fx.ready,
+        resetRuntime: fx.reset,
+      });
+      const legacyRoot = `${await legacyScopePrefix("skill-state:" + state.id.toString())}/skill-state`;
+      const plain = encoder.encode("legacy-sid");
+      const hash = await sha256(plain);
+      const revision = "00000000-0000-4000-8000-000000000001";
+      const manifest = {
+        schemaVersion: 1,
+        skill: "legacy-shop",
+        revision,
+        updatedAt: Date.now(),
+        files: [{ path: "cookie.txt", sha256: hash, bytes: plain.byteLength, mime: "application/octet-stream", mode: 0o600 }],
+        directories: [],
+        totalBytes: plain.byteLength,
+      };
+      await env.ASSETS.put(
+        `${legacyRoot}/blobs/${hash}`,
+        await vault.encryptBytes(plain, JSON.stringify(["skill-state-blob", "legacy-shop", hash])),
+      );
+      await env.ASSETS.put(
+        `${legacyRoot}/manifests/${revision}`,
+        await vault.encrypt(JSON.stringify(manifest), JSON.stringify(["skill-state-manifest", "legacy-shop", revision])),
+      );
+      await state.storage.put("skill-state:head", revision);
+
+      expect((await manager.list("legacy-shop")).fileCount).toBe(1);
+      const outcome = await manager.runBash({
+        skill: "legacy-shop", revision: "r1", files: {}, installNpmDeps: false, depsHash: "",
+        command: "cat cookie.txt", timeoutMs: 5000,
+      });
+      expect(outcome.stdout).toBe("legacy-ok");
+
+      await manager.clear("legacy-shop");
+      expect(await env.ASSETS.get(`${legacyRoot}/blobs/${hash}`)).toBeNull();
+      expect(await env.ASSETS.get(`${legacyRoot}/manifests/${revision}`)).toBeNull();
+    });
   });
 });

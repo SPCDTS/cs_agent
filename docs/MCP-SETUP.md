@@ -2,9 +2,9 @@
 
 远程 HTTPS Streamable HTTP 服务可在运行时接入，无需为每个服务修改代码或重新部署。连接、分页工具发现、目录缓存、`codemode` 调用、资源读取、OAuth 登录和刷新均复用现有实现。
 
-## 通过 cs-agent 接入
+## 通过 Joule 接入
 
-在主人私聊或共享 owner 上下文的管理页会话中，提供服务名称、官方 MCP 地址、认证方式和希望开放的能力。cs-agent 使用 `mcp_manage` 完成登记、检测工具与启用；该工具不会授予群聊、事件或子 agent 管理服务的权限。
+在主人私聊或共享 owner 上下文的管理页会话中，提供服务名称、官方 MCP 地址、认证方式和希望开放的能力。Joule 使用 `mcp_manage` 完成登记、检测工具与启用；该工具不会授予群聊、事件或子 agent 管理服务的权限。
 
 1. `list` / `get` 查看配置与当前 `revision`。
 2. `put` 登记连接。新服务的 `expectedRevision` 为 `absent`，默认停用；已有服务修改须携带当前版本。
@@ -58,7 +58,7 @@ Windows runner 的固定 env_* 工具使用环境级授权：管理页群授权�
 
 在管理页选择「反向 WebSocket」，或通过 `put` 提交 `server: {"id":"phone","transport":"reverse-websocket"}`。不用提供公网 MCP 地址，也不创建 Cloudflare Tunnel。在管理页为此实例设置独立的 `Authorization` Bearer 凭据（由密码管理器生成至少 32 个随机 URL-safe 字符）；绝不要使用管理员 Token 或在聊天中传递凭据。
 
-节点使用支持自定义请求头的 WebSocket 客户端，主动连接 `wss://<cs-agent 主机>/mcp/reverse/phone`，握手携带 `Authorization: Bearer <专用凭据>`。HTTP 101 表示注册成功；401 表示未获授权。只接受请求头，不支持 URL 参数或普通浏览器页面的原生 WebSocket 构造器。连接后执行原有的 `probe → activate` 并选择允许工具；节点不能自行启用工具或授予会话权限。
+节点使用支持自定义请求头的 WebSocket 客户端，主动连接 `wss://<Joule 主机>/mcp/reverse/phone`，握手携带 `Authorization: Bearer <专用凭据>`。HTTP 101 表示注册成功；401 表示未获授权。只接受请求头，不支持 URL 参数或普通浏览器页面的原生 WebSocket 构造器。连接后执行原有的 `probe → activate` 并选择允许工具；节点不能自行启用工具或授予会话权限。
 
 **节点与 SDK 的接线约定**：这是自定义 MCP 传输，不是 Streamable HTTP。每个 UTF-8 文本帧含一个会话信封，每个实例最多接纳 16 个逻辑会话。单条消息限 12 MiB，信封另有 4 KiB 预算。超过 1 MiB 的设备返回使用紧凑 JSON，并按 `session`、`message` 的顺序编码。
 

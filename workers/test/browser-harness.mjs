@@ -41,7 +41,7 @@ export function mountDom(html = "<!doctype html><html><body></body></html>", { t
     dialog.close = function () { this.open = false; };
   }
 
-  const storage = new Map(token ? [["cs-agent-admin-token", token]] : []);
+  const storage = new Map(token ? [["joule-admin-token", token]] : []);
   globalThis.sessionStorage = {
     getItem: key => storage.get(key) ?? null,
     setItem: (key, value) => storage.set(key, String(value)),
