@@ -255,10 +255,10 @@ export class ThreadMcp {
           const before = await assignments();
           const permitted = (current: Record<string,string> | undefined) => {
             const frozen = snapshot?.cua;
-            if (authority.scope === 'owner') return frozen?.spaces;
+            if (authority.scope === 'owner') return frozen?.spaces.filter(id=>!id.startsWith('android:'));
             if (!current || !before) return [];
             // 撤销再授予同一 ID 会产生新分配。旧快照缺少分配版本时不能借用今天的授权。
-            return Object.keys(current).filter(id => before[id] === current[id] &&
+            return Object.keys(current).filter(id => (!id.startsWith('android:') || authority.kind === 'message' || authority.kind === 'subagent') && before[id] === current[id] &&
               (!frozen || (frozen.spaces.includes(id) && frozen.grants?.[id] === current[id])));
           };
           if (!cuaQueryAllowed(tool.name, owned, permitted(before))) { classification = 'denied'; return mcpFailure(classification); }
@@ -294,6 +294,12 @@ export class ThreadMcp {
             classification = mutation ? 'outcome_unknown' : 'denied';
             const result = mcpFailure(classification);
             if (claimId) await this.policy.finish(claimId,result,true);
+            return result;
+          }
+          if (claimId && typeof owned.space === 'string' && owned.space.startsWith('android:') && remote.isError) {
+            classification = 'outcome_unknown';
+            const result = mcpFailure(classification);
+            await this.policy.finish(claimId,result,true);
             return result;
           }
           const {effective} = access;
@@ -469,12 +475,12 @@ export class ThreadMcp {
             // 派发子任务最多等设备目录三秒，排队和连接也计入这段时间。
             spaces = await this.queued(entry, AbortSignal.timeout(3_000), async signal => {
               const remote = await (await this.connect(entry,signal)).callTool('list_spaces',{}, {scope:mcpCallerScope(authority, this.options.callerNamespace ?? authority.scope)},signal);
-              return cuaCards(remote).map(row => row.id);
+              return cuaCards(remote).map(row => row.id).filter(id=>!id.startsWith('android:'));
             });
           } catch { continue; }
         } else {
           grants = await this.env.REGISTRY.getByName('main').cuaGrantVersions(authority.scope,revision);
-          spaces = Object.keys(grants);
+          spaces = Object.keys(grants).filter(id => !id.startsWith('android:') || authority.kind === 'message' || authority.kind === 'subagent');
         }
         if (!spaces.length || spaces.length > 1024 || !await this.current(entry)) continue;
         cua = {revision,spaces,...(grants ? {grants} : {})};

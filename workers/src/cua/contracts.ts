@@ -6,7 +6,7 @@ export const CuaBridgeToken = Type.String({ minLength:32, maxLength:256, pattern
 export const CuaSetupInput = Type.Object({ token:CuaBridgeToken }, {additionalProperties:false});
 export const CuaScope = Type.String({pattern:'^(group|private):[1-9][0-9]{0,19}$'});
 export const CuaDeviceId = Type.String({maxLength:256,
-  pattern:'^(?:relay:[a-z0-9][a-z0-9-]{6,62}[a-z0-9]|direct:(?:[a-zA-Z0-9._-]+|\\[[0-9a-fA-F:]+\\]):[0-9]{1,5})$'});
+  pattern:'^(?:android:[a-z0-9][a-z0-9-]{0,47}|relay:[a-z0-9][a-z0-9-]{6,62}[a-z0-9]|direct:(?:[a-zA-Z0-9._-]+|\\[[0-9a-fA-F:]+\\]):[0-9]{1,5})$'});
 export const CuaGrantInput = Type.Object({
   scope:CuaScope, spaces:Type.Array(CuaDeviceId, {uniqueItems:true, maxItems:64}), expectedRevision:Type.String({minLength:1,maxLength:64}),
 }, {additionalProperties:false});

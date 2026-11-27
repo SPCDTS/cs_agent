@@ -924,3 +924,35 @@ it('按设备原子保存授权会保留未变会话的 grant_id，且离线或�
     expect((await registry.cuaGrantsList()).grants).toEqual([]);
   } finally { try { ws.close(1000); } catch {} }
 });
+
+it('Android 点击仅派发给当前分配的设备，不能借机执行 shell；断线回执不重放', async () => {
+  const phone='android:fixture', who:McpAuthority={scope,kind:'message',actor:'123456',owner:false,generation:2,replyChannel:'qq'};
+  let clicks=0;
+  const {ws,registry,accessRevision}=await directoryNode((name,args)=>{
+    if (name==='call_tool' && args?.tool==='android_click_node') { clicks++; return {isError:true,content:[{type:'text',text:'outcome_unknown'}]}; }
+  });
+  try {
+    const {revision}=await registry.cuaGrantsList();
+    expect(await registry.cuaGrantsPut({scope,spaces:[phone],expectedRevision:revision},accessRevision)).toMatchObject({status:'ok'});
+    await runInDurableObject(env.THREAD.getByName(scope),async (_instance,state)=>{
+      const registry=env.REGISTRY.getByName('main');
+      const db=new DurableObjectSqliteDatabase(state.storage);
+      await db.exec(MCP_CATALOG_SCHEMA+'CREATE TABLE IF NOT EXISTS events(at INTEGER,kind TEXT,detail TEXT)');
+      const config=await registry.mcpConfig(scope);
+      const mcp=new ThreadMcp(db,env,createRegistry(),async()=>who,{...config,servers:config.servers.filter(row=>row.id===id)},
+        {scope,current:(server,digest)=>registry.mcpServerCurrent(server,digest)});
+      try {
+        await mcp.restore();
+        const snapshot=await mcp.captureCapabilities(who);
+        const name=snapshot.tools.find(n=>n.startsWith('mcp_cua_call_tool_'))!;
+        const invoke=(space:string,tool:string)=>mcp.invoke({name,args:{space,service:'driver',tool,arguments:{node_id:'node_12'}},operationId:'phone-click'},async()=>who);
+        expect((await invoke('android:other','android_click_node')).isError).toBe(true);
+        expect((await invoke(phone,'shell')).isError).toBe(true);
+        expect(clicks).toBe(0);
+        expect(JSON.stringify(await invoke(phone,'android_click_node'))).toContain('outcome_unknown');
+        expect(JSON.stringify(await invoke(phone,'android_click_node'))).toContain('outcome_unknown');
+        expect(clicks).toBe(1);
+      } finally { await mcp.close(); }
+    });
+  } finally {ws.close();}
+});

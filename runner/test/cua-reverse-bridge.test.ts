@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { AndroidRelay } from '../src/android-relay.ts';
 import { registration, serveConnection } from '../src/cua-reverse-bridge.ts';
 
 class FixtureSocket extends EventTarget {
@@ -126,7 +127,8 @@ test('两个反向会话独立协商本机目录，兼容 JSON 与 SSE，仅列�
   });
   try {
     http.listen(path); await once(http,'listening');
-    const ws = new FixtureSocket(), stop = serveConnection(ws as unknown as WebSocket,path);
+    const android = new AndroidRelay({'android:fixture':'a'.repeat(64)});
+    const ws = new FixtureSocket(), stop = serveConnection(ws as unknown as WebSocket,path,undefined,android);
     try {
       const a = randomUUID(), b = randomUUID();
       const initialize = {protocolVersion:'2025-11-25', capabilities:{},clientInfo:{name:'fixture',version:'1'}};
@@ -149,7 +151,9 @@ test('两个反向会话独立协商本机目录，兼容 JSON 与 SSE，仅列�
         assert.equal(spacePattern.test(id),false);
       assert.ok(calls.includes(upA + '/tools/list'));
       const spaces = await ws.rpc(b,'tools/call',{name:'list_spaces',arguments:{}});
-      assert.deepEqual(JSON.parse(spaces.result.content[0].text), [{id:'relay:fixture01',name:'fixture',os:'linux'}]);
+      assert.deepEqual(JSON.parse(spaces.result.content[0].text), [{id:'relay:fixture01',name:'fixture',os:'linux'},...android.cards()]);
+      const mobile = await ws.rpc(b,'tools/call',{name:'list_tools',arguments:{space:'android:fixture',service:'driver'}});
+      assert.deepEqual(JSON.parse(mobile.result.content[0].text).tools.map((t:{name:string})=>t.name),['android_get_screen_state','android_click_node']);
       assert.ok(calls.includes(upB + '/tools/call'));
       const before = calls.length;
       assert.ok((await ws.rpc(a,'tools/call',{name:'fixture_hello',arguments:{}})).error);
