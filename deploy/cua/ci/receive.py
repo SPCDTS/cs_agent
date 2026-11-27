@@ -16,7 +16,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-REPO = "SPCDTS/cs_agent"
+REPO = "SPCDTS/joule"
 UNIT = "cua-directory-bridge.service"
 ROOT = Path("/opt/cs-agent/cua")
 FILES = {
